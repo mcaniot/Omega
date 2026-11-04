@@ -7,7 +7,7 @@ use std::os::unix::ffi::OsStrExt;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Style {
-    /// Native C encoder: every control byte is `\u00xx`.
+    /// Native compact encoder: no spaces; other control bytes are `\u00xx`.
     C,
     /// `json.dumps(..., ensure_ascii=False)`.
     Py,
@@ -19,33 +19,34 @@ pub fn json_str(out: &mut Vec<u8>, s: &[u8], style: Style) {
     out.push(b'"');
     if style == Style::PyAscii {
         for c in String::from_utf8_lossy(s).chars() {
-            escape_char(out, c, style);
+            escape_char(out, c);
         }
     } else {
         for &b in s {
-            escape_byte(out, b, style);
+            escape_byte(out, b);
         }
     }
     out.push(b'"');
 }
 
-fn escape_byte(out: &mut Vec<u8>, b: u8, style: Style) {
+fn escape_byte(out: &mut Vec<u8>, b: u8) {
     match b {
         b'"' => out.extend_from_slice(b"\\\""),
         b'\\' => out.extend_from_slice(b"\\\\"),
-        b'\n' if style != Style::C => out.extend_from_slice(b"\\n"),
-        b'\r' if style != Style::C => out.extend_from_slice(b"\\r"),
-        b'\t' if style != Style::C => out.extend_from_slice(b"\\t"),
-        8 if style != Style::C => out.extend_from_slice(b"\\b"),
-        12 if style != Style::C => out.extend_from_slice(b"\\f"),
+        // Short escapes in every style: `\u000a` costs three times `\n` in model context.
+        b'\n' => out.extend_from_slice(b"\\n"),
+        b'\r' => out.extend_from_slice(b"\\r"),
+        b'\t' => out.extend_from_slice(b"\\t"),
+        8 => out.extend_from_slice(b"\\b"),
+        12 => out.extend_from_slice(b"\\f"),
         0..=31 => out.extend_from_slice(format!("\\u{:04x}", b).as_bytes()),
         _ => out.push(b),
     }
 }
 
-fn escape_char(out: &mut Vec<u8>, c: char, style: Style) {
+fn escape_char(out: &mut Vec<u8>, c: char) {
     if c.is_ascii() {
-        escape_byte(out, c as u8, style);
+        escape_byte(out, c as u8);
     } else {
         let mut units = [0u16; 2];
         for unit in c.encode_utf16(&mut units) {

@@ -184,6 +184,25 @@ PRUNE = [
 ]
 
 
+SHORT_ESCAPES = {'0008': 'b', '0009': 't', '000a': 'n', '000c': 'f', '000d': 'r'}
+LONG_ESCAPE = re.compile(r'(?<!\\)((?:\\\\)*)\\u(0008|0009|000a|000c|000d)')
+
+
+def short_escapes(value):
+    """Map JSON `\\u000a`-style escapes to `\\n`: the recorded C encoder used the long
+    form, the executor now emits the equivalent short one to save model context."""
+    return LONG_ESCAPE.sub(lambda m: m.group(1) + '\\' + SHORT_ESCAPES[m.group(2)], value)
+
+
+def comparable(observed):
+    """Observed results with JSON escapes in stdout and result.json in short form."""
+    observed = dict(observed)
+    observed['stdout'] = short_escapes(observed['stdout'])
+    if 'metadata' in observed:
+        observed['metadata'] = [short_escapes(item) for item in observed['metadata']]
+    return observed
+
+
 def execute(binary, builder):
     """Run one case in a private HOME and return its normalized observable results."""
     with tempfile.TemporaryDirectory() as home:
@@ -231,7 +250,24 @@ class GoldenTests(unittest.TestCase):
                 actual = execute(BINARY, builder)
                 if not native_metadata:
                     actual.pop("metadata")
-                self.assertEqual(actual, self.golden[name])
+                actual = comparable(actual)
+                expected = comparable(self.golden[name])
+                # These recorded outputs exceeded the old inline/JSON budgets. Derive
+                # only their new summary from the frozen logs; retain all other evidence.
+                if name in {'large_success', 'weak_words', 'passed_lines',
+                            'unicode_failure_large', 'json_inflation'}:
+                    actual = dict(actual)
+                    actual_summary = json.loads(actual.pop('stdout').replace(':<D>', ':0'))
+                    expected = dict(expected)
+                    expected_summary = json.loads(expected.pop('stdout').replace(':<D>', ':0'))
+                    out, err = expected['logs'][0]
+                    if out:
+                        expected_summary['stdout'] = out
+                    if err:
+                        expected_summary['stderr'] = err
+                    expected_summary['diagnostics'] = []
+                    self.assertEqual(actual_summary, expected_summary)
+                self.assertEqual(actual, expected)
 
     def test_log_limit(self):
         # Bytes written before the kill lands are timing dependent, so compare status and exit code only.

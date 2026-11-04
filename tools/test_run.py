@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shlex
 import subprocess
 import sys
 import time
@@ -22,11 +23,15 @@ def _readable(path):
         return False
 
 
-def invoke(code, *options):
-    process = subprocess.run([*RUNNER, 'run', *options, '--', sys.executable, '-c', code], capture_output=True)
+def invoke(code, *options, shell=False):
+    command = [sys.executable, '-c', code]
+    arguments = ['--shell', shlex.join(command)] if shell else ['--', *command]
+    process = subprocess.run([*RUNNER, 'run', *options, *arguments], capture_output=True)
     assert not process.stderr, process.stderr
-    assert len(process.stdout) <= 4096, len(process.stdout)
+    assert len(process.stdout) <= 12 * 1024 + 1, len(process.stdout)
     result = json.loads(process.stdout)
+    if 'stdout' not in result and 'stderr' not in result:
+        assert len(process.stdout) <= 4001, len(process.stdout)
     return process.returncode, result, Path(result['evidence'])
 
 
@@ -50,7 +55,8 @@ class CaptureTests(unittest.TestCase):
         self.assertIn('Traceback', (path/'stderr.log').read_text())
         self.assertIn('unsafe limit', (path/'stderr.log').read_text())
         self.assertIn('controller.cpp:42', json.dumps(result['diagnostics']))
-        _, result, _ = invoke("print('t.py::test_reports_failure PASSED\\n'*100+'E   real error here\\n'+'x'*3000);raise SystemExit(1)")
+        _, result, _ = invoke("print('t.py::test_reports_failure PASSED\\n'*100+'E   real error here\\n'+'x'*3000);raise SystemExit(1)",
+                              '--inline-bytes', '0')
         self.assertIn('real error here', json.dumps(result['diagnostics']))
         self.assertNotIn('PASSED', json.dumps(result['diagnostics']))
 
@@ -201,12 +207,43 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual((result['stdout'], result['stderr']), ('short\n', 'warn\n'))
         self.assertEqual((path/'stdout.log').read_text(), 'short\n')
-        _, result, _ = invoke("print('x'*3000)")
+        _, result, _ = invoke("print('x'*8192)")
         self.assertNotIn('stdout', result)
         _, result, _ = invoke("print('short')", '--inline-bytes', '0')
         self.assertNotIn('stdout', result)
-        _, result, _ = invoke("import sys;sys.stdout.buffer.write(b'\\x01'*2000)")
+        _, result, _ = invoke("import sys;sys.stdout.buffer.write(b'\\x01'*8192)")
         self.assertNotIn('stdout', result)
+
+    def test_inline_thresholds_and_overrides(self):
+        # --shell forces the full parser/encoder path; argv exercises the native fast path.
+        for shell in (False, True):
+            for size in (8191, 8192, 8193):
+                with self.subTest(shell=shell, size=size):
+                    out = 'x' * (size // 2)
+                    err = 'y' * (size - len(out))
+                    status, result, path = invoke(
+                        f'import sys;sys.stdout.write({out!r});sys.stderr.write({err!r})', shell=shell)
+                    self.assertEqual(status, 0)
+                    self.assertEqual((path/'stdout.log').read_text(), out)
+                    self.assertEqual((path/'stderr.log').read_text(), err)
+                    if size <= 8192:
+                        self.assertEqual((result['stdout'], result['stderr']), (out, err))
+                    else:
+                        self.assertNotIn('stdout', result)
+                        self.assertNotIn('stderr', result)
+            for limit, size, included in ((0, 1, False), (32, 32, True), (32, 33, False),
+                                          (9000, 8500, True)):
+                with self.subTest(shell=shell, limit=limit, size=size):
+                    _, result, _ = invoke(f'import sys;sys.stdout.write("x"*{size})',
+                                          '--inline-bytes', str(limit), shell=shell)
+                    self.assertEqual('stdout' in result, included)
+
+    def test_escaped_inline_budget(self):
+        for shell in (False, True):
+            with self.subTest(shell=shell):
+                _, result, path = invoke("import sys;sys.stdout.buffer.write(b'\\x01'*8192)", shell=shell)
+                self.assertNotIn('stdout', result)
+                self.assertEqual((path/'stdout.log').read_bytes(), b'\x01' * 8192)
 
     def test_missing_executable(self):
         process = subprocess.run([*RUNNER, 'run', '--', '/no/such/executable'], capture_output=True)

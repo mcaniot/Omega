@@ -10,7 +10,6 @@ use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 
 const PATH_MAX: usize = 4096;
-const BUDGET: usize = 4000;
 
 pub struct Config {
     pub command: Vec<Arg>,
@@ -381,7 +380,7 @@ fn summary(cfg: &Config, code: i32, crash_signal: i32, sizes: (i64, i64), status
     };
     let total = sizes.0 + sizes.1;
     let mut simple = !cfg.python;
-    if total <= cfg.inline_bytes && total <= BUDGET as i64 {
+    if total <= cfg.inline_bytes && total <= diag::INLINE_BUDGET as i64 {
         for (value, size, fd) in [(&mut s.stdout, sizes.0, fds.0), (&mut s.stderr, sizes.1, fds.1)] {
             let data = diag::read_fd(fd);
             if data.iter().any(|&b| b >= 128 || b == 0 || b == 27) {
@@ -397,7 +396,7 @@ fn summary(cfg: &Config, code: i32, crash_signal: i32, sizes: (i64, i64), status
     if simple {
         let mut line = s.encode(Style::C);
         line.push(b'\n');
-        if line.len() <= BUDGET + 1 {
+        if line.len() <= diag::INLINE_BUDGET + 1 {
             emit(&line);
             return;
         }

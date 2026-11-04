@@ -86,7 +86,7 @@ fn native_config(args: &[Arg]) -> Option<Config> {
     }
     let (mut cwd_arg, mut shell): (Option<&Arg>, Option<&Arg>) = (None, None);
     let mut shell_executable: Arg = b"/bin/bash".to_vec();
-    let (mut timeout, mut grace, mut inline_bytes, mut max_log_bytes) = (0.0, 10.0, 2048i64, 2i64 << 30);
+    let (mut timeout, mut grace, mut inline_bytes, mut max_log_bytes) = (0.0, 10.0, 8192i64, 2i64 << 30);
     let mut pos = 0;
     while pos < args.len() {
         let arg = args[pos].as_slice();
@@ -181,7 +181,7 @@ fn python_run(p: &argparse::Parsed) -> Config {
         home,
         timeout: timeout.unwrap_or(0.0),
         grace,
-        inline_bytes: p.int("inline_bytes").unwrap_or(2048),
+        inline_bytes: p.int("inline_bytes").unwrap_or(8192),
         max_log_bytes,
         python: true,
     }

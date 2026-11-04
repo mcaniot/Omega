@@ -1,4 +1,4 @@
-//! Result summary: inline output, ranked diagnostics and the 4000-byte budget.
+//! Result summary: inline output and ranked diagnostics with separate JSON budgets.
 
 use crate::py::{self, Style};
 use regex::Regex;
@@ -9,6 +9,8 @@ use std::io::BufRead;
 const EDGE: usize = 4;
 const LIMIT: usize = 8;
 const BUDGET: usize = 4000;
+// Allow 8 KiB of output plus metadata and JSON escaping; large expansions fall back to diagnostics.
+pub const INLINE_BUDGET: usize = 12 * 1024;
 
 #[derive(Clone)]
 pub struct Item {
@@ -238,7 +240,7 @@ pub fn finalize(mut s: Summary, inline_bytes: i64, stdout_fd: i32, stderr_fd: i3
         s.diagnostics = Vec::new();
         inlined = true;
     }
-    if encoded(&s) > BUDGET || !inlined {
+    if encoded(&s) > INLINE_BUDGET || !inlined {
         s.stdout = None;
         s.stderr = None;
         s.diagnostics = if s.exit_code != 0 { excerpts(stdout_fd, stderr_fd) } else { Vec::new() };

@@ -19,7 +19,7 @@ Read roots are this checkout and `~/.agents/tools`. Hidden/sensitive paths,
 hardlinks, non-owned files, files over 16 MiB and outside roots are rejected.
 Symlink aliases are resolved and the final open is anchored beneath a trusted
 root with Linux openat2. Text results are capped at 64 KiB and then captured by
-the executor (default inline bound 2 KiB). Use normal approval for unsupported
+the executor (default inline bound 8 KiB, with a 12 KiB JSON cap). Use normal approval for unsupported
 or sensitive reads. This capability fixes HOME, PATH and cwd; `--native-only`
 prevents falling into the generic legacy execution path. Internal helper verbs
 are not covered by allow rules.

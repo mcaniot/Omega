@@ -23,11 +23,17 @@ SIGKILL, noninteractive stdin, bounded inline output and a 25 ms output-limit/ti
 monitoring interval. SIGCHLD wakes the monitor immediately when a command exits.
 Children are gated until the sentinel exists.
 
+Combined stdout/stderr up to 8 KiB is returned inline by default (`--inline-bytes N`,
+0 disables), within a 12 KiB JSON budget. Large JSON expansions fall back to the
+summary; failure diagnostics retain their separate 4,000-byte budget. Complete logs
+are always preserved. Reuse inline output; expand larger logs with targeted `inspect`
+slices rather than reading a log over 8 KiB in full.
+
 Evidence directories and writes are anchored to nofollow directory descriptors under the
 configured tasks root. Queued control signals are drained before status selection and stay
 blocked through finalization, so signals racing command exit cannot leave RUNNING-only
 evidence. Rich output diagnostics, ANSI removal, Unicode/invalid UTF-8 output and inline
-output above the 4,000-byte budget are finalized in-process.
+output requiring the full JSON encoder are finalized in-process.
 
 `run --native-only ...` (flag first) returns exit 2 on inputs the native path does not
 support (abbreviations, `--opt=value`, usage/help, unusual filesystem encoding, invalid
