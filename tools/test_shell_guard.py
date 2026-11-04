@@ -1,18 +1,51 @@
-"""Behavior checks for shell isolation without modifying native permissions."""
+"""Tests for the shell_guard PreToolUse hook (native binary, hook JSON on stdin, decision JSON on stdout).
+
+OMEGA_SHELL_GUARD_BINARY selects the guard under test (default: the deployed binary).
+Hand-written cases state the policy; fixtures/shell_guard_golden.json.gz holds a few
+thousand recorded (stdin, stdout) pairs, including malformed JSON, deep nesting,
+mutated commands and several HOME values, that every build must reproduce byte for byte.
+The guard derives its accepted paths from HOME, so every call sets it explicitly.
+"""
+import base64
+import gzip
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
-import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
-import shell_guard as guard
+BINARY = os.environ.get('OMEGA_SHELL_GUARD_BINARY', str(Path.home() / '.agents/tools/shell_guard'))
+GOLDEN = Path(__file__).with_name('fixtures') / 'shell_guard_golden.json.gz'
+HOME = '/home/tester'
+NATIVE = f'{HOME}/.agents/tools/robot-exec/native/run'
+LOCAL_READ = f'{HOME}/.agents/tools/robot-exec/local-read'
+
+
+def guard(stdin, home=HOME):
+    """(exit code, stdout, stderr) of one hook invocation."""
+    env = {'PATH': '/usr/bin:/bin', 'LANG': 'en_US.UTF-8', 'LC_ALL': 'en_US.UTF-8'}
+    if home is not None:
+        env['HOME'] = home
+    done = subprocess.run([BINARY], input=stdin, capture_output=True, env=env, timeout=30)
+    return done.returncode, done.stdout, done.stderr
 
 
 class GuardTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not os.access(BINARY, os.X_OK):
+            raise unittest.SkipTest(f'missing executable {BINARY}')
+
+    def evaluate(self, payload):
+        code, out, err = guard(json.dumps(payload).encode())
+        self.assertEqual((code, err), (0, b''))
+        self.assertLess(len(out), 1000)
+        return json.loads(out)
+
     def call(self, command, **metadata):
-        return guard.evaluate({'tool_name': 'Bash', 'tool_input': {
-            'command': command, **metadata}})
+        return self.evaluate({'tool_name': 'Bash', 'tool_input': {'command': command, **metadata}})
 
     def assertDenied(self, result):
         self.assertEqual(result['hookSpecificOutput']['hookEventName'], 'PreToolUse')
@@ -20,52 +53,53 @@ class GuardTest(unittest.TestCase):
         self.assertTrue(result['hookSpecificOutput']['permissionDecisionReason'])
 
     def test_run_and_inspect_leave_native_permissions_unchanged(self):
-        for python in ('python3', sys.executable):
-            for args in [('run', '--', 'pytest', '-q'), ('inspect', '/tmp/evidence')]:
-                command = shlex.join([python, guard.WRAPPER, *args])
-                self.assertEqual(self.call(command, timeout=10, description='test'), {})
+        for args in [('run', '--', 'pytest', '-q'), ('inspect', '/tmp/evidence')]:
+            self.assertEqual(self.call(shlex.join([NATIVE, *args]), timeout=10, description='test'), {})
 
     def test_quoted_shell_script_is_only_wrapper_input(self):
         script = 'echo "$HOME"; printf x >&2; echo $(date)\nexit 3'
-        self.assertEqual(self.call(shlex.join([
-            'python3', guard.WRAPPER, 'run', '--shell', script])), {})
+        self.assertEqual(self.call(shlex.join([NATIVE, 'run', '--shell', script])), {})
 
     def test_outer_shell_execution_is_denied(self):
-        base = shlex.join(['python3', guard.WRAPPER, 'run', '--', 'echo', 'ok'])
+        base = shlex.join([NATIVE, 'run', '--', 'echo', 'ok'])
         for extra in ['; echo leak', ' && echo leak', ' | cat', ' > /tmp/log',
-                      ' 2>&1', ' &', '\necho leak', ' $(echo leak)', ' '+chr(96)+'echo leak'+chr(96)]:
+                      ' 2>&1', ' &', '\necho leak', ' $(echo leak)', ' ' + chr(96) + 'echo leak' + chr(96)]:
             with self.subTest(extra=extra):
                 self.assertDenied(self.call(base + extra))
         for prefix in ['FOO=x ', 'exec ', 'env ', 'echo leak; ']:
             self.assertDenied(self.call(prefix + base))
 
-    def test_spoofed_paths_or_interpreters_are_denied(self):
-        for argv in [
-            ['python3', guard.WRAPPER + '.evil', 'run'],
-            ['python3', guard.WRAPPER.replace('/tools/', '/tools/../tools/'), 'run'],
-            ['/tmp/python3', guard.WRAPPER, 'run'],
-            ['python3', '-c', 'print("leak")', guard.WRAPPER, 'run'],
-            ['python3', guard.WRAPPER, 'unknown'],
-        ]:
-            self.assertDenied(self.call(shlex.join(argv)))
+    def test_spoofed_paths_and_unknown_subcommands_are_denied(self):
+        for argv in [[NATIVE + '.evil', 'run'],
+                     [NATIVE.replace('/tools/', '/tools/../tools/'), 'run'],
+                     ['/tmp/run', 'run'],
+                     [NATIVE, 'unknown'],
+                     [NATIVE],
+                     ['python3', f'{HOME}/.agents/tools/run.py', 'run', '--', 'echo', 'ok'],
+                     ['python3', '-c', 'print("leak")', NATIVE, 'run']]:
+            with self.subTest(argv=argv):
+                self.assertDenied(self.call(shlex.join(argv)))
+
+    def test_denial_names_the_native_wrapper(self):
+        reason = self.call('pytest -q')['hookSpecificOutput']['permissionDecisionReason']
+        self.assertIn(f'{NATIVE} run [--cwd DIR] [--timeout S] -- COMMAND ARGS', reason)
 
     def test_bad_payloads_and_unwrapped_commands_are_denied(self):
         for payload in [None, [], {}, {'tool_name': None}, {'tool_name': 'Bash'},
                         {'tool_name': 'Bash', 'tool_input': []}]:
-            self.assertDenied(guard.evaluate(payload))
+            self.assertDenied(self.evaluate(payload))
         for command in [None, 1, '', ' ', 'pytest -q', 'echo "unterminated']:
             self.assertDenied(self.call(command))
 
     def test_other_tools_pass_without_an_approval(self):
-        self.assertEqual(guard.evaluate({'tool_name': 'Read'}), {})
+        self.assertEqual(self.evaluate({'tool_name': 'Read'}), {})
 
     def test_canonical_quoted_metacharacters_are_inert(self):
-        argv = ['python3', guard.WRAPPER, 'run', '--', 'echo', ';', '>',
-                '$(date)', chr(96)+'date'+chr(96), "a'b", 'line\nbreak']
+        argv = [NATIVE, 'run', '--', 'echo', ';', '>', '$(date)', chr(96) + 'date' + chr(96), "a'b", 'line\nbreak']
         self.assertEqual(self.call(shlex.join(argv)), {})
 
     def decision(self, *inner, shell=None):
-        argv = ['python3', guard.WRAPPER, 'run']
+        argv = [NATIVE, 'run']
         argv += ['--shell', shell] if shell is not None else ['--', *inner]
         result = self.call(shlex.join(argv))
         return result.get('hookSpecificOutput', {}).get('permissionDecision', 'pass')
@@ -97,24 +131,75 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(self.decision(shell='git log --oneline | head'), 'pass')
 
     def test_inspect_is_never_policy_gated(self):
-        self.assertEqual(self.call(shlex.join(['python3', guard.WRAPPER, 'inspect', '/tmp/sudo'])), {})
+        self.assertEqual(self.call(shlex.join([NATIVE, 'inspect', '/tmp/sudo'])), {})
+
+    def test_prune_apply_asks(self):
+        self.assertEqual(self.call(shlex.join([NATIVE, 'prune'])), {})
+        result = self.call(shlex.join([NATIVE, 'prune', '--apply']))
+        self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'ask')
 
     def test_zsh_equals_argument_denied(self):
-        self.assertDenied(self.call(shlex.join(['python3', guard.WRAPPER, 'run', '--', 'echo', '=ls'])))
+        self.assertDenied(self.call(shlex.join([NATIVE, 'run', '--', 'echo', '=ls'])))
 
-    def test_internal_error_fails_closed(self):
-        code = ('import sys,io,json;sys.path.insert(0,%r);import shell_guard as g;'
-                'g.evaluate=lambda p:1/0;sys.stdin=io.StringIO("{}");g.main()') % str(Path(guard.__file__).parent)
-        result = subprocess.run([sys.executable, '-c', code], text=True, capture_output=True)
-        self.assertDenied(json.loads(result.stdout))
+    def test_local_read_forms(self):
+        for argv in [[LOCAL_READ, 'status'], [LOCAL_READ, 'files'], [LOCAL_READ, 'text', 'a', 'b'],
+                     [LOCAL_READ, 'find', 'a', 'b']]:
+            self.assertEqual(self.call(shlex.join(argv)), {})
+        for argv in [[LOCAL_READ], [LOCAL_READ, 'bogus'], [LOCAL_READ, 'status', 'x'], [LOCAL_READ, 'find', 'a', 'b', 'c']]:
+            self.assertDenied(self.call(shlex.join(argv)))
+
+    def test_internal_failure_fails_closed(self):
+        # Nesting beyond the JSON parser's depth limit must deny, never pass through.
+        code, out, _ = guard(b'{"tool_name":"Read","a":' + b'[' * 20000 + b']' * 20000 + b'}')
+        self.assertEqual(code, 0)
+        result = json.loads(out)
+        self.assertDenied(result)
+        self.assertIn('Guard internal error', result['hookSpecificOutput']['permissionDecisionReason'])
 
     def test_cli_outputs_valid_bounded_json_for_malformed_input(self):
-        result = subprocess.run([sys.executable, str(Path(guard.__file__))],
-                                input='{bad json', text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stderr, '')
-        self.assertLess(len(result.stdout), 1000)
-        self.assertDenied(json.loads(result.stdout))
+        code, out, err = guard(b'{bad json')
+        self.assertEqual((code, err), (0, b''))
+        self.assertLess(len(out), 1000)
+        self.assertDenied(json.loads(out))
+
+
+class GoldenTest(unittest.TestCase):
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.access(BINARY, os.X_OK):
+            raise unittest.SkipTest(f'missing executable {BINARY}')
+        with gzip.open(GOLDEN, 'rt', encoding='utf-8') as handle:
+            cls.golden = json.load(handle)
+
+    def test_recorded_decisions(self):
+        for variant in self.golden['variants']:
+            home = variant['home']
+            stdins = [base64.b64decode(case[0]) for case in variant['cases']]
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda stdin: guard(stdin, home), stdins))
+            bad = [(stdin[:200], result, case[1]) for stdin, result, case in zip(stdins, results, variant['cases'])
+                   if result != (0, case[1].encode(), b'')]
+            self.assertEqual(bad[:3], [], f'home={home!r}: {len(bad)} of {len(stdins)} differ')
+
+    def test_fixture_covers_every_decision_kind(self):
+        outcomes = set()
+        for variant in self.golden['variants']:
+            for _, stdout in variant['cases']:
+                hook = json.loads(stdout).get('hookSpecificOutput', {})
+                outcomes.add((hook.get('permissionDecision', 'pass'), hook.get('permissionDecisionReason', '').split(' Shell output')[0]))
+        kinds = {kind for kind, _ in outcomes}
+        self.assertEqual(kinds, {'deny', 'ask', 'pass'})
+        for label in ['privilege escalation', 'git force push', 'rm -rf', 'raw device write',
+                      'sensitive credential access', 'git history or remote change', 'git destructive change',
+                      'recursive delete', 'remote host access', 'network upload', 'possible robot actuation',
+                      'possible secret exposure', 'Invalid hook JSON.', 'Invalid hook input.',
+                      'Missing shell command.', 'Malformed shell quoting.', 'Unwrapped or noncanonical shell command.',
+                      'Unsupported read capability or arguments.', 'Argument starting with "=" is expanded by zsh.',
+                      'Deleting old evidence requires explicit user approval.',
+                      'Guard internal error (RecursionError).']:
+            self.assertTrue(any(label in reason for _, reason in outcomes), label)
 
 
 if __name__ == '__main__':

@@ -10,7 +10,8 @@ import sys
 import time
 import unittest
 
-RUN = Path(__file__).with_name('run.py')
+# OMEGA_RUN_BINARY selects the executor under test (default: the deployed binary).
+RUNNER = [os.environ.get("OMEGA_RUN_BINARY", str(Path.home() / ".agents/tools/robot-exec/native/run"))]
 
 
 def _readable(path):
@@ -22,7 +23,7 @@ def _readable(path):
 
 
 def invoke(code, *options):
-    process = subprocess.run([sys.executable, str(RUN), 'run', *options, '--', sys.executable, '-c', code], capture_output=True)
+    process = subprocess.run([*RUNNER, 'run', *options, '--', sys.executable, '-c', code], capture_output=True)
     assert not process.stderr, process.stderr
     assert len(process.stdout) <= 4096, len(process.stdout)
     result = json.loads(process.stdout)
@@ -97,7 +98,7 @@ class CaptureTests(unittest.TestCase):
     def test_nonzero_and_shell(self):
         status, _, _ = invoke('raise SystemExit(37)')
         self.assertEqual(status, 37)
-        process = subprocess.run([sys.executable, str(RUN), 'run', '--shell', 'printf evidence; exit 19'], capture_output=True)
+        process = subprocess.run([*RUNNER, 'run', '--shell', 'printf evidence; exit 19'], capture_output=True)
         self.assertEqual(process.returncode, 19)
         result = json.loads(process.stdout)
         self.assertEqual((Path(result['evidence'])/'stdout.log').read_text(), 'evidence')
@@ -111,7 +112,7 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual((path/'stdout.log').read_text(), 'started\n')
 
     def test_interrupt(self):
-        process = subprocess.Popen([sys.executable, str(RUN), 'run', '--', sys.executable, '-c', 'import time;print("started",flush=True);time.sleep(30)'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen([*RUNNER, 'run', '--', sys.executable, '-c', 'import time;print("started",flush=True);time.sleep(30)'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         time.sleep(0.3)
         process.send_signal(signal.SIGTERM)
         out, err = process.communicate(timeout=5)
@@ -130,7 +131,7 @@ class CaptureTests(unittest.TestCase):
 
     def test_wrapper_sigkill_does_not_orphan_child(self):
         marker = f'orphan-probe-{os.getpid()}-{time.monotonic_ns()}'
-        process = subprocess.Popen([sys.executable, str(RUN), 'run', '--kill-after', '0.5', '--', sys.executable, '-c',
+        process = subprocess.Popen([*RUNNER, 'run', '--kill-after', '0.5', '--', sys.executable, '-c',
                                     f'import time;time.sleep(30) # {marker}'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         time.sleep(0.5)
         process.kill()
@@ -155,7 +156,7 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual((path/name).stat().st_mode & 0o077, 0, name)
 
     def test_prune_defaults_to_dry_run(self):
-        process = subprocess.run([sys.executable, str(RUN), 'prune', '--days', '100000'], capture_output=True)
+        process = subprocess.run([*RUNNER, 'prune', '--days', '100000'], capture_output=True)
         result = json.loads(process.stdout)
         self.assertEqual((process.returncode, result['applied'], result['runs']), (0, False, 0))
 
@@ -167,7 +168,7 @@ class CaptureTests(unittest.TestCase):
 
     def test_long_line_bounded_inspection_and_pagination(self):
         _, _, path = invoke("import sys;sys.stdout.buffer.write(b'\\x00'*200000+b'END\\n')")
-        args = [sys.executable, str(RUN), 'inspect', str(path), '--stream', 'stdout', '--lines', '40', '--max-bytes', '7000']
+        args = [*RUNNER, 'inspect', str(path), '--stream', 'stdout', '--lines', '40', '--max-bytes', '7000']
         process = subprocess.run(args, capture_output=True)
         self.assertLess(len(process.stdout), 8192)
         result = json.loads(process.stdout)
@@ -181,16 +182,16 @@ class CaptureTests(unittest.TestCase):
 
     def test_inspect_search_and_bounds(self):
         _, _, path = invoke("print('routine\\n'*10000+'fatal marker\\nmore')")
-        process = subprocess.run([sys.executable, str(RUN), 'inspect', str(path), '--stream', 'stdout', '--search', 'fatal marker'], capture_output=True)
+        process = subprocess.run([*RUNNER, 'inspect', str(path), '--stream', 'stdout', '--search', 'fatal marker'], capture_output=True)
         result = json.loads(process.stdout)
         self.assertEqual(len(result['fragments']), 1)
         self.assertIn('fatal marker', result['fragments'][0]['text'])
-        invalid = subprocess.run([sys.executable, str(RUN), 'inspect', str(path), '--lines', '100'], capture_output=True)
+        invalid = subprocess.run([*RUNNER, 'inspect', str(path), '--lines', '100'], capture_output=True)
         self.assertEqual(invalid.returncode, 2)
 
     def test_search_across_chunk_boundary(self):
         _, _, path = invoke("print('x'*1020+'fatal boundary marker'+'y'*5000)")
-        process = subprocess.run([sys.executable, str(RUN), 'inspect', str(path), '--stream', 'stdout', '--search', 'fatal boundary marker'], capture_output=True)
+        process = subprocess.run([*RUNNER, 'inspect', str(path), '--stream', 'stdout', '--search', 'fatal boundary marker'], capture_output=True)
         result = json.loads(process.stdout)
         self.assertEqual(len(result['fragments']), 1)
         self.assertIn('fatal boundary marker', result['fragments'][0]['text'])
@@ -208,7 +209,7 @@ class CaptureTests(unittest.TestCase):
         self.assertNotIn('stdout', result)
 
     def test_missing_executable(self):
-        process = subprocess.run([sys.executable, str(RUN), 'run', '--', '/no/such/executable'], capture_output=True)
+        process = subprocess.run([*RUNNER, 'run', '--', '/no/such/executable'], capture_output=True)
         result = json.loads(process.stdout)
         self.assertEqual(process.returncode, 127)
         self.assertIn('FileNotFoundError', (Path(result['evidence'])/'stderr.log').read_text())

@@ -15,17 +15,12 @@ Official references inspected:
 
 Bash is the canonical shell matcher, including Codex exec_command and nested code mode. Hook shell input is tool_input.command. Native PreToolUse denial is hookSpecificOutput with hookEventName=PreToolUse, permissionDecision=deny and permissionDecisionReason. Returning {} leaves normal execution permissions intact.
 
-Codex rewrite requires allow plus updatedInput; Claude allow can bypass normal approval. The implemented guard does not rewrite or return allow. It requires a canonical shlex.join command invoking python3 and the exact ~/.agents/tools/run.py path with run or inspect. Outer shell operators/substitution are rejected; quoted --shell contents are captured inside the wrapper.
+Codex rewrite requires allow plus updatedInput; Claude allow can bypass normal approval. The implemented guard does not rewrite or return allow. It requires a canonical shlex.join command invoking the exact ~/.agents/tools/robot-exec/native/run path with run, inspect or prune, or the fixed local-read forms. Outer shell operators/substitution are rejected; quoted --shell contents are captured inside the wrapper.
 
 New Codex hooks require native /hooks trust; no CLI trust subcommand was found. Do not forge trusted_hash or use global trust bypass. Hooks can fail open on operational errors and specialized execution paths can bypass them. This is a guard for supported shell calls, not a universal security boundary. Native runtime activation is separate from unit-test success.
 
 ## Verification
 
-Exact command:
-python3 /home/mcaniot/.agents/tools/run.py run --cwd /home/mcaniot/.agents/tools -- python3 -m unittest -v test_shell_guard
+The guard is the Rust binary `shell_guard` (`rust/`); `tools/test_shell_guard.py` drives it with hand-written policy cases and a recorded fixture (`OMEGA_SHELL_GUARD_BINARY` overrides the deployed binary). Coverage: run/inspect/prune, quoted shell bodies, outer shell injection, path/interpreter spoofing, invalid payloads, non-shell tools, malformed stdin JSON, fail-closed internal errors.
 
-Observed: exit 0; 8 tests passed; command duration 0.0765 seconds; complete stderr 1152 bytes stored externally.
-Evidence: /home/mcaniot/.agents/tasks/evidence/20261103T193226-26n3z_eu/result.json and stderr.log.
-Coverage: run/inspect, metadata tolerance, quoted shell bodies, outer shell injection, path/interpreter spoofing, invalid payloads, non-shell tools, malformed stdin JSON.
-
-Native hook activation, fresh-session discovery, live isolation, compaction and token benchmarks remain the integrating agent's responsibility.
+Native hook activation, fresh-session discovery, live isolation, compaction and token benchmarks remain the integrating agent responsibility.

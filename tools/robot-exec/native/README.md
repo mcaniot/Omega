@@ -1,64 +1,50 @@
-Native evidence executor (Linux/POSIX)
-====================================
+Native evidence executor
+========================
 
-Build:
+`run` is a Rust binary (`rust/src/bin/run/`, crate `omega-tools`) installed as
+`~/.agents/tools/robot-exec/native/run`. It has no Python or other fallback.
 
-    cc -std=c11 -O2 -Wall -Wextra -Werror -o run run.c
+Build and install (from the repository root):
 
-Use the native binary directly to avoid Python startup:
+    python3 install.py --apply        # cargo build --release --locked, then atomic 0700 install
+    cargo build --release --locked    # in rust/, build only
 
-    /absolute/path/to/run run --timeout 120 -- command arguments
+Usage:
 
-`run.py` is an optional legacy launcher for Python callers and tests; it adds
-Python startup and immediately replaces itself with `run`.
+    /home/mcaniot/.agents/tools/robot-exec/native/run run --timeout 120 -- command arguments
+    /home/mcaniot/.agents/tools/robot-exec/native/run run --shell 'script'
+    /home/mcaniot/.agents/tools/robot-exec/native/run inspect EVIDENCE --stream stderr --lines 20
+    /home/mcaniot/.agents/tools/robot-exec/native/run prune [--days N] [--apply]
 
-The native path executes `run` with the original CLI flags and writes complete,
-private stdout.log/stderr.log/result.json evidence under ~/.agents/tasks/evidence.
-It retains original exit/status meanings, signal forwarding, process group
-cleanup, a separate sentinel for wrapper SIGKILL, noninteractive stdin, bounded
-inline output and a 25 ms output-limit/timeout monitoring interval. SIGCHLD wakes
-the monitor immediately when a command exits. The sentinel is forked without a
-second interpreter. Children are gated until the sentinel exists.
+It writes complete, private stdout.log/stderr.log/result.json evidence under
+~/.agents/tasks/evidence. It keeps exit/status meanings (timeout 124, log limit 125,
+128+signal), signal forwarding, process group cleanup, a separate sentinel for wrapper
+SIGKILL, noninteractive stdin, bounded inline output and a 25 ms output-limit/timeout
+monitoring interval. SIGCHLD wakes the monitor immediately when a command exits.
+Children are gated until the sentinel exists.
 
-`run --native-only ...` (flag first) disables compatibility fallback and returns
-exit 2 on unsupported inputs. Narrow trusted capability launchers must use this
-mode with fixed HOME/PATH/cwd. Rich output diagnostics still work through pinned
-metadata/stdout/stderr descriptors; they never reopen mutable evidence names.
-Evidence directories and writes are anchored to nofollow directory descriptors
-under the configured tasks root. Queued control signals are drained before
-status selection and stay blocked through finalization to prevent RUNNING-only
-evidence when signals race command exit.
+Evidence directories and writes are anchored to nofollow directory descriptors under the
+configured tasks root. Queued control signals are drained before status selection and stay
+blocked through finalization, so signals racing command exit cannot leave RUNNING-only
+evidence. Rich output diagnostics, ANSI removal, Unicode/invalid UTF-8 output and inline
+output above the 4,000-byte budget are finalized in-process.
 
-`inspect`, `prune`, unknown options/abbreviations, unusual filesystem encoding and
-invalid working directories defer to adjacent `run-original.py`. Rich diagnostic
-extraction, ANSI removal, Unicode/invalid UTF-8 output, and JSON-escaped inline
-output exceeding the 4,000-byte budget use adjacent `finalize.py`, which imports
-the unchanged original diagnostic helpers. Both fallback paths use `python3 -I`.
-Simple output and successful verbose commands require no Python postprocessing.
+`run --native-only ...` (flag first) returns exit 2 on inputs the native path does not
+support (abbreviations, `--opt=value`, usage/help, unusual filesystem encoding, invalid
+working directories). Narrow trusted capability launchers such as `local-read` must use it
+with fixed HOME/PATH/cwd.
 
-This executor is not an authorization boundary and confers no permissions. Never
-approve it as a broad executable prefix: it intentionally accepts arbitrary argv
-and shell payloads. Hook/native sandbox approvals remain separate. Only bounded,
-argument-validated capability entry points may receive narrow approval rules.
+This executor is not an authorization boundary and confers no permissions. Never approve it
+as a broad executable prefix: it intentionally accepts arbitrary argv and shell payloads.
+Hook/native sandbox approvals remain separate.
 
-Install this directory as a unit so the binary and compatibility files remain
-adjacent. Preserve the original global run.py for rollback. No global files have
-been installed or changed by this implementation.
+Tests (default binary is the deployed one; `OMEGA_RUN_BINARY` selects another, for example
+`rust/target/release/run`):
 
-Validation:
+    python3 -m pytest tools hooks
 
-    python3 test_run.py
-    python3 benchmark.py
-
-The first runs the existing 21 behavioral tests through the native compatibility
-launcher. The benchmark invokes the binary directly, randomizes paired original,
-native and direct commands (60 samples plus 3 warmups each), and writes every
-wall-clock sample, exact command, environment and SHA256 to benchmark.json.
-
-Additional checks:
-
-    python3 -m unittest discover -s . -p 'test_*.py'
-
-These add five boundary tests, including 20 signal/exit races, symlink evidence
-root rejection without permission changes/writes, fail-closed native-only input,
-Unicode/invalid UTF-8/ANSI output and invalid-cwd compatibility.
+- `tools/test_run.py`: behavior of the executor.
+- `native/test_boundary.py`: signal/exit races, symlink evidence-root rejection, fail-closed
+  native-only input, Unicode/invalid UTF-8/ANSI output, invalid-cwd handling.
+- `native/test_golden.py`: replays `native/fixtures/run_golden.json.gz`, outputs recorded from
+  the original implementation (volatile values normalized).
