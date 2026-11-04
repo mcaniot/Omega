@@ -36,6 +36,16 @@ BINARIES = {
     'shell_guard': AGENTS / 'tools/shell_guard',
     'session_name': CLAUDE / 'hooks/session_name',
 }
+COMMANDS = {
+    'omega-run': BINARIES['run'],
+    'omega-inspect': BINARIES['run'],
+    'omega-prune': BINARIES['run'],
+    'omega-read': BINARIES['local_read'],
+    'Ω-run': BINARIES['run'],
+    'Ω-inspect': BINARIES['run'],
+    'Ω-prune': BINARIES['run'],
+    'Ω-read': BINARIES['local_read'],
+}
 # Codex scans ~/.agents/skills natively; Claude sees only skills linked here.
 CLAUDE_SKIP_SKILLS = {'orchestration'}
 
@@ -67,6 +77,11 @@ def links():
         yield CLAUDE / 'agents' / agent.name, agent
     for hook in deployable(REPO / 'hooks'):
         yield CLAUDE / 'hooks' / hook.name, hook
+
+
+def install_commands(apply):
+    for name, target in COMMANDS.items():
+        yield HOME / '.local/bin' / name, link(HOME / '.local/bin' / name, target, apply)
 
 
 def same(dest, source):
@@ -177,6 +192,7 @@ def main():
         return budget()
     results = [(dest, link(dest, source, args.apply)) for dest, source in links()]
     results += list(install_binaries(args.apply))
+    results += list(install_commands(args.apply))
     results += list(write_codex_agents(args.apply))
     for dest, status in results:
         if status != 'ok':

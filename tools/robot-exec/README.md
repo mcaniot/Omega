@@ -1,6 +1,6 @@
 # Local robotics execution
 
-Use `/home/mcaniot/.agents/tools/robot-exec/native/run run --timeout 120 -- COMMAND ARGS` for
+Use `'Ω-run' --timeout 120 -- COMMAND ARGS` for
 general development. The compiled POSIX executor captures full stdout/stderr in
 private evidence files and returns bounded JSON. It preserves timeout (124), log
 limit (125), interruption/crash (128+signal), group cleanup, and independent
@@ -8,7 +8,7 @@ sentinel behavior. The executor is one Rust binary (`rust/`) that also implement
 and `prune`; there is no Python fallback.
 There is no generic executor/interpreter outside-sandbox allow rule.
 
-For trusted source reads use `/home/mcaniot/.agents/tools/robot-exec/local-read`:
+For trusted source reads use `Ω-read`:
 
 - `status`: fixed read-only Git status for this checkout; external fsmonitor and hooks disabled.
 - `files`: fixed `rg --files` for this checkout; no supplied options or programs.

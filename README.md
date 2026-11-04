@@ -14,6 +14,7 @@ The previous Omega project (memory, code graph, dashboard) is archived under the
 | `agents/*.md` | `~/.claude/agents/` (link), `~/.codex/agents/*.toml` (generated) | The 4 workers: scout, coder, architect, robotics-rl |
 | `skills/*/SKILL.md` | `~/.agents/skills/` (Codex scans it), `~/.claude/skills/` | Only the description is loaded until the skill is used |
 | `rust/` | `~/.agents/tools/robot-exec/native/run`, `~/.agents/tools/robot-exec/local-read`, `~/.agents/tools/shell_guard`, `~/.claude/hooks/session_name` | Cargo crate `omega-tools`: evidence executor, trusted read launcher, PreToolUse guard (Claude + Codex), session naming hook. Built and installed as real 0700 files by `install.py --apply` |
+| Command links | `~/.local/bin/Ω-{run,read,inspect,prune}` | Short names for the native executables; `omega-*` names are also installed |
 | `tools/`, `hooks/` | `~/.agents/tools/`, `~/.claude/hooks/` | Docs, tests and golden fixtures for those binaries (tests and fixtures are not linked) |
 | `docs/` | — | Notes (backend audit) |
 
@@ -27,9 +28,9 @@ python3 install.py --apply    # create links, regenerate the Codex agents, build
 python3 install.py --budget   # bytes loaded into every session
 ```
 
-Sources are symlinked: edits to `AGENTS.md`, agents and skills take effect at the next session, but
-The Rust binaries run on every tool call; a build is only installed by `install.py --apply`, so run the tests
-first. Keep this checkout on a branch that contains these files. An existing file
+Sources are symlinked: edits to `AGENTS.md`, agents and skills take effect at the next session.
+Rust binaries are only updated by `install.py --apply`, so run the tests first.
+Keep this checkout on a branch that contains these files. An existing text file or command link
 is replaced only if it is already a link or has identical content; otherwise it is reported as `CONFLICT`
 and left untouched.
 
@@ -37,12 +38,35 @@ The Codex model of each agent is set in `CODEX_AGENTS` (`install.py`). Adding an
 `[agents.<name>]` entry in `~/.codex/config.toml`. Claude skills listed in `CLAUDE_SKIP_SKILLS` are visible
 only to Codex.
 
+## Native commands
+
+Keep `~/.local/bin` on `PATH`. Use the short commands directly, without repeating a `run` subcommand:
+
+```sh
+'Ω-run' --timeout 120 -- python3 -m pytest tools hooks
+'Ω-run' --shell 'git status --short && git diff --stat'
+'Ω-read' text AGENTS.md 1 20
+'Ω-inspect' EVIDENCE --stream stderr --search error --lines 20
+'Ω-prune' --days 14
+```
+
+`Ω-run` captures complete output in `~/.agents/tasks/evidence/` and returns bounded JSON;
+`Ω-inspect` reads that evidence. `Ω-read` provides restricted source reads (`status`, `files`,
+`text`, `find`). `Ω-prune` previews evidence cleanup; deletion requires `--apply` and approval.
+Quote the `Ω-*` names as shown to match the shell guard's canonical `shlex.join` quoting.
+The ASCII names (`omega-run`, `omega-read`, `omega-inspect`, `omega-prune`) and original absolute
+paths remain supported. The guard checks command resolution on `PATH` and preserves native
+sandbox and approval checks.
+
+See [native executor usage](tools/robot-exec/native/README.md) and
+[trusted read capabilities](tools/robot-exec/README.md) for options and constraints.
+
 ## Context rules
 
 - Anything added to `AGENTS.md`, an agent description or a skill description is paid for in every session:
   check `install.py --budget` before and after.
 - Procedures go in a skill (loaded on demand), not in `AGENTS.md`.
-- Long output goes through the native `run` executor: complete log on disk, bounded JSON in the context.
+- Long output goes through `Ω-run`: complete log on disk, bounded JSON in the context.
 
 ## Tests
 
@@ -57,3 +81,5 @@ implementations: `tools/test_run.py`, `tools/robot-exec/native/test_{boundary,go
 they test the deployed binary; set `OMEGA_RUN_BINARY`, `OMEGA_SHELL_GUARD_BINARY` or
 `OMEGA_SESSION_NAME_BINARY` (for example to `rust/target/release/<name>`) to test a fresh build first.
 `test_local_read.py` always builds its own binary with throwaway roots.
+`tools/test_omega_commands.py` checks both command prefixes, installer links, dispatch and guard
+policy; it defaults to the release binaries in `rust/target/release/` and accepts the same overrides.

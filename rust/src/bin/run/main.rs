@@ -231,6 +231,17 @@ fn dispatch(args: &[Arg]) -> i32 {
 fn main() {
     // Rust ignores SIGPIPE; commands started by exec must inherit the default.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
-    let args: Vec<Arg> = std::env::args_os().skip(1).map(|a| a.as_bytes().to_vec()).collect();
+    let mut argv = std::env::args_os();
+    let executable = argv.next().unwrap_or_default();
+    let mut args: Vec<Arg> = argv.map(|a| a.as_bytes().to_vec()).collect();
+    let command = match std::path::Path::new(&executable).file_name().and_then(|s| s.to_str()) {
+        Some("omega-run" | "Ω-run") => Some(b"run".as_slice()),
+        Some("omega-inspect" | "Ω-inspect") => Some(b"inspect".as_slice()),
+        Some("omega-prune" | "Ω-prune") => Some(b"prune".as_slice()),
+        _ => None,
+    };
+    if let Some(command) = command {
+        args.insert(0, command.to_vec());
+    }
     std::process::exit(dispatch(&args));
 }

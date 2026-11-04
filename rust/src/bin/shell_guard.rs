@@ -564,6 +564,22 @@ fn expanduser(rest: &str) -> String {
 }
 
 impl Guard {
+    /// Match the first executable on PATH, as the shell will, against the trusted binary.
+    fn trusted_alias(command: &str, target: &str) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(path) = std::env::var_os("PATH") else { return false };
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join(command);
+            let Ok(metadata) = candidate.metadata() else { continue };
+            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+            return candidate.canonicalize().ok().zip(std::fs::canonicalize(target).ok())
+                .is_some_and(|(actual, expected)| actual == expected);
+        }
+        false
+    }
+
     fn new() -> Self {
         let native = expanduser("/.agents/tools/robot-exec/native/run");
         let local_read = expanduser("/.agents/tools/robot-exec/local-read");
@@ -607,11 +623,28 @@ impl Guard {
             Some(Json::Str(command)) if !command.trim_matches(py_isspace).is_empty() => command,
             _ => return self.denied("Missing shell command."),
         };
-        let Some(argv) = shlex_split(command) else {
+        let Some(mut argv) = shlex_split(command) else {
             return self.denied("Malformed shell quoting.");
         };
         if argv.is_empty() || command.trim_matches(py_isspace) != shlex_join(&argv) {
             return self.denied("Unwrapped or noncanonical shell command.");
+        }
+        let alias = match argv[0].as_str() {
+            "omega-run" | "Ω-run" => Some("run"),
+            "omega-inspect" | "Ω-inspect" => Some("inspect"),
+            "omega-prune" | "Ω-prune" => Some("prune"),
+            "omega-read" | "Ω-read" => Some("read"),
+            _ => None,
+        };
+        if let Some(subcommand) = alias {
+            let target = if subcommand == "read" { &self.local_read } else { &self.native };
+            if !Self::trusted_alias(&argv[0], target) {
+                return self.denied("Untrusted omega command on PATH.");
+            }
+            argv[0] = target.clone();
+            if subcommand != "read" {
+                argv.insert(1, subcommand.to_string());
+            }
         }
         if argv[0] == self.local_read {
             let allowed: &[usize] = match argv.get(1).map(String::as_str) {

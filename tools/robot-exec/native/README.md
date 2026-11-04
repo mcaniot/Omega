@@ -3,6 +3,9 @@ Native evidence executor
 
 `run` is a Rust binary (`rust/src/bin/run/`, crate `omega-tools`) installed as
 `~/.agents/tools/robot-exec/native/run`. It has no Python or other fallback.
+The installer exposes `Ω-run`, `Ω-inspect`, `Ω-prune` and `Ω-read`
+as links in `~/.local/bin` (keep this directory on PATH). `Ω-run` selects the
+run operation directly; the original absolute commands remain supported.
 
 Build and install (from the repository root):
 
@@ -11,10 +14,10 @@ Build and install (from the repository root):
 
 Usage:
 
-    /home/mcaniot/.agents/tools/robot-exec/native/run run --timeout 120 -- command arguments
-    /home/mcaniot/.agents/tools/robot-exec/native/run run --shell 'script'
-    /home/mcaniot/.agents/tools/robot-exec/native/run inspect EVIDENCE --stream stderr --lines 20
-    /home/mcaniot/.agents/tools/robot-exec/native/run prune [--days N] [--apply]
+    'Ω-run' --timeout 120 -- command arguments
+    'Ω-run' --shell 'script'
+    'Ω-inspect' EVIDENCE --stream stderr --lines 20
+    'Ω-prune' [--days N] [--apply]
 
 It writes complete, private stdout.log/stderr.log/result.json evidence under
 ~/.agents/tasks/evidence. It keeps exit/status meanings (timeout 124, log limit 125,
