@@ -24,12 +24,16 @@ CLAUDE = HOME / '.claude'
 CODEX = HOME / '.codex'
 
 # Codex settings per agent: (model, reasoning effort, sandbox or None to inherit).
+# Codex does not let an agent file override the parent sandbox; read-only roles
+# are also enforced by their instructions.
 CODEX_AGENTS = {
     'architect': ('gpt-6.1-sol', 'high', 'read-only'),
-    'coder': ('gpt-6-sol', 'medium', None),
-    'robotics-rl': ('gpt-6.1-sol', 'medium', None),
-    'scout': ('gpt-5.6-luna', 'low', 'read-only'),
+    'coder': ('gpt-6.1-terra', 'medium', None),
+    'scout': ('gpt-6-luna', 'low', 'read-only'),
 }
+# Keys of agent files written by this installer; used to recognize stale ones.
+CODEX_AGENT_KEYS = {'name', 'description', 'model', 'model_reasoning_effort', 'sandbox_mode',
+                    'developer_instructions'}
 # Cargo binary -> installed path.
 BINARIES = {
     'run': AGENTS / 'tools/robot-exec/native/run',
@@ -78,6 +82,7 @@ def deployable(root):
 
 def links():
     yield AGENTS / 'AGENTS.md', REPO / 'AGENTS.md'
+    yield CODEX / 'AGENTS.md', AGENTS / 'AGENTS.md'
     yield from response_links()
     for skill in sorted((REPO / 'skills').iterdir()):
         yield AGENTS / 'skills' / skill.name, skill
@@ -128,6 +133,18 @@ def link(dest, source, apply):
     return 'linked' if apply else 'would link'
 
 
+def remove_stale_links(apply):
+    """Remove our links whose repository source was deleted (removed agents or skills)."""
+    for directory in (CLAUDE / 'agents', CLAUDE / 'skills', AGENTS / 'skills'):
+        if not directory.is_dir():
+            continue
+        for dest in sorted(directory.iterdir()):
+            if dest.is_symlink() and not dest.exists() and Path(os.readlink(dest)).is_relative_to(REPO):
+                if apply:
+                    dest.unlink()
+                yield dest, 'removed stale link' if apply else 'would remove stale link'
+
+
 def install_binaries(apply, names=None):
     """Build the Rust crate and install each binary atomically as a 0700 real file."""
     binaries = BINARIES if names is None else {name: BINARIES[name] for name in names}
@@ -166,15 +183,44 @@ def frontmatter(path):
 def codex_agent(path):
     fields, body = frontmatter(path)
     model, effort, sandbox = CODEX_AGENTS[fields['name']]
-    lines = [f'model = "{model}"', f'model_reasoning_effort = "{effort}"']
+    lines = [f'name = "{fields["name"]}"',
+             f'description = {json.dumps(fields["description"], ensure_ascii=False)}',
+             f'model = "{model}"', f'model_reasoning_effort = "{effort}"']
     if sandbox:
         lines.append(f'sandbox_mode = "{sandbox}"')
     lines.append(f'developer_instructions = {json.dumps(body, ensure_ascii=False)}')
     return '\n'.join(lines) + '\n'
 
 
+def legacy_agent_tables(text, names):
+    """Drop `[agents.NAME]` tables holding only description/config_file = "agents/NAME.toml".
+
+    Standalone agent files carry their own name and description; these legacy
+    registrations would duplicate or resurrect roles. Other tables are kept verbatim.
+    """
+    lines = text.splitlines(keepends=True)
+    kept, index, removed = [], 0, []
+    while index < len(lines):
+        match = re.match(r'\[agents\.([\w-]+)\]\s*$', lines[index])
+        end = index + 1
+        while end < len(lines) and not lines[end].lstrip().startswith('['):
+            end += 1
+        if match and match.group(1) in names:
+            table = tomllib.loads(''.join(lines[index:end]))['agents'][match.group(1)]
+            if set(table) <= {'description', 'config_file'} and \
+                    table.get('config_file') in (None, f'agents/{match.group(1)}.toml'):
+                removed.append(match.group(1))
+                index = end
+                continue
+        kept.extend(lines[index:end])
+        index = end
+    return ''.join(kept), removed
+
+
 def write_codex_agents(apply):
+    names = set()
     for agent in sorted((REPO / 'agents').glob('*.md')):
+        names.add(agent.stem)
         dest = CODEX / 'agents' / f'{agent.stem}.toml'
         text = codex_agent(agent)
         if dest.is_file() and dest.read_text() == text:
@@ -184,9 +230,30 @@ def write_codex_agents(apply):
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(text)
         yield dest, 'written' if apply else 'would write'
-    for stale in sorted((CODEX / 'agents').glob('*.toml')):
-        if not (REPO / 'agents' / f'{stale.stem}.md').exists():
-            yield stale, 'STALE (not in repo; remove it and its [agents.*] entry in config.toml)'
+    stale = []
+    for path in sorted((CODEX / 'agents').glob('*.toml')):
+        if path.stem in names:
+            continue
+        if set(tomllib.loads(path.read_text())) <= CODEX_AGENT_KEYS:
+            stale.append(path.stem)
+            if apply:
+                path.unlink()
+            yield path, 'removed stale agent' if apply else 'would remove stale agent'
+        else:
+            yield path, 'unmanaged (left untouched)'
+    config = CODEX / 'config.toml'
+    if config.exists():
+        text, removed = legacy_agent_tables(config.read_text(), names | set(stale))
+        if removed:
+            tomllib.loads(text)  # never write an unparsable config
+            if apply:
+                target = config.resolve()
+                tmp = target.with_name(f'.{target.name}.install-tmp')
+                with tmp.open('w', encoding='utf-8') as stream:
+                    os.chmod(tmp, target.stat().st_mode & 0o777)
+                    stream.write(text)
+                os.replace(tmp, target)
+            yield config, ('removed' if apply else 'would remove') + f' legacy [agents.{",".join(removed)}]'
 
 
 def write_response_settings(apply):
@@ -283,6 +350,7 @@ def main():
     if not any(status.startswith('CONFLICT') for _, status in results):
         results += list(write_response_settings(args.apply))
     if not args.responses_only:
+        results += list(remove_stale_links(args.apply))
         results += list(install_binaries(args.apply))
         results += list(write_context_settings(args.apply))
         results += list(install_commands(args.apply))

@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import re
 import tempfile
 import tomllib
 import unittest
@@ -96,3 +97,45 @@ class ResponseSettingsTest(unittest.TestCase):
         agents.assert_not_called()
         for dest, source in self.installer.response_links():
             self.assertEqual(dest.resolve(), source)
+
+    def test_codex_agents_are_standalone_and_obsolete_roles_are_removed(self):
+        self.installer.AGENTS = self.home / '.agents'
+        agents = self.codex.parent / 'agents'
+        agents.mkdir()
+        (agents / 'robotics-rl.toml').write_text('model = "m"\ndeveloper_instructions = "x"\n')
+        (agents / 'custom.toml').write_text('name = "custom"\nmcp_servers = {}\n')
+        self.codex.write_text(self.original_codex + '[agents]\nenabled = true\n\n'
+                              '[agents.robotics-rl]\ndescription = "old"\nconfig_file = "agents/robotics-rl.toml"\n\n'
+                              '[agents.coder]\ndescription = "old"\nconfig_file = "agents/coder.toml"\n\n'
+                              '[agents.custom]\ndescription = "keep"\nconfig_file = "agents/custom.toml"\n'
+                              '[tui]\nanimations = false\n')
+        claude_agents = self.installer.CLAUDE / 'agents'
+        claude_agents.mkdir()
+        (claude_agents / 'robotics-rl.md').symlink_to(ROOT / 'agents/robotics-rl.md')
+        (claude_agents / 'foreign.md').symlink_to(self.home / 'missing.md')
+        self.assertEqual(sorted(p.stem for p in (ROOT / 'agents').glob('*.md')), ['architect', 'coder', 'scout'])
+        self.assertEqual(set(self.installer.CODEX_AGENTS), {'architect', 'coder', 'scout'})
+        list(self.installer.write_codex_agents(True))
+        list(self.installer.remove_stale_links(True))
+        for name in ('architect', 'coder', 'scout'):
+            role = tomllib.loads((agents / f'{name}.toml').read_text())
+            self.assertEqual(role['name'], name)
+            self.assertTrue(role['description'] and role['developer_instructions'])
+            self.assertNotIn('AGENTS.md', role['developer_instructions'])  # inherited, never duplicated
+        self.assertFalse((agents / 'robotics-rl.toml').exists())
+        self.assertTrue((agents / 'custom.toml').exists())
+        config = tomllib.loads(self.codex.read_text())
+        self.assertEqual(config['agents'], {'enabled': True,
+                                            'custom': {'description': 'keep', 'config_file': 'agents/custom.toml'}})
+        self.assertEqual(config['tui'], {'animations': False})
+        self.assertIn('# keep comment', self.codex.read_text())
+        self.assertFalse((claude_agents / 'robotics-rl.md').is_symlink())
+        self.assertTrue((claude_agents / 'foreign.md').is_symlink())
+        self.assertEqual([s for _, s in self.installer.write_codex_agents(True) if s != 'ok'],
+                         ['unmanaged (left untouched)'])
+
+    def test_agent_skill_references_exist(self):
+        skills = {p.name for p in (ROOT / 'skills').iterdir()}
+        for agent in (ROOT / 'agents').glob('*.md'):
+            for name in re.findall(r'`([a-z-]+)` for', agent.read_text()):
+                self.assertIn(name, skills, agent)

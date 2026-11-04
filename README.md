@@ -13,7 +13,7 @@ The previous Omega project (memory, code graph, dashboard) is archived under the
 | `AGENTS.md` | `~/.agents/AGENTS.md` (`~/.claude/CLAUDE.md` imports it, `~/.codex/AGENTS.md` links to it) | Global instructions, loaded in every session |
 | `prompts/codex.md` | `~/.codex/instructions.md` (link), selected by `model_instructions_file` | Compact replacement for Codex's stock base prompt; final response only |
 | `output-styles/final-only.md` | `~/.claude/output-styles/final-only.md` (link), selected by `outputStyle` | Final response only, preserving Claude's coding instructions |
-| `agents/*.md` | `~/.claude/agents/` (link), `~/.codex/agents/*.toml` (generated) | The 4 workers: scout, coder, architect, robotics-rl |
+| `agents/*.md` | `~/.claude/agents/` (link), `~/.codex/agents/*.toml` (generated standalone roles) | The 3 workers: scout, coder, architect; robotics is a skill domain (`robotics-learning`, …), not a role. Obsolete generated roles, legacy `[agents.*]` registrations and dangling links are removed |
 | `skills/*/SKILL.md` | `~/.agents/skills/` (Codex scans it), `~/.claude/skills/` | Only the description is loaded until the skill is used |
 | `rust/` | `~/.agents/tools/robot-exec/native/run`, `~/.agents/tools/robot-exec/local-read`, `~/.agents/tools/shell_guard`, `~/.claude/hooks/session_name` | Cargo crate `omega-tools`: evidence executor, trusted read launcher, PreToolUse guard (Claude + Codex), session naming hook. Built and installed as real 0700 files by `install.py --apply` |
 | Command links | `~/.local/bin/Ω-{run,read,inspect,prune}` | Short names for the native executables; `omega-*` names are also installed |
@@ -84,8 +84,8 @@ Keep this checkout on a branch that contains these files. An existing text file 
 is replaced only if it is already a link or has identical content; otherwise it is reported as `CONFLICT`
 and left untouched.
 
-The Codex model of each agent is set in `CODEX_AGENTS` (`install.py`). Adding an agent also requires an
-`[agents.<name>]` entry in `~/.codex/config.toml`. Claude skills listed in `CLAUDE_SKIP_SKILLS` are visible
+The Codex model of each agent is set in `CODEX_AGENTS` (`install.py`); `install.py --apply` generates
+standalone `~/.codex/agents/<name>.toml` roles, no `[agents.<name>]` entry is needed. Claude skills listed in `CLAUDE_SKIP_SKILLS` are visible
 only to Codex.
 
 ## Native commands

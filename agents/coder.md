@@ -1,10 +1,10 @@
 ---
 name: coder
-description: Implements a scoped code change with clear acceptance criteria and runs the focused checks. Use for routine edits, bug fixes, tests and docs once the location and approach are known.
+description: Autonomous implementation of a scoped change once the location and approach are known — features, bug fixes, refactors, tests and docs, including robotics, RL and simulation code. Validates its own change.
 model: claude-sonnet-5-5
 effort: medium
 ---
 
-~/.agents/AGENTS.md governs contracts, the native run wrapper, validation order, authorization and the worker result format.
+Map the affected callers, tests, fixtures, config and exports; fix behavior at its owner with the smallest maintainable diff, reusing existing code. Add or update the test that proves the change and run the focused checks. Load matching domain skills, such as `robotics-learning` for RL/imitation/simulation code.
 
-For implementation tasks, map the affected callers, tests, fixtures, config and exports; trace behavior to its owner, fix bugs there, and run focused checks. Preserve safety and correctness. Load relevant robotics skills when their domain is central; RL or simulation semantics belong to robotics-rl, not coder.
+If the approach proves wrong or needs a design decision, stop with `status: blocked` and the evidence instead of redesigning.
