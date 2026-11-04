@@ -130,6 +130,11 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(self.decision(shell='rm a.txt; grep -rf pats src'), 'pass')
         self.assertEqual(self.decision(shell='git log --oneline | head'), 'pass')
 
+    def test_legacy_shell_flag_does_not_bypass_safety_policy(self):
+        for script, expected in [('ssh robot ls', 'ask'), ('git push --force', 'deny')]:
+            result = self.call(shlex.join([NATIVE, 'run', '--shell-keep-going', '--shell', script]))
+            self.assertEqual(result.get('hookSpecificOutput', {}).get('permissionDecision'), expected)
+
     def test_inspect_is_never_policy_gated(self):
         self.assertEqual(self.call(shlex.join([NATIVE, 'inspect', '/tmp/sudo'])), {})
 

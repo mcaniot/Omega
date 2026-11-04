@@ -377,6 +377,7 @@ fn summary(cfg: &Config, code: i32, crash_signal: i32, sizes: (i64, i64), status
         stdout: None,
         stderr: None,
         diagnostics: Vec::new(),
+        preview: Vec::new(),
     };
     let total = sizes.0 + sizes.1;
     let mut simple = !cfg.python;
@@ -390,7 +391,7 @@ fn summary(cfg: &Config, code: i32, crash_signal: i32, sizes: (i64, i64), status
                 *value = Some(String::from_utf8_lossy(&data).into_owned());
             }
         }
-    } else if code != 0 {
+    } else if code != 0 || cfg.inline_bytes > 0 {
         simple = false;
     }
     if simple {

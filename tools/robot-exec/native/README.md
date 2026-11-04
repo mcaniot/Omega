@@ -28,9 +28,19 @@ Children are gated until the sentinel exists.
 
 Combined stdout/stderr up to 8 KiB is returned inline by default (`--inline-bytes N`,
 0 disables), within a 12 KiB JSON budget. Large JSON expansions fall back to the
-summary; failure diagnostics retain their separate 4,000-byte budget. Complete logs
+summary with a smart `preview`: bounded beginning/end fragments and prioritized
+errors, with stream, line and byte locations. Existing failure diagnostics and the
+additive preview share a 4,000-byte JSON budget. Complete logs
 are always preserved. Reuse inline output; expand larger logs with targeted `inspect`
 slices rather than reading a log over 8 KiB in full.
+
+`--shell` uses errexit and pipefail by default (bash/zsh); bash additionally inherits
+errexit in substitutions. Unsupported shells fail instead of silently weakening
+validation. `--shell-keep-going` restores the previous shell argv/semantics, including
+POSIX sh compatibility. It requires `--shell` and is not for required validation.
+Shells can explicitly handle failures in conditionals, `||`, `!`, or background jobs;
+required checks must be separate argv commands or unconditional top-level steps.
+PASS means the child exited zero, not that arbitrary output or every branch was valid.
 
 Evidence directories and writes are anchored to nofollow directory descriptors under the
 configured tasks root. Queued control signals are drained before status selection and stay

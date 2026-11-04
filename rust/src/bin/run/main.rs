@@ -80,12 +80,26 @@ fn home() -> Option<Arg> {
 }
 
 /// Strict native grammar. `None` means the input needs the argparse path.
+fn shell_command(executable: Arg, script: Arg, keep_going: bool) -> Vec<Arg> {
+    let mut command = vec![executable];
+    if !keep_going {
+        command.extend([b"-e".to_vec(), b"-o".to_vec(), b"pipefail".to_vec()]);
+        // Bash otherwise clears errexit inside command substitutions.
+        if command[0] == b"bash" || command[0].ends_with(b"/bash") {
+            command.extend([b"-O".to_vec(), b"inherit_errexit".to_vec()]);
+        }
+    }
+    command.extend([b"-c".to_vec(), script]);
+    command
+}
+
 fn native_config(args: &[Arg]) -> Option<Config> {
     if args.iter().flatten().any(|&b| b >= 128) {
         return None;
     }
     let (mut cwd_arg, mut shell): (Option<&Arg>, Option<&Arg>) = (None, None);
     let mut shell_executable: Arg = b"/bin/bash".to_vec();
+    let mut shell_keep_going = false;
     let (mut timeout, mut grace, mut inline_bytes, mut max_log_bytes) = (0.0, 10.0, 8192i64, 2i64 << 30);
     let mut pos = 0;
     while pos < args.len() {
@@ -96,6 +110,11 @@ fn native_config(args: &[Arg]) -> Option<Config> {
         }
         if arg.first() != Some(&b'-') || arg == b"-" {
             break;
+        }
+        if arg == b"--shell-keep-going" {
+            shell_keep_going = true;
+            pos += 1;
+            continue;
         }
         if pos + 1 >= args.len() {
             return None;
@@ -133,9 +152,12 @@ fn native_config(args: &[Arg]) -> Option<Config> {
             if pos < args.len() {
                 fail("Use either --shell or argv after --, not both");
             }
-            vec![shell_executable, b"-c".to_vec(), script.clone()]
+            shell_command(shell_executable, script.clone(), shell_keep_going)
         }
         None => {
+            if shell_keep_going {
+                fail("--shell-keep-going requires --shell");
+            }
             if pos >= args.len() {
                 fail("A command is required after --");
             }
@@ -152,6 +174,9 @@ fn native_config(args: &[Arg]) -> Option<Config> {
 }
 
 fn python_run(p: &argparse::Parsed) -> Config {
+    if p.flag("shell_keep_going") && p.string("shell").is_none() {
+        fail("--shell-keep-going requires --shell");
+    }
     let mut command = p.list("command");
     if command.first().map(Vec::as_slice) == Some(b"--") {
         command.remove(0);
@@ -160,7 +185,10 @@ fn python_run(p: &argparse::Parsed) -> Config {
         if !command.is_empty() {
             fail("Use either --shell or argv after --, not both");
         }
-        command = vec![p.string("shell_executable").unwrap_or_else(|| b"/bin/bash".to_vec()), b"-c".to_vec(), script];
+        command = shell_command(
+            p.string("shell_executable").unwrap_or_else(|| b"/bin/bash".to_vec()),
+            script, p.flag("shell_keep_going"),
+        );
     }
     if command.is_empty() {
         fail("A command is required after --");

@@ -40,7 +40,9 @@ def normalize(data, home):
 
 
 def shell(script):
-    return ['run', '--shell', script]
+    # Frozen fixtures describe legacy shell semantics. Strict defaults have
+    # dedicated mandatory-step tests in tools/test_run.py.
+    return ['run', '--shell-keep-going', '--shell', script]
 
 
 def py(code, *options):
@@ -53,7 +55,7 @@ CASES = [
     ('echo', lambda h: ['run', '--', 'echo', 'hello world'], True),
     ('fail_stderr', lambda h: shell('echo oops >&2; exit 3'), True),
     ('shell_exit', lambda h: shell('printf evidence; exit 19'), True),
-    ('shell_executable', lambda h: ['run', '--shell-executable', '/bin/sh', '--shell', 'echo $0'], True),
+    ('shell_executable', lambda h: ['run', '--shell-keep-going', '--shell-executable', '/bin/sh', '--shell', 'echo $0'], True),
     ('large_success', lambda h: py('print("x"*3000)'), True),
     ('large_traceback', lambda h: py('import sys\nprint("noise\\n"*2000)\nraise RuntimeError("boom")'), True),
     ('many_errors', lambda h: py('for i in range(40):\n print(f"ValueError: bad {i}")\n print("main.py:%d warning" % i)\nraise SystemExit(1)'), True),
@@ -248,10 +250,24 @@ class GoldenTests(unittest.TestCase):
         for name, builder, native_metadata in all_cases():
             with self.subTest(name):
                 actual = execute(BINARY, builder)
+                # Additive previews are tested separately; frozen status, diagnostics,
+                # metadata and complete logs must remain compatible.
+                actual['stdout'] = re.sub(r',"preview":\[.*\](?=}\n?$)', '', actual['stdout'], flags=re.S)
                 if not native_metadata:
                     actual.pop("metadata")
                 actual = comparable(actual)
                 expected = comparable(self.golden[name])
+                if name == 'run_help':
+                    expected['stdout'] = expected['stdout'].replace(
+                        '  --shell SHELL\n',
+                        '  --shell SHELL\n'
+                        '                        Fail fast with errexit and pipefail (bash/zsh)\n'
+                        '  --shell-keep-going\n'
+                        '                        Explicit legacy shell semantics; not for validations\n')
+                if name == 'ambiguous_abbreviation':
+                    expected['stderr'] = expected['stderr'].replace(
+                        'could match --shell, --shell-executable',
+                        'could match --shell, --shell-keep-going, --shell-executable')
                 # These recorded outputs exceeded the old inline/JSON budgets. Derive
                 # only their new summary from the frozen logs; retain all other evidence.
                 if name in {'large_success', 'weak_words', 'passed_lines',

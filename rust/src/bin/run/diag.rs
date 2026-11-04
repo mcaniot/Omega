@@ -31,6 +31,7 @@ pub struct Summary {
     pub stdout: Option<String>,
     pub stderr: Option<String>,
     pub diagnostics: Vec<Item>,
+    pub preview: Vec<Item>,
 }
 
 impl Summary {
@@ -69,8 +70,10 @@ impl Summary {
                 py::json_str(&mut b, v.as_bytes(), style);
             }
         }
-        b.extend_from_slice(b",\"diagnostics\":[");
-        for (i, item) in self.diagnostics.iter().enumerate() {
+        for (key, items) in [("diagnostics", &self.diagnostics), ("preview", &self.preview)] {
+        if key == "preview" && items.is_empty() { continue; }
+        b.extend_from_slice(format!(",\"{key}\":[").as_bytes());
+        for (i, item) in items.iter().enumerate() {
             if i > 0 {
                 b.push(b',');
             }
@@ -78,7 +81,9 @@ impl Summary {
             py::json_str(&mut b, item.text.as_bytes(), style);
             b.push(b'}');
         }
-        b.extend_from_slice(b"]}");
+        b.push(b']');
+        }
+        b.push(b'}');
         b
     }
 }
@@ -168,15 +173,17 @@ pub fn read_line(reader: &mut impl BufRead, buf: &mut Vec<u8>, limit: usize) -> 
 
 /// Diagnostics ordered by importance (callers drop from the end). Streams are
 /// read through pinned descriptors, never through mutable evidence names.
-fn excerpts(stdout_fd: i32, stderr_fd: i32) -> Vec<Item> {
+fn excerpts(stdout_fd: i32, stderr_fd: i32, preview: bool) -> (Vec<Item>, Vec<Item>) {
     let p = patterns();
     let mut tiers: [Edges; 3] = Default::default();
     let mut tail: VecDeque<Item> = VecDeque::new();
+    let mut boundaries = Vec::new();
     let mut buf = Vec::new();
     for (stream, fd) in [("stdout", stdout_fd), ("stderr", stderr_fd)] {
         let Ok(file) = File::open(format!("/proc/self/fd/{}", fd)) else { continue };
         let mut reader = std::io::BufReader::with_capacity(65536, file);
         let (mut line, mut offset) = (1u64, 0u64);
+        let (mut first, mut last) = (None, None);
         loop {
             if read_line(&mut reader, &mut buf, 8192).is_err() || buf.is_empty() {
                 break;
@@ -187,7 +194,8 @@ fn excerpts(stdout_fd: i32, stderr_fd: i32) -> Vec<Item> {
             let decoded = String::from_utf8_lossy(&buf);
             let stripped = p.ansi.replace_all(&decoded, "");
             let trimmed = stripped.trim_matches(py::py_space);
-            let text: String = p.unprintable.replace_all(trimmed, " ").chars().take(220).collect();
+            let clean = p.unprintable.replace_all(trimmed, " ");
+            let text: String = clean.chars().take(220).collect();
             if text.is_empty() {
                 continue;
             }
@@ -196,6 +204,10 @@ fn excerpts(stdout_fd: i32, stderr_fd: i32) -> Vec<Item> {
                 tail.pop_front();
             }
             tail.push_back(item.clone());
+            first.get_or_insert_with(|| item.clone());
+            let mut end: Vec<char> = clean.chars().rev().take(220).collect();
+            end.reverse();
+            last = Some(Item { text: end.into_iter().collect(), ..item.clone() });
             if p.passed.is_match(&item.text) {
                 continue;
             }
@@ -206,9 +218,24 @@ fn excerpts(stdout_fd: i32, stderr_fd: i32) -> Vec<Item> {
                 }
             }
         }
+        if let Some(item) = first {
+            boundaries.push(item);
+        }
+        if let Some(item) = last {
+            boundaries.push(item);
+        }
     }
     let selected: Vec<Item> = tiers.iter().flat_map(|e| e.items().cloned()).take(LIMIT).collect();
-    if selected.is_empty() { tail.into_iter().collect() } else { selected }
+    let mut snippets = Vec::new();
+    if preview {
+        snippets.extend(selected.iter().take(4).cloned());
+        for item in boundaries {
+            if !snippets.iter().any(|old| old.stream == item.stream && old.offset == item.offset && old.text == item.text) {
+                snippets.push(item);
+            }
+        }
+    }
+    (if selected.is_empty() { tail.into_iter().collect() } else { selected }, snippets)
 }
 
 pub fn read_fd(fd: i32) -> Vec<u8> {
@@ -243,11 +270,22 @@ pub fn finalize(mut s: Summary, inline_bytes: i64, stdout_fd: i32, stderr_fd: i3
     if encoded(&s) > INLINE_BUDGET || !inlined {
         s.stdout = None;
         s.stderr = None;
-        s.diagnostics = if s.exit_code != 0 { excerpts(stdout_fd, stderr_fd) } else { Vec::new() };
+        if s.exit_code != 0 || inline_bytes > 0 {
+            let (diagnostics, mut preview) = excerpts(stdout_fd, stderr_fd, inline_bytes > 0);
+            if s.exit_code != 0 {
+                preview.retain(|p| !diagnostics.iter().any(|d| d.stream == p.stream && d.offset == p.offset && d.text == p.text));
+                s.diagnostics = diagnostics;
+            }
+            s.preview = preview;
+        }
+    }
+    while encoded(&s) > BUDGET && !s.preview.is_empty() {
+        s.preview.pop();
     }
     while encoded(&s) > BUDGET && !s.diagnostics.is_empty() {
         s.diagnostics.pop();
     }
     s.diagnostics.sort_by(|a, b| (a.stream, a.line).cmp(&(b.stream, b.line)));
+    s.preview.sort_by(|a, b| (a.stream, a.line).cmp(&(b.stream, b.line)));
     s
 }

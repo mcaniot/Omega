@@ -36,6 +36,59 @@ def invoke(code, *options, shell=False):
 
 
 class CaptureTests(unittest.TestCase):
+    def test_smart_preview_preserves_edges_errors_and_complete_logs(self):
+        for shell in (False, True):
+            with self.subTest(shell=shell):
+                code = ("import sys;print('preview start');print('noise\\n'*3000);"
+                        "print('ERROR: middle diagnostic');print('more noise\\n'*3000);"
+                        "print('preview end');sys.stderr.write('stderr start\\n'+'warning\\n'*3000+'stderr end\\n')")
+                status, result, path = invoke(code, shell=shell)
+                self.assertEqual(status, 0)
+                preview = json.dumps(result['preview'])
+                for marker in ('preview start', 'preview end', 'ERROR: middle diagnostic',
+                               'stderr start', 'stderr end'):
+                    self.assertIn(marker, preview)
+                self.assertGreater((path / 'stdout.log').stat().st_size, 50000)
+                self.assertIn('ERROR: middle diagnostic', (path / 'stdout.log').read_text())
+
+    def test_preview_long_line_tail_and_explicit_silence(self):
+        _, result, _ = invoke("print('START'+ 'x'*30000 + 'END')")
+        self.assertIn('START', json.dumps(result['preview']))
+        self.assertIn('END', json.dumps(result['preview']))
+        _, result, _ = invoke("print('x'*30000)", '--inline-bytes', '0')
+        self.assertEqual(result['diagnostics'], [])
+
+    def test_shell_mandatory_steps_fail_fast(self):
+        for script in ('false; echo masked', 'false | cat; echo masked',
+                       'false; echo masqué',
+                       'x=$(false; echo masked); echo masked', '(false; echo masked); echo masked',
+                       'check() { false; echo masked; }; check; echo masked'):
+            with self.subTest(script=script):
+                process = subprocess.run([*RUNNER, 'run', '--shell', script], capture_output=True)
+                result = json.loads(process.stdout)
+                self.assertNotEqual(process.returncode, 0)
+                self.assertEqual(result['status'], 'FAIL')
+                self.assertNotIn('masked', (Path(result['evidence']) / 'stdout.log').read_text())
+
+    def test_zsh_fail_fast_when_available(self):
+        if not Path('/bin/zsh').exists():
+            self.skipTest('zsh unavailable')
+        process = subprocess.run([*RUNNER, 'run', '--shell-executable', '/bin/zsh',
+                                  '--shell', 'false | cat; echo masked'], capture_output=True)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertEqual(json.loads(process.stdout)['status'], 'FAIL')
+
+    def test_shell_explicit_recovery_and_legacy_compatibility(self):
+        for script, options in [('false || echo recovered', []),
+                                ('if false; then exit 9; fi; echo recovered', []),
+                                ('false; echo recovered', ['--shell-keep-going']),
+                                ('false; echo récupéré', ['--shell-keep-going'])]:
+            process = subprocess.run([*RUNNER, 'run', *options, '--shell', script], capture_output=True)
+            self.assertEqual(process.returncode, 0, process.stdout)
+        for options in (['--shell-keep-going'], ['--shell-keep-going=true']):
+            process = subprocess.run([*RUNNER, 'run', *options, '--', 'true'], capture_output=True)
+            self.assertNotEqual(process.returncode, 0)
+
     def test_success_flood(self):
         status, result, path = invoke("import sys;sys.stdout.write('noise\\n'*100000);sys.stderr.write('warning\\n'*50000)")
         self.assertEqual(status, 0)

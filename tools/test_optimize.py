@@ -12,6 +12,101 @@ BINARY = Path(os.environ.get('OMEGA_OPTIMIZE_BINARY', ROOT / 'rust/target/releas
 
 
 class OptimizeTest(unittest.TestCase):
+    def read_rows(self, calls):
+        rows = []
+        for i, (name, arguments, content) in enumerate(calls):
+            rows.extend([
+                {'type': 'assistant', 'message': {'content': [
+                    {'type': 'tool_use', 'id': f'read-{i}', 'name': name, 'input': arguments}]}},
+                {'type': 'user', 'message': {'content': [
+                    {'type': 'tool_result', 'tool_use_id': f'read-{i}', 'content': content}]}}])
+        return ''.join(json.dumps(row) + '\n' for row in rows)
+
+    def test_content_overlap_across_commands_ranges_and_checkpoints(self):
+        a, b, c = [f'Unique source line {i}: with enough content to fingerprint.' for i in range(3)]
+        self.transcript.write_text(self.read_rows([
+            ('Read', {'file_path': '/source', 'offset': 1, 'limit': 2}, f'1→{a}\n2→{b}'),
+            ('Bash', {'command': "'Ω-run' --shell 'sed -n \"2,3p\" source'"},
+             json.dumps({'status': 'PASS', 'stdout': b + '\n' + c})),
+            ('Bash', {'command': "'Ω-inspect' evidence --stream stdout"},
+             json.dumps({'fragments': [{'offset': 0, 'text': c}]})),
+        ]))
+        before = self.transcript.read_bytes()
+        report = json.loads(self.run_command('--check', '--json').stdout)
+        row, = report['sessions']
+        self.assertEqual((row['read_calls'], row['overlapping_read_calls'],
+                          row['repeated_read_lines'], row['novel_read_lines']), (3, 2, 2, 3))
+        self.assertEqual(row['repeated_exact_calls_extra'], 0)
+        self.assertTrue(any(f['metric'] == 'overlapping_read_calls' for f in report['findings']))
+        self.assertEqual(self.transcript.read_bytes(), before)
+        # Changed data remains novel even when file name/range or timestamps match.
+        with self.transcript.open('a') as stream:
+            stream.write(self.read_rows([
+                ('Read', {'file_path': '/source', 'offset': 1, 'limit': 2}, a + '\n' + b + ' MODIFIED')]))
+        row, = json.loads(self.run_command('--check', '--json').stdout)['sessions']
+        self.assertEqual((row['read_calls'], row['repeated_read_lines'], row['novel_read_lines']), (1, 1, 1))
+        state = self.state_path().read_text()
+        self.assertNotIn(a, state)  # only digests, never source text
+
+    def test_codex_content_overlap_uses_returned_text_not_command(self):
+        path = self.home / '.codex/sessions/session.jsonl'
+        path.parent.mkdir(parents=True)
+        source = 'Actual source contents: this line is long enough to fingerprint.'
+        rows = []
+        for i, command in enumerate(('cat file', 'sed -n "1p" file')):
+            rows.extend([
+                {'type': 'response_item', 'payload': {'type': 'function_call', 'call_id': str(i),
+                 'name': 'exec_command', 'arguments': json.dumps({'cmd': command})}},
+                {'type': 'response_item', 'payload': {'type': 'function_call_output', 'call_id': str(i),
+                 'output': json.dumps({'output': json.dumps({'stdout': source})})}}])
+        path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        report = json.loads(self.run_command('--check', '--json').stdout)
+        row, = [r for r in report['sessions'] if r['provider'] == 'codex']
+        self.assertEqual((row['read_calls'], row['repeated_read_lines']), (2, 1))
+
+    def test_whitespace_changes_are_novel_and_images_are_not_read_data(self):
+        source = 'source_line_with_semantically_significant_indentation()'
+        self.transcript.write_text(self.read_rows([
+            ('Read', {'file_path': '/source'}, source),
+            ('Read', {'file_path': '/source'}, '    ' + source),
+            ('Read', {'file_path': '/source'}, source + ' '),
+            ('Read', {'file_path': '/image.png'}, [{'type': 'image', 'source': {'data': source}}]),
+            ('Bash', {'command': 'pytest'}, source),
+        ]))
+        row, = json.loads(self.run_command('--check', '--json').stdout)['sessions']
+        self.assertEqual((row['read_calls'], row['repeated_read_lines'], row['novel_read_lines']), (3, 0, 3))
+
+    def test_resume_reads_task_first_without_transcripts_or_evidence(self):
+        tasks = self.home / '.agents/tasks'
+        (tasks / 'completed').mkdir(parents=True)
+        (tasks / 'active').mkdir()
+        task = tasks / 'completed/work.md'
+        task.write_text('Current: complete.\nEvidence: /do/not/open/stdout.log\nNext: none.\n')
+        result = json.loads(self.run_command('resume', 'work').stdout)
+        self.assertEqual(result['state'], 'completed')
+        self.assertEqual(result['content'], task.read_text())
+        self.assertFalse(self.state_path().exists())
+        self.assertEqual(self.transcript.read_bytes(), self.original_transcript)
+        (tasks / 'active/work.md').write_text('Current: work reopened.\n')
+        self.assertEqual(json.loads(self.run_command('resume', 'work.md').stdout)['state'], 'active')
+        self.assertEqual(json.loads(self.run_command('resume').stdout)['total'], 2)
+
+    def test_resume_rejects_traversal_symlinks_and_missing_tasks(self):
+        tasks = self.home / '.agents/tasks/active'
+        tasks.mkdir(parents=True)
+        (tasks / 'link.md').symlink_to(self.transcript)
+        for task in ('../secret', '/tmp/secret', 'link', 'missing', '.', 'a' * 129):
+            with self.subTest(task=task):
+                self.run_command('resume', task, success=False)
+
+    def test_resume_output_budget_and_truncation_are_explicit(self):
+        tasks = self.home / '.agents/tasks/active'
+        tasks.mkdir(parents=True)
+        (tasks / 'large.md').write_text('\x01' * 20000)
+        done = self.run_command('resume', 'large')
+        self.assertLessEqual(len(done.stdout.encode()), 8000)
+        self.assertTrue(json.loads(done.stdout)['truncated'])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -108,6 +108,26 @@ The ASCII names (`omega-run`, `omega-read`, `omega-inspect`, `omega-prune`) and 
 paths remain supported. The guard checks command resolution on `PATH` and preserves native
 sandbox and approval checks.
 
+Oversized output includes a bounded `preview` (beginning/end and prioritized errors);
+complete logs and existing failure `diagnostics` remain intact. `--inline-bytes 0`
+disables successful previews. Shell sequences now fail fast with errexit/pipefail;
+`--shell-keep-going` explicitly restores legacy last-command behavior for exploration,
+not required validations. Bash inherits errexit in substitutions. Shell conditionals,
+`||`, `!` and background jobs can still intentionally consume errors: run required
+checks as standalone argv or unconditional steps and inspect their exit statuses.
+
+For handoff/resume, `omega resume TASK` reads bounded task state, preferring active/
+over completed/, without opening transcripts or logs; `omega resume` lists candidates.
+Check current Git and the relevant referenced evidence before opening a transcript
+for a specific missing detail. Task location alone does not prove completion.
+
+`omega optimize` also reports returned-content overlap across different read commands
+and ranges, with novel lines counted separately. Only the latest 2048 distinct line
+digests per session survive checkpoints; no source text is persisted for this feature.
+Lines shorter than 32 bytes, images and failed reads are excluded. Findings are advisory:
+they neither suppress reads nor prove freshness or common source identity.
+See [measurement method and results](docs/context-reliability.md).
+
 See [native executor usage](tools/robot-exec/native/README.md) and
 [trusted read capabilities](tools/robot-exec/README.md) for options and constraints.
 

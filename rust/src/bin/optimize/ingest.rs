@@ -3,6 +3,58 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Extract only returned read data, not commands, offsets or serialized images.
+/// Content overlap is advisory: source files and transcripts are never changed.
+pub fn is_read(call: &Value) -> bool {
+    let input = call["input"].as_str().map(str::to_owned)
+        .unwrap_or_else(|| call["input"].to_string());
+    call["read"] == true || call["name"] == "Read" || input.split(|c: char| !c.is_alphanumeric() && c != '-')
+        .any(|word| matches!(word, "cat" | "sed" | "head" | "tail" | "rg" | "Ω-read" | "Ω-inspect" | "omega-read" | "omega-inspect" | "inspect"))
+}
+
+pub fn read_text(call: &Value, result: &Value) -> Vec<String> {
+    if !is_read(call) || result["is_error"] == true {
+        return Vec::new();
+    }
+    fn text(value: &Value, depth: usize, output: &mut Vec<String>) {
+        if depth > 8 { return; }
+        match value {
+            Value::String(s) => {
+                if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+                    // JSON strings/numbers in a source file are still read data.
+                    if parsed.is_array() || ["evidence", "stdout", "stderr", "output", "content", "fragments", "diagnostics", "preview"]
+                        .iter().any(|key| parsed.get(key).is_some()) {
+                        text(&parsed, depth + 1, output);
+                        return;
+                    }
+                }
+                for line in s.lines() {
+                    if let Ok(parsed) = serde_json::from_str::<Value>(line) {
+                        if parsed.get("output").is_some() || parsed.get("evidence").is_some() {
+                            text(&parsed, depth + 1, output);
+                            continue;
+                        }
+                    }
+                    output.push(line.to_owned());
+                }
+            }
+            Value::Array(items) => {
+                for item in items { text(item, depth + 1, output); }
+            }
+            Value::Object(_) if value["type"] == "image" => {}
+            Value::Object(_) => {
+                for key in ["stdout", "stderr", "output", "text", "content", "fragments", "diagnostics", "preview"] {
+                    if let Some(value) = value.get(key) { text(value, depth + 1, output); }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut output = Vec::new();
+    text(&result["content"], 0, &mut output);
+    output
+}
+
 pub fn discover(root: &Path, recursive: bool, files: &mut Vec<PathBuf>) -> Result<(), String> {
     if !root.exists() {
         return Ok(());
@@ -96,6 +148,10 @@ pub fn findings(rows: &[Value], guard: &str) -> Vec<Value> {
             (
                 "repeated_exact_calls_extra",
                 "Reuse previous evidence; rerun only after input or hypothesis changes.",
+            ),
+            (
+                "overlapping_read_calls",
+                "Returned read content overlaps earlier reads (possibly different ranges/commands). Reuse unchanged lines; inspect novel lines. Advisory only: never suppress reads or infer file freshness from overlap.",
             ),
             (
                 "tool_errors",

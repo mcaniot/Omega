@@ -1,0 +1,731 @@
+{
+  "method": "synthetic local replay; medians, no model calls or automatic read suppression",
+  "benchmark_sha256": "2f4032e8ac4c0b859ec99fdf8428557b857e85b1b31d238dd12f6390c8538ee2",
+  "platform": "Linux-6.8.0-106-generic-x86_64-with-glibc2.39",
+  "python": "3.12.14 | packaged by Anaconda, Inc. | (main, Aug 27 2026, 14:46:43) [GCC 14.3.0]",
+  "tokenizer_sha256": "8414cab924d8b9b33013f0d221c5862f365ee9be39c5c2bfae8a5a9e970478a6",
+  "token_scope": "local tokenizer counts of returned JSON and commands, not provider telemetry",
+  "repeats": 7,
+  "binaries": {
+    "before": {
+      "run": "f9c4accc2dcd787b0becd88b41d02d39e848d8d34b5757bee4569898a11aa1ed",
+      "optimize": "8b9e36d2e89e59db3ba7c7fe3aa107fa969d41445043343d893f6af97926a074"
+    },
+    "after": {
+      "run": "334c1b1624ea63c15d9ee928444ee35e8035f535d464d4f14ae54f87693f0b2d",
+      "optimize": "be0b27810a1d7c6be7be0bab245ff6bb1aef2876779021053f345f00d20f929d"
+    }
+  },
+  "samples": {
+    "before": [
+      {
+        "preview": {
+          "calls": 4,
+          "reads": 4,
+          "latency_ms": 6.789917009882629,
+          "returned_tokens": 347,
+          "command_tokens": 278,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.4971759994514287,
+          "returned_tokens": 90,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 3,
+          "reads": 3,
+          "latency_ms": 6.99403700127732,
+          "returned_tokens": 292,
+          "command_tokens": 180
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 3.235812997445464,
+          "returned_tokens": 91,
+          "command_tokens": 33,
+          "masked_failure": true
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 19.833237005514093,
+          "returned_tokens": 403,
+          "command_tokens": 25,
+          "read_calls": null,
+          "overlapping_read_calls": null,
+          "repeated_read_lines": null,
+          "novel_read_lines": null,
+          "source_reads_issued": 3
+        }
+      },
+      {
+        "preview": {
+          "calls": 4,
+          "reads": 4,
+          "latency_ms": 7.041259988909587,
+          "returned_tokens": 347,
+          "command_tokens": 278,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.6822729996638373,
+          "returned_tokens": 91,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 3,
+          "reads": 3,
+          "latency_ms": 6.330999996862374,
+          "returned_tokens": 292,
+          "command_tokens": 180
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 3.063304000534117,
+          "returned_tokens": 91,
+          "command_tokens": 33,
+          "masked_failure": true
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 19.5609990041703,
+          "returned_tokens": 403,
+          "command_tokens": 25,
+          "read_calls": null,
+          "overlapping_read_calls": null,
+          "repeated_read_lines": null,
+          "novel_read_lines": null,
+          "source_reads_issued": 3
+        }
+      },
+      {
+        "preview": {
+          "calls": 4,
+          "reads": 4,
+          "latency_ms": 6.696948999888264,
+          "returned_tokens": 343,
+          "command_tokens": 275,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.4429820041405037,
+          "returned_tokens": 91,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 3,
+          "reads": 3,
+          "latency_ms": 6.973391005885787,
+          "returned_tokens": 292,
+          "command_tokens": 180
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 3.141433000564575,
+          "returned_tokens": 89,
+          "command_tokens": 33,
+          "masked_failure": true
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 19.402593999984674,
+          "returned_tokens": 403,
+          "command_tokens": 25,
+          "read_calls": null,
+          "overlapping_read_calls": null,
+          "repeated_read_lines": null,
+          "novel_read_lines": null,
+          "source_reads_issued": 3
+        }
+      },
+      {
+        "preview": {
+          "calls": 4,
+          "reads": 4,
+          "latency_ms": 6.496916990727186,
+          "returned_tokens": 351,
+          "command_tokens": 281,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 3.076292996411212,
+          "returned_tokens": 90,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 3,
+          "reads": 3,
+          "latency_ms": 7.054868998238817,
+          "returned_tokens": 291,
+          "command_tokens": 179
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 3.357173001859337,
+          "returned_tokens": 92,
+          "command_tokens": 33,
+          "masked_failure": true
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 19.088225002633408,
+          "returned_tokens": 403,
+          "command_tokens": 25,
+          "read_calls": null,
+          "overlapping_read_calls": null,
+          "repeated_read_lines": null,
+          "novel_read_lines": null,
+          "source_reads_issued": 3
+        }
+      },
+      {
+        "preview": {
+          "calls": 4,
+          "reads": 4,
+          "latency_ms": 6.2129049765644595,
+          "returned_tokens": 347,
+          "command_tokens": 278,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.0321749907452613,
+          "returned_tokens": 91,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 3,
+          "reads": 3,
+          "latency_ms": 5.962850002106279,
+          "returned_tokens": 293,
+          "command_tokens": 181
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 2.8461390029406175,
+          "returned_tokens": 89,
+          "command_tokens": 33,
+          "masked_failure": true
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 19.229268000344746,
+          "returned_tokens": 403,
+          "command_tokens": 25,
+          "read_calls": null,
+          "overlapping_read_calls": null,
+          "repeated_read_lines": null,
+          "novel_read_lines": null,
+          "source_reads_issued": 3
+        }
+      },
+      {
+        "preview": {
+          "calls": 4,
+          "reads": 4,
+          "latency_ms": 6.505954006570391,
+          "returned_tokens": 351,
+          "command_tokens": 281,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.288032992510125,
+          "returned_tokens": 90,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 3,
+          "reads": 3,
+          "latency_ms": 7.109212994691916,
+          "returned_tokens": 289,
+          "command_tokens": 179
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 2.9882840026402846,
+          "returned_tokens": 91,
+          "command_tokens": 33,
+          "masked_failure": true
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 19.298607003293,
+          "returned_tokens": 403,
+          "command_tokens": 25,
+          "read_calls": null,
+          "overlapping_read_calls": null,
+          "repeated_read_lines": null,
+          "novel_read_lines": null,
+          "source_reads_issued": 3
+        }
+      },
+      {
+        "preview": {
+          "calls": 4,
+          "reads": 4,
+          "latency_ms": 6.789251972804777,
+          "returned_tokens": 355,
+          "command_tokens": 284,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.452390006510541,
+          "returned_tokens": 91,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 3,
+          "reads": 3,
+          "latency_ms": 6.317068997304887,
+          "returned_tokens": 289,
+          "command_tokens": 179
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 3.4085580118699,
+          "returned_tokens": 90,
+          "command_tokens": 33,
+          "masked_failure": true
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 19.45755501219537,
+          "returned_tokens": 403,
+          "command_tokens": 25,
+          "read_calls": null,
+          "overlapping_read_calls": null,
+          "repeated_read_lines": null,
+          "novel_read_lines": null,
+          "source_reads_issued": 3
+        }
+      }
+    ],
+    "after": [
+      {
+        "preview": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 5.341540003428236,
+          "returned_tokens": 151,
+          "command_tokens": 47,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.674286995898001,
+          "returned_tokens": 89,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 1.1911460023839027,
+          "returned_tokens": 104,
+          "command_tokens": 23
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 3.6101309960940853,
+          "returned_tokens": 90,
+          "command_tokens": 33,
+          "masked_failure": false
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 19.320503997732885,
+          "returned_tokens": 562,
+          "command_tokens": 25,
+          "read_calls": 3,
+          "overlapping_read_calls": 2,
+          "repeated_read_lines": 2,
+          "novel_read_lines": 2,
+          "source_reads_issued": 3
+        }
+      },
+      {
+        "preview": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 5.923324002651498,
+          "returned_tokens": 153,
+          "command_tokens": 47,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.6355909940321,
+          "returned_tokens": 92,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 1.0663709981599823,
+          "returned_tokens": 104,
+          "command_tokens": 23
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 3.490754999802448,
+          "returned_tokens": 90,
+          "command_tokens": 33,
+          "masked_failure": false
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 19.56178600084968,
+          "returned_tokens": 562,
+          "command_tokens": 25,
+          "read_calls": 3,
+          "overlapping_read_calls": 2,
+          "repeated_read_lines": 2,
+          "novel_read_lines": 2,
+          "source_reads_issued": 3
+        }
+      },
+      {
+        "preview": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 5.664205993525684,
+          "returned_tokens": 152,
+          "command_tokens": 47,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.9664679896086454,
+          "returned_tokens": 91,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 1.1633550020633265,
+          "returned_tokens": 104,
+          "command_tokens": 23
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 3.7819260032847524,
+          "returned_tokens": 91,
+          "command_tokens": 33,
+          "masked_failure": false
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 20.296268005040474,
+          "returned_tokens": 562,
+          "command_tokens": 25,
+          "read_calls": 3,
+          "overlapping_read_calls": 2,
+          "repeated_read_lines": 2,
+          "novel_read_lines": 2,
+          "source_reads_issued": 3
+        }
+      },
+      {
+        "preview": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 4.502677998971194,
+          "returned_tokens": 152,
+          "command_tokens": 47,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.6806060050148517,
+          "returned_tokens": 91,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 1.1381759977666661,
+          "returned_tokens": 104,
+          "command_tokens": 23
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 3.644932003226131,
+          "returned_tokens": 90,
+          "command_tokens": 33,
+          "masked_failure": false
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 20.285969992983155,
+          "returned_tokens": 562,
+          "command_tokens": 25,
+          "read_calls": 3,
+          "overlapping_read_calls": 2,
+          "repeated_read_lines": 2,
+          "novel_read_lines": 2,
+          "source_reads_issued": 3
+        }
+      },
+      {
+        "preview": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 4.98256400169339,
+          "returned_tokens": 152,
+          "command_tokens": 47,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.7528049977263436,
+          "returned_tokens": 92,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 1.1877200013259426,
+          "returned_tokens": 104,
+          "command_tokens": 23
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 3.4970629931194708,
+          "returned_tokens": 90,
+          "command_tokens": 33,
+          "masked_failure": false
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 19.73484801419545,
+          "returned_tokens": 562,
+          "command_tokens": 25,
+          "read_calls": 3,
+          "overlapping_read_calls": 2,
+          "repeated_read_lines": 2,
+          "novel_read_lines": 2,
+          "source_reads_issued": 3
+        }
+      },
+      {
+        "preview": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 6.0791419964516535,
+          "returned_tokens": 152,
+          "command_tokens": 47,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.7173010021215305,
+          "returned_tokens": 89,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 1.162219006801024,
+          "returned_tokens": 104,
+          "command_tokens": 23
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 3.5883959935745224,
+          "returned_tokens": 89,
+          "command_tokens": 33,
+          "masked_failure": false
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 19.44033199106343,
+          "returned_tokens": 562,
+          "command_tokens": 25,
+          "read_calls": 3,
+          "overlapping_read_calls": 2,
+          "repeated_read_lines": 2,
+          "novel_read_lines": 2,
+          "source_reads_issued": 3
+        }
+      },
+      {
+        "preview": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 5.75250199472066,
+          "returned_tokens": 152,
+          "command_tokens": 47,
+          "log_sha256": "dc5bd991633562a9f686c3cb2c0759704aa4c8afe8c369d752a48f00649458a7"
+        },
+        "small_output": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 2.321578998817131,
+          "returned_tokens": 89,
+          "command_tokens": 28
+        },
+        "resume_policy": {
+          "calls": 1,
+          "reads": 1,
+          "latency_ms": 1.149996998719871,
+          "returned_tokens": 104,
+          "command_tokens": 23
+        },
+        "validation": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 3.330669002025388,
+          "returned_tokens": 89,
+          "command_tokens": 33,
+          "masked_failure": false
+        },
+        "read_audit": {
+          "calls": 1,
+          "reads": 0,
+          "latency_ms": 19.70946599612944,
+          "returned_tokens": 562,
+          "command_tokens": 25,
+          "read_calls": 3,
+          "overlapping_read_calls": 2,
+          "repeated_read_lines": 2,
+          "novel_read_lines": 2,
+          "source_reads_issued": 3
+        }
+      }
+    ]
+  },
+  "medians": {
+    "before": {
+      "preview": {
+        "calls": 4,
+        "reads": 4,
+        "latency_ms": 6.696948999888264,
+        "returned_tokens": 347,
+        "command_tokens": 278
+      },
+      "small_output": {
+        "calls": 1,
+        "reads": 1,
+        "latency_ms": 2.452390006510541,
+        "returned_tokens": 91,
+        "command_tokens": 28
+      },
+      "resume_policy": {
+        "calls": 3,
+        "reads": 3,
+        "latency_ms": 6.973391005885787,
+        "returned_tokens": 292,
+        "command_tokens": 180
+      },
+      "validation": {
+        "calls": 1,
+        "reads": 0,
+        "latency_ms": 3.141433000564575,
+        "returned_tokens": 91,
+        "command_tokens": 33,
+        "masked_failure": true
+      },
+      "read_audit": {
+        "calls": 1,
+        "reads": 0,
+        "latency_ms": 19.402593999984674,
+        "returned_tokens": 403,
+        "command_tokens": 25,
+        "source_reads_issued": 3
+      }
+    },
+    "after": {
+      "preview": {
+        "calls": 1,
+        "reads": 1,
+        "latency_ms": 5.664205993525684,
+        "returned_tokens": 152,
+        "command_tokens": 47
+      },
+      "small_output": {
+        "calls": 1,
+        "reads": 1,
+        "latency_ms": 2.6806060050148517,
+        "returned_tokens": 91,
+        "command_tokens": 28
+      },
+      "resume_policy": {
+        "calls": 1,
+        "reads": 1,
+        "latency_ms": 1.162219006801024,
+        "returned_tokens": 104,
+        "command_tokens": 23
+      },
+      "validation": {
+        "calls": 1,
+        "reads": 0,
+        "latency_ms": 3.5883959935745224,
+        "returned_tokens": 90,
+        "command_tokens": 33,
+        "masked_failure": false
+      },
+      "read_audit": {
+        "calls": 1,
+        "reads": 0,
+        "latency_ms": 19.70946599612944,
+        "returned_tokens": 562,
+        "command_tokens": 25,
+        "read_calls": 3,
+        "overlapping_read_calls": 2,
+        "repeated_read_lines": 2,
+        "novel_read_lines": 2,
+        "source_reads_issued": 3
+      }
+    }
+  },
+  "baseline_revision": "4c612c4a794058619df6d2dec38a75573a73091e",
+  "instruction_tokens": {
+    "scope": "AGENTS.md only; unchanged other always-loaded files excluded",
+    "before": 975,
+    "after": 1085
+  }
+}

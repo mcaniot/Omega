@@ -436,6 +436,9 @@ options:
   --cwd CWD
   --timeout TIMEOUT
   --shell SHELL
+                        Fail fast with errexit and pipefail (bash/zsh)
+  --shell-keep-going
+                        Explicit legacy shell semantics; not for validations
   --shell-executable SHELL_EXECUTABLE
   --inline-bytes INLINE_BYTES
                         Inline stdout/stderr when their total size is at most
@@ -496,6 +499,7 @@ pub static RUN: Parser = Parser {
         Opt { names: &["--cwd"], dest: "cwd", kind: Kind::Str },
         Opt { names: &["--timeout"], dest: "timeout", kind: Kind::Float },
         Opt { names: &["--shell"], dest: "shell", kind: Kind::Str },
+        Opt { names: &["--shell-keep-going"], dest: "shell_keep_going", kind: Kind::Flag },
         Opt { names: &["--shell-executable"], dest: "shell_executable", kind: Kind::Str },
         Opt { names: &["--inline-bytes"], dest: "inline_bytes", kind: Kind::Int },
         Opt { names: &["--kill-after"], dest: "kill_after", kind: Kind::Float },

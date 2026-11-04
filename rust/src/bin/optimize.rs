@@ -1,7 +1,7 @@
 //! Repeatable local context audit; never rewrites or compacts conversations.
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
@@ -24,8 +24,12 @@ fn audit(
     let mut offset = start;
     let mut messages = HashMap::new();
     let mut calls = HashMap::new();
+    let mut call_order = HashMap::new();
+    let mut read_history: VecDeque<String> = pending["_read_fingerprints"].as_array()
+        .into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).take(2048).collect();
     if let Some(previous) = pending.as_object() {
         for (id, call) in previous {
+            if id == "_read_fingerprints" { continue; }
             calls.insert(id.clone(), call.clone());
         }
     }
@@ -103,6 +107,7 @@ fn audit(
                 if block["type"] == "tool_use" {
                     if let Some(id) = block["id"].as_str() {
                         calls.insert(id.to_owned(), block.clone());
+                        call_order.entry(id.to_owned()).or_insert(index);
                     }
                 } else if block["type"] == "tool_result" {
                     if let Some(id) = block["tool_use_id"].as_str() {
@@ -119,7 +124,11 @@ fn audit(
     let mut large_unbounded_reads = 0;
     let mut large_evidence_reads = 0;
     let mut large_tool_outputs = 0;
-    for (id, call) in &calls {
+    let mut seen_reads: HashSet<String> = read_history.iter().cloned().collect();
+    let (mut read_calls, mut overlapping_read_calls, mut repeated_read_lines, mut novel_read_lines) = (0, 0, 0, 0);
+    let mut sorted_calls: Vec<_> = calls.iter().collect();
+    sorted_calls.sort_by_key(|(id, _)| (call_order.get(*id).copied().unwrap_or(0), *id));
+    for (id, call) in sorted_calls {
         let signature = format!(
             "{:x}",
             Sha256::digest(format!("{}:{}", call["name"], call["input"]).as_bytes())
@@ -130,6 +139,34 @@ fn audit(
         let Some(result) = results.get(id) else {
             continue;
         };
+        let mut this_read = HashSet::new();
+        for text in ingest::read_text(call, result) {
+            for line in text.lines() {
+                // Read-tool line numbers are presentation, not source content.
+                let line = if call["name"] == "Read" {
+                    line.split_once('→').filter(|(n, _)| !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()))
+                        .map_or(line, |(_, s)| s)
+                } else { line };
+                if line.len() >= 32 {
+                    this_read.insert(format!("{:x}", Sha256::digest(line.as_bytes())));
+                }
+            }
+        }
+        if !this_read.is_empty() {
+            read_calls += 1;
+            let overlap = this_read.intersection(&seen_reads).count();
+            repeated_read_lines += overlap;
+            novel_read_lines += this_read.len() - overlap;
+            if overlap > 0 { overlapping_read_calls += 1; }
+            let mut fingerprints: Vec<_> = this_read.into_iter().collect();
+            fingerprints.sort();
+            for fingerprint in fingerprints {
+                if seen_reads.insert(fingerprint.clone()) { read_history.push_back(fingerprint); }
+                if read_history.len() > 2048 {
+                    if let Some(old) = read_history.pop_front() { seen_reads.remove(&old); }
+                }
+            }
+        }
         // Images are not text: never turn their serialized bytes into a token estimate.
         let text_bytes = match &result["content"] {
             Value::String(s) => s.len(),
@@ -159,9 +196,12 @@ fn audit(
     }
     // Carry only unfinished tool metadata across the checkpoint, never tool output or commands.
     let mut next_pending = json!({});
+    if !read_history.is_empty() {
+        next_pending["_read_fingerprints"] = json!(read_history);
+    }
     for (id, call) in &calls {
         if !results.contains_key(id) {
-            next_pending[id] = json!({"name": call["name"], "input": {
+            next_pending[id] = json!({"name": call["name"], "read": ingest::is_read(call), "input": {
                 "file_path": call["input"]["file_path"], "limit": call["input"]["limit"]}});
         }
     }
@@ -182,6 +222,10 @@ fn audit(
             "tool_calls": calls.keys().filter(|id| !carried.contains(*id)).count(),
             "tool_errors": results.values().filter(|r| r["is_error"] == true).count(),
             "repeated_exact_calls_extra": repeated,
+            "read_calls": read_calls,
+            "overlapping_read_calls": overlapping_read_calls,
+            "repeated_read_lines": repeated_read_lines,
+            "novel_read_lines": novel_read_lines,
             "large_unbounded_text_reads": large_unbounded_reads,
             "large_evidence_text_reads": large_evidence_reads,
             "large_tool_outputs": large_tool_outputs,
@@ -499,8 +543,79 @@ fn configure(home: &Path, apply: bool) -> Result<&'static str, String> {
     Ok("enabled (updated)")
 }
 
+/// Task-only entry point: never opens transcripts, evidence logs or task-supplied paths.
+fn resume(args: Vec<String>) -> Result<(), String> {
+    if args.len() > 1 { return Err("usage: omega resume [TASK]".into()); }
+    if args.first().is_some_and(|s| s == "--help" || s == "-h") {
+        println!("omega resume [TASK]\nRead active/ then completed/ task state before transcripts or logs.");
+        return Ok(());
+    }
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is required")?);
+    let root = home.join(".agents/tasks");
+    let Some(task) = args.first() else {
+        let mut tasks = Vec::new();
+        for state in ["active", "completed"] {
+            let dir = root.join(state);
+            if !dir.exists() { continue; }
+            for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if entry.file_type().map_err(|e| e.to_string())?.is_file()
+                    && name.strip_suffix(".md").is_some_and(|s| !s.is_empty() && s.len() <= 128
+                        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')) {
+                    tasks.push((state, name));
+                }
+            }
+        }
+        tasks.sort();
+        let total = tasks.len();
+        tasks.truncate(20);
+        println!("{}", json!({"tasks": tasks, "total": total, "truncated": total > 20,
+            "next": "Select the matching task with omega resume TASK; inspect Git and referenced evidence before transcripts."}));
+        return Ok(());
+    };
+    let slug = task.strip_suffix(".md").unwrap_or(task);
+    if slug.is_empty() || slug.len() > 128 || !slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err("TASK must be a task basename (letters, digits, hyphens, underscores)".into());
+    }
+    for state in ["active", "completed"] {
+        let path = root.join(state).join(format!("{slug}.md"));
+        let mut file = match OpenOptions::new().read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC).open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+            return Err("Task must be a regular file".into());
+        }
+        let mut bytes = Vec::new();
+        (&mut file).take(6001).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        let mut truncated = bytes.len() > 6000;
+        bytes.truncate(6000);
+        loop {
+            let result = json!({"task": path, "state": state,
+                "content": String::from_utf8_lossy(&bytes), "truncated": truncated,
+                "next": "Check current Git and task evidence; do not infer completion from state alone. Read transcripts only for a specific remaining gap."}).to_string();
+            if result.len() <= 7600 {
+                println!("{result}");
+                break;
+            }
+            if bytes.is_empty() { return Err("Task path exceeds response budget".into()); }
+            bytes.truncate(bytes.len() / 2);
+            truncated = true;
+        }
+        return Ok(());
+    }
+    Err(format!("Task not found in active/ or completed/: {slug}"))
+}
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1).peekable();
+    if args.peek().is_some_and(|a| a == "resume") {
+        args.next();
+        return resume(args.collect());
+    }
     if args.peek().is_some_and(|a| a == "optimize") {
         args.next();
     }
@@ -534,7 +649,7 @@ fn run() -> Result<(), String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "omega optimize [--sessions 1..50] [--json] [--report NEW.json] [--apply | --check] [--force]\nAnalyze new Claude and Codex records since the last successful checkpoint.\nAlways saves a private report with findings and fix statuses before advancing checkpoints.\nDefault: enable the installed Claude Read guard when findings justify it.\n--check disables automatic fixes; --apply explicitly enables the guard.\n--force audits full sessions. Never deletes, rewrites or compacts conversations."
+                    "omega resume [TASK]\nRead bounded task state first; never opens transcripts or logs.\nomega optimize [--sessions 1..50] [--json] [--report NEW.json] [--apply | --check] [--force]\nAnalyze new Claude and Codex records since the last successful checkpoint.\nAlways saves a private report with findings and fix statuses before advancing checkpoints.\nDefault: enable the installed Claude Read guard when findings justify it.\n--check disables automatic fixes; --apply explicitly enables the guard.\n--force audits full sessions. Never deletes, rewrites or compacts conversations."
                 );
                 return Ok(());
             }
