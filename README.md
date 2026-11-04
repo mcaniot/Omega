@@ -43,10 +43,16 @@ Rust binaries are only updated by `install.py --apply`, so run the tests first.
 
 ### Recurring context maintenance
 
-Run `omega optimize` (or `Ω-optimize`) periodically. The default is a read-only audit of
+Run `omega optimize` (or `Ω-optimize`) periodically. The default audits
 the 12 most recently modified top-level Claude transcripts, not a live-session inventory.
 `--sessions 1..50` changes the sample; `--json` emits aggregates and `--report NEW.json`
 saves a private report without overwriting files. No raw messages or tool output are emitted.
+Unchanged sessions in that sample are skipped using a persistent per-session timestamp and
+file fingerprint (nanosecond mtime/ctime, size and file identity) in
+`~/.agents/tasks/state/omega-optimize.json`. `--force` reanalyzes the sample regardless of
+previous markers. Only successful runs advance markers; files changing during an audit remain
+eligible for the next run. A process lock and atomic state replacement protect concurrent runs.
+This bookkeeping writes no conversation content and does not modify the transcripts.
 `--apply` only adds the installed Read guard if missing, preserving other hooks, settings,
 permissions and configuration symlinks. It never edits conversations or triggers compaction.
 

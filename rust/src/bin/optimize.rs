@@ -3,7 +3,8 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 fn audit(path: &Path) -> Result<Value, String> {
@@ -129,13 +130,100 @@ fn audit(path: &Path) -> Result<Value, String> {
     }))
 }
 
-fn sessions(home: &Path, limit: usize) -> Result<Vec<Value>, String> {
+fn timestamp() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|time| time.as_secs())
+        .map_err(|e| e.to_string())
+}
+
+fn fingerprint(path: &Path) -> Result<Value, String> {
+    let m = path.metadata().map_err(|e| e.to_string())?;
+    Ok(
+        json!({"size": m.len(), "mtime_seconds": m.mtime(), "mtime_nanoseconds": m.mtime_nsec(),
+        "ctime_seconds": m.ctime(), "ctime_nanoseconds": m.ctime_nsec(), "device": m.dev(), "inode": m.ino()}),
+    )
+}
+
+fn load_state(home: &Path) -> Result<(File, PathBuf, Value), String> {
+    let directory = home.join(".agents/tasks/state");
+    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(directory.join("omega-optimize.lock"))
+        .map_err(|e| e.to_string())?;
+    // The OS releases this lock even on interruption; no stale-lock cleanup is needed.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err("Another omega optimize run holds the state lock; retry later".to_owned());
+    }
+    let path = directory.join("omega-optimize.json");
+    let state = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
+            .map_err(|e| format!("Invalid optimize state: {e}"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({"version": 1, "sessions": {}}),
+        Err(e) => return Err(e.to_string()),
+    };
+    if state["version"] != 1 || !state["sessions"].is_object() {
+        return Err("Unsupported optimize state schema; existing state preserved".to_owned());
+    }
+    Ok((lock, path, state))
+}
+
+fn save_state(path: &Path, state: &Value) -> Result<(), String> {
+    let target = if fs::symlink_metadata(path).is_ok() {
+        path.canonicalize().map_err(|e| e.to_string())?
+    } else {
+        path.to_owned()
+    };
+    let temp = target.with_file_name(format!(".omega-optimize-{}.tmp", std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .map_err(|e| e.to_string())?;
+    let result = (|| -> Result<(), String> {
+        serde_json::to_writer_pretty(&mut file, state).map_err(|e| e.to_string())?;
+        file.write_all(b"\n")
+            .and_then(|_| file.sync_all())
+            .map_err(|e| e.to_string())?;
+        fs::rename(&temp, &target).map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+struct SessionBatch {
+    rows: Vec<Value>,
+    unchanged: usize,
+    unstable: usize,
+    recorded: usize,
+}
+
+fn sessions(
+    home: &Path,
+    limit: usize,
+    state: &mut Value,
+    force: bool,
+) -> Result<SessionBatch, String> {
+    let mut batch = SessionBatch {
+        rows: Vec::new(),
+        unchanged: 0,
+        unstable: 0,
+        recorded: 0,
+    };
     let root = home.join(".claude/projects");
     if !root.exists() {
-        return Ok(Vec::new());
+        return Ok(batch);
     }
     let mut files = Vec::new();
-    for directory in fs::read_dir(root).map_err(|e| e.to_string())? {
+    for directory in fs::read_dir(&root).map_err(|e| e.to_string())? {
         let directory = directory.map_err(|e| e.to_string())?;
         if !directory.file_type().map_err(|e| e.to_string())?.is_dir() {
             continue;
@@ -152,11 +240,27 @@ fn sessions(home: &Path, limit: usize) -> Result<Vec<Value>, String> {
         }
     }
     files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    files
-        .into_iter()
-        .take(limit)
-        .map(|(_, path)| audit(&path))
-        .collect()
+    for (_, path) in files.into_iter().take(limit) {
+        let key = path
+            .strip_prefix(&root)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .into_owned();
+        let before = fingerprint(&path)?;
+        if !force && state["sessions"][&key]["fingerprint"] == before {
+            batch.unchanged += 1;
+            continue;
+        }
+        batch.rows.push(audit(&path)?);
+        if fingerprint(&path)? == before {
+            state["sessions"][&key] =
+                json!({"fingerprint": before, "last_analyzed_unix_seconds": timestamp()?});
+            batch.recorded += 1;
+        } else {
+            batch.unstable += 1;
+        }
+    }
+    Ok(batch)
 }
 
 fn hook_enabled(settings: &Value, command: &str) -> bool {
@@ -282,10 +386,12 @@ fn run() -> Result<(), String> {
     let mut limit = 12;
     let mut report = None;
     let mut json_output = false;
+    let mut force = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--apply" => apply = true,
             "--json" => json_output = true,
+            "--force" => force = true,
             "--sessions" => {
                 limit = args
                     .next()
@@ -304,7 +410,7 @@ fn run() -> Result<(), String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "omega optimize [--sessions 1..50] [--json] [--report NEW.json] [--apply]\nAudit recent local Claude transcripts. --apply only enables the installed Read guard.\nNever deletes logs, changes prompts or compacts running sessions."
+                    "omega optimize [--sessions 1..50] [--json] [--report NEW.json] [--apply] [--force]\nAudit changed local Claude transcripts; --force includes unchanged sessions.\nRecords successful analyses in ~/.agents/tasks/state/omega-optimize.json.\n--apply only enables the installed Read guard. Never deletes or compacts sessions."
                 );
                 return Ok(());
             }
@@ -312,14 +418,18 @@ fn run() -> Result<(), String> {
         }
     }
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is required")?);
-    let data = sessions(&home, limit)?;
+    let (_lock, state_path, mut state) = load_state(&home)?;
+    let batch = sessions(&home, limit, &mut state, force)?;
     let guard = configure(&home, apply)?;
     let output = json!({
-        "snapshot_unix_seconds": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs(),
+        "snapshot_unix_seconds": timestamp()?,
         "selection": "most recently modified top-level transcripts; not proof of live sessions",
         "context_measure": "input + cache creation + cache read tokens, not cumulative cost or window utilization",
         "read_guard": guard,
-        "sessions": data,
+        "state_file": state_path,
+        "sessions_skipped_unchanged": batch.unchanged,
+        "sessions_changed_during_audit": batch.unstable,
+        "sessions": batch.rows,
     });
     if let Some(path) = report {
         let mut file = OpenOptions::new()
@@ -333,6 +443,9 @@ fn run() -> Result<(), String> {
     }
     if json_output {
         println!("{output}");
+        if batch.recorded > 0 {
+            save_state(&state_path, &state)?;
+        }
         return Ok(());
     }
     println!(
@@ -357,8 +470,13 @@ fn run() -> Result<(), String> {
         );
     }
     println!(
-        "Priorities: inspect evidence slices; bound code reads; checkpoint at phase changes.\nCounts indicate review targets, not proof of context rot. No transcript was modified."
+        "Unchanged skipped: {}; changed during audit (not marked): {}.\nPriorities: inspect evidence slices; bound code reads; checkpoint at phase changes.\nCounts indicate review targets, not proof of context rot. No transcript was modified.",
+        batch.unchanged, batch.unstable
     );
+    // A failed audit/configuration/report/output must not hide sessions on the next run.
+    if batch.recorded > 0 {
+        save_state(&state_path, &state)?;
+    }
     Ok(())
 }
 

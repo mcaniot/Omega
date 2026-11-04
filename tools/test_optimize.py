@@ -1,5 +1,6 @@
 """Repeatable context audits use measured tokens and never rewrite sessions."""
 import json
+import fcntl
 import os
 from pathlib import Path
 import subprocess
@@ -123,6 +124,75 @@ class OptimizeTest(unittest.TestCase):
         report = json.loads(self.run_command('--sessions', '1', '--json').stdout)
         row, = report['sessions']
         self.assertEqual(row['session'], 'newer')
+
+    def state_path(self):
+        return self.home / '.agents/tasks/state/omega-optimize.json'
+
+    def test_incremental_skip_timestamp_and_force(self):
+        first = json.loads(self.run_command('--json').stdout)
+        self.assertEqual(len(first['sessions']), 1)
+        state = json.loads(self.state_path().read_text())
+        entry = state['sessions']['project/session.jsonl']
+        self.assertGreater(entry['last_analyzed_unix_seconds'], 0)
+        self.assertIn('mtime_nanoseconds', entry['fingerprint'])
+        self.assertEqual(self.state_path().stat().st_mode & 0o777, 0o600)
+        original = self.state_path().read_bytes()
+        second = json.loads(self.run_command('--json').stdout)
+        self.assertEqual(second['sessions'], [])
+        self.assertEqual(second['sessions_skipped_unchanged'], 1)
+        self.assertEqual(self.state_path().read_bytes(), original)
+        forced = json.loads(self.run_command('--force', '--json').stdout)
+        self.assertEqual(len(forced['sessions']), 1)
+        self.assertEqual(forced['sessions_skipped_unchanged'], 0)
+
+    def test_modified_session_is_reanalyzed_even_with_restored_mtime_and_same_size(self):
+        self.run_command('--json')
+        before = self.transcript.stat()
+        text = self.transcript.read_text().replace('"input_tokens": 20,', '"input_tokens": 21,')
+        self.assertNotEqual(text, self.transcript.read_text())
+        self.transcript.write_text(text)
+        os.utime(self.transcript, ns=(before.st_atime_ns, before.st_mtime_ns))
+        report = json.loads(self.run_command('--json').stdout)
+        row, = report['sessions']
+        self.assertEqual(row['context_last'], 71)
+        self.assertEqual(report['sessions_skipped_unchanged'], 0)
+
+    def test_failed_report_or_configuration_does_not_advance_markers(self):
+        report = self.home / 'existing.json'
+        report.write_text('preserve')
+        self.run_command('--report', str(report), success=False)
+        self.assertFalse(self.state_path().exists())
+        self.run_command('--apply', success=False)
+        self.assertFalse(self.state_path().exists())
+        result = json.loads(self.run_command('--json').stdout)
+        self.assertEqual(len(result['sessions']), 1)
+
+    def test_state_lock_prevents_concurrent_marker_updates(self):
+        directory = self.state_path().parent
+        directory.mkdir(parents=True)
+        with (directory / 'omega-optimize.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            done = self.run_command('--json', success=False)
+            self.assertIn('holds the state lock', done.stderr)
+            self.assertFalse(self.state_path().exists())
+
+    def test_invalid_state_is_preserved_even_with_force(self):
+        self.state_path().parent.mkdir(parents=True)
+        for text in ('{invalid', '{"version":99,"sessions":{}}'):
+            self.state_path().write_text(text)
+            self.run_command('--force', '--json', success=False)
+            self.assertEqual(self.state_path().read_text(), text)
+
+    def test_same_session_filename_in_different_projects_has_distinct_markers(self):
+        other = self.transcript.parent.parent / 'other-project/session.jsonl'
+        other.parent.mkdir()
+        other.write_bytes(self.original_transcript)
+        report = json.loads(self.run_command('--json').stdout)
+        self.assertEqual(len(report['sessions']), 2)
+        state = json.loads(self.state_path().read_text())
+        self.assertEqual(set(state['sessions']), {'project/session.jsonl', 'other-project/session.jsonl'})
+        repeated = json.loads(self.run_command('--json').stdout)
+        self.assertEqual(repeated['sessions_skipped_unchanged'], 2)
 
 
 if __name__ == '__main__':
