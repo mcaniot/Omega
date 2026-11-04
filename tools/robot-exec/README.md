@@ -4,8 +4,8 @@ Use `/home/mcaniot/.agents/tools/robot-exec/native/run run --timeout 120 -- COMM
 general development. The compiled POSIX executor captures full stdout/stderr in
 private evidence files and returns bounded JSON. It preserves timeout (124), log
 limit (125), interruption/crash (128+signal), group cleanup, and independent
-sentinel behavior. Large output diagnostics, `inspect`, `prune`, and unsupported
-compatibility options reuse `native/run-original.py` under isolated Python.
+sentinel behavior. The executor is one Rust binary (`rust/`) that also implements diagnostics, `inspect`
+and `prune`; there is no Python fallback.
 There is no generic executor/interpreter outside-sandbox allow rule.
 
 For trusted source reads use `/home/mcaniot/.agents/tools/robot-exec/local-read`:
@@ -24,7 +24,7 @@ or sensitive reads. This capability fixes HOME, PATH and cwd; `--native-only`
 prevents falling into the generic legacy execution path. Internal helper verbs
 are not covered by allow rules.
 
-The Python Bash hook verifies canonical quoting and requests approval for remote
+The native `shell_guard` Bash hook verifies canonical quoting and requests approval for remote
 access, robot-related ROS 2/Zenoh commands, destructive Git operations, uploads
 and credential paths. It never returns an unconditional `allow`. Arbitrary
 execution tools do not acquire hook coverage by using the same machine; their
@@ -42,9 +42,12 @@ or sandbox writable roots are relaxed. A Codex upgrade moving its helper require
 reviewing and updating the exact profile path. Root installation may require
 administrator authentication.
 
-Sources are versioned in the omega repository; the compiled `local-read` and
-`native/run` stay in place and are not versioned. Files under `~/.agents/tools`
-are symlinks into the repository, so `local-read` (rooted at `~/.agents/tools`)
-rejects reading them; read them from the repository instead. To remove the
+Sources are versioned in the omega repository (`rust/`); `install.py --apply` builds
+and installs `local-read` and `native/run` as real files that are not versioned. Text
+files under `~/.agents/tools` are symlinks into the repository, so `local-read` (rooted
+at `~/.agents/tools`) rejects reading them; read them from the repository instead.
+`test_local_read.py` builds `local_read` with throwaway roots next to a stub runner and
+replays `fixtures/local_read_golden.json.gz`, recorded from the original launcher.
+To remove the
 AppArmor profile, run `apparmor_parser -R` before deleting its file. Do not prune
 evidence without explicit authorization.

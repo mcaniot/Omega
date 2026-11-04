@@ -2,15 +2,17 @@
 """Deploy this repository into ~/.agents, ~/.claude and ~/.codex.
 
 Dry run by default; --apply writes. Text sources are symlinked so edits here are
-live. Compiled robot-exec binaries and runtime state (tasks, evidence) stay real
-files in ~/.agents. An existing file or directory is replaced only when it is
-already a link or has identical content; anything else is reported as a conflict.
+live. The Rust binaries (rust/) are built with cargo and installed as real 0700
+files; runtime state (tasks, evidence) also stays real files in ~/.agents. An
+existing file or directory is replaced only when it is already a link or has
+identical content; anything else is reported as a conflict.
 """
 import argparse
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -27,6 +29,13 @@ CODEX_AGENTS = {
     'robotics-rl': ('gpt-6.1-sol', 'medium', None),
     'scout': ('gpt-5.6-luna', 'low', 'read-only'),
 }
+# Cargo binary -> installed path.
+BINARIES = {
+    'run': AGENTS / 'tools/robot-exec/native/run',
+    'local_read': AGENTS / 'tools/robot-exec/local-read',
+    'shell_guard': AGENTS / 'tools/shell_guard',
+    'session_name': CLAUDE / 'hooks/session_name',
+}
 # Codex scans ~/.agents/skills natively; Claude sees only skills linked here.
 CLAUDE_SKIP_SKILLS = {'orchestration'}
 
@@ -38,17 +47,25 @@ def tracked(root):
             yield path
 
 
+def deployable(root):
+    """Sources to link: tests and golden fixtures stay in the repository."""
+    for path in tracked(root):
+        parts = path.relative_to(root).parts
+        if not (path.name.startswith('test_') or 'fixtures' in parts):
+            yield path
+
+
 def links():
     yield AGENTS / 'AGENTS.md', REPO / 'AGENTS.md'
     for skill in sorted((REPO / 'skills').iterdir()):
         yield AGENTS / 'skills' / skill.name, skill
         if skill.name not in CLAUDE_SKIP_SKILLS:
             yield CLAUDE / 'skills' / skill.name, skill
-    for source in tracked(REPO / 'tools'):
+    for source in deployable(REPO / 'tools'):
         yield AGENTS / 'tools' / source.relative_to(REPO / 'tools'), source
     for agent in sorted((REPO / 'agents').glob('*.md')):
         yield CLAUDE / 'agents' / agent.name, agent
-    for hook in tracked(REPO / 'hooks'):
+    for hook in deployable(REPO / 'hooks'):
         yield CLAUDE / 'hooks' / hook.name, hook
 
 
@@ -80,6 +97,28 @@ def link(dest, source, apply):
         else:
             os.replace(tmp, dest)  # atomic: live hooks never see a missing file
     return 'linked' if apply else 'would link'
+
+
+def install_binaries(apply):
+    """Build the Rust crate and install each binary atomically as a 0700 real file."""
+    blocked = [dest for dest in BINARIES.values() if dest.is_dir() and not dest.is_symlink()]
+    for dest in blocked:
+        yield dest, 'CONFLICT (directory, left untouched)'
+    if blocked:
+        return
+    if not apply:
+        for dest in BINARIES.values():
+            yield dest, 'would build and install'
+        return
+    subprocess.run(['cargo', 'build', '--release', '--locked'], cwd=REPO / 'rust', check=True)
+    for name, dest in BINARIES.items():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(f'.{dest.name}.install-tmp')
+        tmp.unlink(missing_ok=True)
+        shutil.copyfile(REPO / 'rust/target/release' / name, tmp)
+        tmp.chmod(0o700)
+        os.replace(tmp, dest)
+        yield dest, 'installed'
 
 
 def frontmatter(path):
@@ -137,6 +176,7 @@ def main():
     if args.budget:
         return budget()
     results = [(dest, link(dest, source, args.apply)) for dest, source in links()]
+    results += list(install_binaries(args.apply))
     results += list(write_codex_agents(args.apply))
     for dest, status in results:
         if status != 'ok':
