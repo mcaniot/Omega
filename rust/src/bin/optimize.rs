@@ -1,29 +1,69 @@
 //! Repeatable local context audit; never rewrites or compacts conversations.
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-fn audit(path: &Path) -> Result<Value, String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
+#[path = "optimize/ingest.rs"]
+mod ingest;
+
+fn audit(
+    path: &Path,
+    provider: &str,
+    start: u64,
+    pending: &Value,
+) -> Result<(Value, u64, Value), String> {
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(file);
+    let mut offset = start;
     let mut messages = HashMap::new();
     let mut calls = HashMap::new();
+    if let Some(previous) = pending.as_object() {
+        for (id, call) in previous {
+            calls.insert(id.clone(), call.clone());
+        }
+    }
+    let carried: HashSet<_> = calls.keys().cloned().collect();
     let mut results = HashMap::new();
     let mut compactions = HashSet::new();
     let mut malformed = 0;
     let mut project = String::new();
-    for (index, line) in BufReader::new(file).lines().enumerate() {
-        let line = line.map_err(|e| e.to_string())?;
-        let row: Value = match serde_json::from_str(&line) {
+    let mut index = 0;
+    loop {
+        let mut line = Vec::new();
+        let size = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|e| e.to_string())?;
+        if size == 0 {
+            break;
+        }
+        // An active writer may not have finished this record. Do not consume it.
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        offset += size as u64;
+        index += 1;
+        let raw: Value = match serde_json::from_slice(&line) {
             Ok(row) => row,
             Err(_) => {
                 malformed += 1;
                 continue;
             }
         };
+        let row = if provider == "codex" {
+            ingest::codex(raw)
+        } else {
+            raw
+        };
+        if let Some(cwd) = row["cwd"].as_str() {
+            project = cwd.to_owned();
+        }
         if row["subtype"]
             .as_str()
             .is_some_and(|s| s.contains("compact"))
@@ -78,13 +118,14 @@ fn audit(path: &Path) -> Result<Value, String> {
     let mut repeated = 0;
     let mut large_unbounded_reads = 0;
     let mut large_evidence_reads = 0;
+    let mut large_tool_outputs = 0;
     for (id, call) in &calls {
-        let signature = format!("{}:{}", call["name"], call["input"]);
-        if !signatures.insert(signature) {
+        let signature = format!(
+            "{:x}",
+            Sha256::digest(format!("{}:{}", call["name"], call["input"]).as_bytes())
+        );
+        if !carried.contains(id) && !signatures.insert(signature) {
             repeated += 1;
-        }
-        if call["name"] != "Read" {
-            continue;
         }
         let Some(result) = results.get(id) else {
             continue;
@@ -101,7 +142,11 @@ fn audit(path: &Path) -> Result<Value, String> {
             _ => 0,
         };
         if text_bytes > 8192 {
-            if call["input"].get("limit").is_none() {
+            large_tool_outputs += 1;
+            if call["name"] != "Read" {
+                continue;
+            }
+            if call["input"]["limit"].is_null() {
                 large_unbounded_reads += 1;
             }
             if call["input"]["file_path"]
@@ -112,22 +157,54 @@ fn audit(path: &Path) -> Result<Value, String> {
             }
         }
     }
-    Ok(json!({
-        "session": path.file_stem().and_then(|p| p.to_str()).unwrap_or("?"),
-        "project": project,
-        "last_assistant_utc": ordered.last().map(|v| &v.2),
-        "requests": ordered.len(),
-        "context_first": ordered.first().map(|v| v.1).unwrap_or(0),
-        "context_last": ordered.last().map(|v| v.1).unwrap_or(0),
-        "context_peak": ordered.iter().map(|v| v.1).max().unwrap_or(0),
-        "compactions": compactions.len(),
-        "tool_calls": calls.len(),
-        "tool_errors": results.values().filter(|r| r["is_error"] == true).count(),
-        "repeated_exact_calls_extra": repeated,
-        "large_unbounded_text_reads": large_unbounded_reads,
-        "large_evidence_text_reads": large_evidence_reads,
-        "malformed_records": malformed,
-    }))
+    // Carry only unfinished tool metadata across the checkpoint, never tool output or commands.
+    let mut next_pending = json!({});
+    for (id, call) in &calls {
+        if !results.contains_key(id) {
+            next_pending[id] = json!({"name": call["name"], "input": {
+                "file_path": call["input"]["file_path"], "limit": call["input"]["limit"]}});
+        }
+    }
+    Ok((
+        json!({
+            "provider": provider,
+            "transcript": path,
+            "start_offset": start,
+            "end_offset": offset,
+            "session": path.file_stem().and_then(|p| p.to_str()).unwrap_or("?"),
+            "project": project,
+            "last_assistant_utc": ordered.last().map(|v| &v.2),
+            "requests": ordered.len(),
+            "context_first": ordered.first().map(|v| v.1).unwrap_or(0),
+            "context_last": ordered.last().map(|v| v.1).unwrap_or(0),
+            "context_peak": ordered.iter().map(|v| v.1).max().unwrap_or(0),
+            "compactions": compactions.len(),
+            "tool_calls": calls.keys().filter(|id| !carried.contains(*id)).count(),
+            "tool_errors": results.values().filter(|r| r["is_error"] == true).count(),
+            "repeated_exact_calls_extra": repeated,
+            "large_unbounded_text_reads": large_unbounded_reads,
+            "large_evidence_text_reads": large_evidence_reads,
+            "large_tool_outputs": large_tool_outputs,
+            "malformed_records": malformed,
+        }),
+        offset,
+        next_pending,
+    ))
+}
+
+fn prefix_digest(path: &Path, length: u64) -> Result<String, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let mut input = file.take(length);
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let size = input.read(&mut buffer).map_err(|e| e.to_string())?;
+        if size == 0 {
+            break;
+        }
+        digest.update(&buffer[..size]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn timestamp() -> Result<u64, String> {
@@ -218,43 +295,88 @@ fn sessions(
         unstable: 0,
         recorded: 0,
     };
-    let root = home.join(".claude/projects");
-    if !root.exists() {
-        return Ok(batch);
-    }
     let mut files = Vec::new();
-    for directory in fs::read_dir(&root).map_err(|e| e.to_string())? {
-        let directory = directory.map_err(|e| e.to_string())?;
-        if !directory.file_type().map_err(|e| e.to_string())?.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(directory.path()).map_err(|e| e.to_string())? {
-            let path = entry.map_err(|e| e.to_string())?.path();
-            if path.extension().is_some_and(|ext| ext == "jsonl") {
-                let modified = path
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .map_err(|e| e.to_string())?;
-                files.push((modified, path));
+    for (provider, root) in [
+        ("claude", home.join(".claude/projects")),
+        ("codex", home.join(".codex/sessions")),
+    ] {
+        let mut paths = Vec::new();
+        if provider == "claude" && root.exists() {
+            for directory in fs::read_dir(&root).map_err(|e| e.to_string())? {
+                let directory = directory.map_err(|e| e.to_string())?;
+                if directory.file_type().map_err(|e| e.to_string())?.is_dir() {
+                    ingest::discover(&directory.path(), false, &mut paths)?;
+                }
             }
+        } else {
+            ingest::discover(&root, true, &mut paths)?;
+        }
+        for path in paths {
+            let relative = path
+                .strip_prefix(&root)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy();
+            // Retain legacy Claude keys; namespace Codex to avoid cross-provider collisions.
+            let key = if provider == "claude" {
+                relative.into_owned()
+            } else {
+                format!("codex/{relative}")
+            };
+            let modified = path
+                .metadata()
+                .and_then(|m| m.modified())
+                .map_err(|e| e.to_string())?;
+            files.push((modified, path, key, provider));
         }
     }
     files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    for (_, path) in files.into_iter().take(limit) {
-        let key = path
-            .strip_prefix(&root)
-            .map_err(|e| e.to_string())?
-            .to_string_lossy()
-            .into_owned();
+    for (_, path, key, provider) in files {
         let before = fingerprint(&path)?;
         if !force && state["sessions"][&key]["fingerprint"] == before {
             batch.unchanged += 1;
             continue;
         }
-        batch.rows.push(audit(&path)?);
+        // Unchanged files must not consume the changed-session budget.
+        if batch.rows.len() >= limit {
+            continue;
+        }
+        let previous = &state["sessions"][&key];
+        let previous_offset = previous["offset"].as_u64().unwrap_or(0);
+        let append_only = previous_offset <= before["size"].as_u64().unwrap_or(0)
+            && previous["fingerprint"]["device"] == before["device"]
+            && previous["fingerprint"]["inode"] == before["inode"]
+            && previous["prefix_sha256"].as_str().is_some()
+            && previous["prefix_sha256"] == prefix_digest(&path, previous_offset)?;
+        let start = if !force && append_only {
+            previous_offset
+        } else {
+            0
+        };
+        let pending = if start > 0 {
+            previous["pending_calls"].clone()
+        } else {
+            Value::Null
+        };
+        let (mut row, offset, pending) = audit(&path, provider, start, &pending)?;
+        if row["project"] == "" {
+            row["project"] = previous["project"].clone();
+        }
+        row["since_unix_seconds"] = if start > 0 {
+            previous["last_analyzed_unix_seconds"].clone()
+        } else {
+            Value::Null
+        };
+        row["analysis_scope"] = json!(if start > 0 {
+            "since previous checkpoint"
+        } else {
+            "full baseline"
+        });
+        let project = row["project"].clone();
+        batch.rows.push(row);
+        let digest = prefix_digest(&path, offset)?;
         if fingerprint(&path)? == before {
-            state["sessions"][&key] =
-                json!({"fingerprint": before, "last_analyzed_unix_seconds": timestamp()?});
+            state["sessions"][&key] = json!({"fingerprint": before, "last_analyzed_unix_seconds": timestamp()?,
+                    "offset": offset, "prefix_sha256": digest, "pending_calls": pending, "project": project});
             batch.recorded += 1;
         } else {
             batch.unstable += 1;
@@ -387,11 +509,13 @@ fn run() -> Result<(), String> {
     let mut report = None;
     let mut json_output = false;
     let mut force = false;
+    let mut check = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--apply" => apply = true,
             "--json" => json_output = true,
             "--force" => force = true,
+            "--check" => check = true,
             "--sessions" => {
                 limit = args
                     .next()
@@ -410,37 +534,61 @@ fn run() -> Result<(), String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "omega optimize [--sessions 1..50] [--json] [--report NEW.json] [--apply] [--force]\nAudit changed local Claude transcripts; --force includes unchanged sessions.\nRecords successful analyses in ~/.agents/tasks/state/omega-optimize.json.\n--apply only enables the installed Read guard. Never deletes or compacts sessions."
+                    "omega optimize [--sessions 1..50] [--json] [--report NEW.json] [--apply | --check] [--force]\nAnalyze new Claude and Codex records since the last successful checkpoint.\nAlways saves a private report with findings and fix statuses before advancing checkpoints.\nDefault: enable the installed Claude Read guard when findings justify it.\n--check disables automatic fixes; --apply explicitly enables the guard.\n--force audits full sessions. Never deletes, rewrites or compacts conversations."
                 );
                 return Ok(());
             }
             _ => return Err(format!("Unknown argument: {arg}")),
         }
     }
+    if check && apply {
+        return Err("--check and --apply are mutually exclusive".to_owned());
+    }
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is required")?);
     let (_lock, state_path, mut state) = load_state(&home)?;
     let batch = sessions(&home, limit, &mut state, force)?;
-    let guard = configure(&home, apply)?;
+    let report_path = match report {
+        Some(path) => path,
+        None => {
+            let directory = home.join(".agents/tasks/reports/omega-optimize");
+            fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+            directory.join(format!("{}-{}.json", timestamp()?, std::process::id()))
+        }
+    };
+    // Reserve the report before changing configuration; never overwrite existing evidence.
+    let mut report_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&report_path)
+        .map_err(|e| e.to_string())?;
+    let current_guard = configure(&home, false)?;
+    let needs_guard = batch.rows.iter().any(|row| {
+        row["provider"] == "claude" && row["large_unbounded_text_reads"].as_u64().unwrap_or(0) > 0
+    });
+    let auto_fix = !check && needs_guard && current_guard.starts_with("missing;");
+    let guard = configure(&home, apply || auto_fix)?;
+    let findings = ingest::findings(&batch.rows, guard);
     let output = json!({
         "snapshot_unix_seconds": timestamp()?,
         "selection": "most recently modified top-level transcripts; not proof of live sessions",
-        "context_measure": "input + cache creation + cache read tokens, not cumulative cost or window utilization",
+        "context_measure": "Claude: input + cache creation + cache read; Codex: last_token_usage.input_tokens (cached tokens already included); never byte estimates or cumulative cost",
         "read_guard": guard,
+        "report_file": report_path,
+        "findings": findings,
+        "fixes_applied": if guard == "enabled (updated)" { 1 } else { 0 },
+        "automatic_fixes": !check,
         "state_file": state_path,
         "sessions_skipped_unchanged": batch.unchanged,
         "sessions_changed_during_audit": batch.unstable,
         "sessions": batch.rows,
     });
-    if let Some(path) = report {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|e| e.to_string())?;
-        serde_json::to_writer_pretty(&mut file, &output).map_err(|e| e.to_string())?;
-        writeln!(file).map_err(|e| e.to_string())?;
-    }
+    serde_json::to_writer_pretty(&mut report_file, &output).map_err(|e| e.to_string())?;
+    report_file
+        .write_all(b"\n")
+        .and_then(|_| report_file.sync_all())
+        .map_err(|e| e.to_string())?;
+    state["last_report"] = json!(report_path);
     if json_output {
         println!("{output}");
         if batch.recorded > 0 {
@@ -449,7 +597,7 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     println!(
-        "Claude context audit (transcript recency, not live-process detection)\nRead guard: {guard}\nSESSION   CONTEXT    PEAK       COMPACT  ERRORS/CALLS  LARGE READS/LOGS"
+        "Claude + Codex incremental context analysis (not live-process detection)\nRead guard: {guard}\nPROVIDER SESSION   CONTEXT    PEAK       COMPACT  ERRORS/CALLS  LARGE READS/LOGS"
     );
     for row in output["sessions"].as_array().unwrap() {
         let id: String = row["session"]
@@ -459,7 +607,8 @@ fn run() -> Result<(), String> {
             .take(8)
             .collect();
         println!(
-            "{id:8}  {:9}  {:9}  {:7}  {}/{}  {}/{}",
+            "{:8} {id:8}  {:9}  {:9}  {:7}  {}/{}  {}/{}",
+            row["provider"].as_str().unwrap_or("?"),
             row["context_last"],
             row["context_peak"],
             row["compactions"],
@@ -472,6 +621,12 @@ fn run() -> Result<(), String> {
     println!(
         "Unchanged skipped: {}; changed during audit (not marked): {}.\nPriorities: inspect evidence slices; bound code reads; checkpoint at phase changes.\nCounts indicate review targets, not proof of context rot. No transcript was modified.",
         batch.unchanged, batch.unstable
+    );
+    println!(
+        "Report: {}\nFindings: {}; fixes applied: {}.",
+        report_path.display(),
+        output["findings"].as_array().unwrap().len(),
+        output["fixes_applied"]
     );
     // A failed audit/configuration/report/output must not hide sessions on the next run.
     if batch.recorded > 0 {

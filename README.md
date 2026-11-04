@@ -17,7 +17,7 @@ The previous Omega project (memory, code graph, dashboard) is archived under the
 | `skills/*/SKILL.md` | `~/.agents/skills/` (Codex scans it), `~/.claude/skills/` | Only the description is loaded until the skill is used |
 | `rust/` | `~/.agents/tools/robot-exec/native/run`, `~/.agents/tools/robot-exec/local-read`, `~/.agents/tools/shell_guard`, `~/.claude/hooks/session_name` | Cargo crate `omega-tools`: evidence executor, trusted read launcher, PreToolUse guard (Claude + Codex), session naming hook. Built and installed as real 0700 files by `install.py --apply` |
 | Command links | `~/.local/bin/Ω-{run,read,inspect,prune}` | Short names for the native executables; `omega-*` names are also installed |
-| Context maintenance | `~/.local/bin/omega optimize`, `Ω-optimize` | Local transcript audit; `--apply` enables the installed Read guard, without purging or compacting sessions |
+| Context maintenance | `~/.local/bin/omega optimize`, `Ω-optimize` | Incremental Claude/Codex analysis, saved report and evidence-driven safe fixes; no transcript rewriting |
 | `tools/`, `hooks/` | `~/.agents/tools/`, `~/.claude/hooks/` | Docs, tests and golden fixtures for those binaries (tests and fixtures are not linked) |
 | `docs/` | — | Notes (backend audit) |
 
@@ -43,26 +43,41 @@ Rust binaries are only updated by `install.py --apply`, so run the tests first.
 
 ### Recurring context maintenance
 
-Run `omega optimize` (or `Ω-optimize`) periodically. The default audits
-the 12 most recently modified top-level Claude transcripts, not a live-session inventory.
-`--sessions 1..50` changes the sample; `--json` emits aggregates and `--report NEW.json`
-saves a private report without overwriting files. No raw messages or tool output are emitted.
-Unchanged sessions in that sample are skipped using a persistent per-session timestamp and
-file fingerprint (nanosecond mtime/ctime, size and file identity) in
-`~/.agents/tasks/state/omega-optimize.json`. `--force` reanalyzes the sample regardless of
-previous markers. Only successful runs advance markers; files changing during an audit remain
-eligible for the next run. A process lock and atomic state replacement protect concurrent runs.
-This bookkeeping writes no conversation content and does not modify the transcripts.
-`--apply` only adds the installed Read guard if missing, preserving other hooks, settings,
-permissions and configuration symlinks. It never edits conversations or triggers compaction.
+Run `omega optimize` (or `Ω-optimize`) periodically: analyze, save a report, then apply
+supported safe fixes. It selects up to 12 changed coding sessions across top-level Claude
+transcripts (`~/.claude/projects/*/*.jsonl`) and recursive Codex transcripts
+(`~/.codex/sessions/**/*.jsonl`), not a live-session inventory. `--sessions 1..50` changes
+the changed-session budget; unchanged files do not consume it.
+
+After the first baseline, only complete records appended since each session's last successful
+optimization checkpoint are analyzed. Timestamp, byte cursor, prefix hash and file fingerprint
+are stored in `~/.agents/tasks/state/omega-optimize.json`. Partial trailing records are deferred;
+unfinished tool metadata is carried to the next window. Replaced, truncated or rewritten files
+receive a full baseline, as do changed legacy entries without a cursor. `--force` explicitly
+reanalyzes full sessions. Only successful runs advance checkpoints; files changing during an
+audit remain eligible for the next run. A process lock and atomic replacement protect state.
+
+Every run saves a private JSON report under `~/.agents/tasks/reports/omega-optimize/` before
+advancing checkpoints. `--report NEW.json` selects another destination without overwriting;
+`--json` also emits the report. Findings contain metrics, session/byte-range evidence references,
+actions and fix statuses, not raw messages, commands or tool output. Review the report to make
+targeted workflow/code improvements; unhandled findings remain explicitly marked for follow-up.
+
+When new Claude findings show unbounded reads, the default enables the installed Read guard
+if missing. `--check` disables automatic fixes; `--apply` explicitly enables the guard even
+without new findings. Other hooks, disabled-hook preferences, permissions and configuration
+symlinks are preserved. Generic source changes, compaction and fixes to live Codex context
+require agent/user follow-up; the command never executes instructions from transcripts or
+claims that a guard reclaims existing context. It never rewrites conversations.
 
 The guard redirects evidence files over 8 KiB to Ω-inspect; other text over 8 KiB requires
 an explicit Read limit of 1..200 lines. This is a line bound, not a byte/token guarantee.
 Images, PDFs and notebooks retain native behavior. Restart Claude Code after first installing
 the hook; existing conversation context is not reclaimed by the guard.
 
-Input context is measured as input + cache creation + cache read tokens, deduplicated by
-message ID. Tool calls/results are deduplicated by tool-use ID. Large text reads and repeated
+Claude input context is input + cache creation + cache read tokens, deduplicated by message
+ID. Codex uses recorded `last_token_usage.input_tokens`; cached input is already included,
+and cumulative token totals are not context size. Tool calls/results are deduplicated by tool-use ID. Large text reads and repeated
 calls are review indicators, not proof of context rot; image serialization is excluded from
 text-size indicators. Model window utilization and hardware validity are not inferred.
 Keep this checkout on a branch that contains these files. An existing text file or command link
