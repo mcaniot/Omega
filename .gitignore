@@ -1,0 +1,5 @@
+__pycache__/
+.pytest_cache/
+# Compiled in place under ~/.agents/tools/robot-exec; not versioned.
+tools/robot-exec/local-read
+tools/robot-exec/native/run
