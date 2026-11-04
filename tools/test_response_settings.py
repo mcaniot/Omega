@@ -137,5 +137,9 @@ class ResponseSettingsTest(unittest.TestCase):
     def test_agent_skill_references_exist(self):
         skills = {p.name for p in (ROOT / 'skills').iterdir()}
         for agent in (ROOT / 'agents').glob('*.md'):
-            for name in re.findall(r'`([a-z-]+)` for', agent.read_text()):
+            text = agent.read_text()
+            preloaded = re.search(r'^skills:\n((?:  - .*\n)+)', text, re.M)
+            names = re.findall(r'`([a-z-]+)` for', text)
+            names += re.findall(r'- ([a-z-]+)', preloaded.group(1)) if preloaded else []
+            for name in names:
                 self.assertIn(name, skills, agent)
