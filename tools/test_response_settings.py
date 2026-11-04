@@ -30,6 +30,17 @@ class ResponseSettingsTest(unittest.TestCase):
         self.codex.write_text(self.original_codex)
         self.claude.write_text(json.dumps(self.original_claude))
 
+    def test_completion_contract_is_explicit_in_all_instruction_sources(self):
+        for source in (ROOT / "AGENTS.md", ROOT / "prompts/codex.md",
+                       ROOT / "output-styles/final-only.md"):
+            with self.subTest(source=source):
+                text = source.read_text()
+                self.assertIn("entire final response must be one short line", text)
+                self.assertIn("`commit and push done`", text)
+                self.assertIn("`task <short label> done`", text)
+                self.assertIn("Never claim done after failure or partial completion", text)
+                self.assertIn("unless explicitly requested", text)
+
     def test_preserves_settings_and_is_idempotent(self):
         original = tomllib.loads(self.codex.read_text())
         self.codex.chmod(0o600)
