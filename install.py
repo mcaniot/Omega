@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -50,6 +51,11 @@ COMMANDS = {
 CLAUDE_SKIP_SKILLS = {'orchestration'}
 
 
+def response_links():
+    yield CODEX / 'instructions.md', REPO / 'prompts/codex.md'
+    yield CLAUDE / 'output-styles/final-only.md', REPO / 'output-styles/final-only.md'
+
+
 def tracked(root):
     for path in sorted(root.rglob('*')):
         parts = path.relative_to(root).parts
@@ -67,6 +73,7 @@ def deployable(root):
 
 def links():
     yield AGENTS / 'AGENTS.md', REPO / 'AGENTS.md'
+    yield from response_links()
     for skill in sorted((REPO / 'skills').iterdir()):
         yield AGENTS / 'skills' / skill.name, skill
         if skill.name not in CLAUDE_SKIP_SKILLS:
@@ -170,9 +177,41 @@ def write_codex_agents(apply):
             yield stale, 'STALE (not in repo; remove it and its [agents.*] entry in config.toml)'
 
 
+def write_response_settings(apply):
+    """Select versioned response instructions without resetting user settings."""
+    codex = CODEX / 'config.toml'
+    codex_text = codex.read_text() if codex.exists() else ''
+    config = tomllib.loads(codex_text)
+    instructions = str(CODEX / 'instructions.md')
+    if config.get('model_instructions_file') not in (None, instructions):
+        yield codex, 'CONFLICT (model_instructions_file already configured, left untouched)'
+        return
+    claude = CLAUDE / 'settings.json'
+    claude_text = claude.read_text() if claude.exists() else '{}\n'
+    settings = json.loads(claude_text)
+    updates = []
+    if config.get('model_instructions_file') != instructions:
+        updates.append((codex, f'model_instructions_file = {json.dumps(instructions)}\n' + codex_text))
+    if settings.get('outputStyle') != 'Final only':
+        settings['outputStyle'] = 'Final only'
+        updates.append((claude, json.dumps(settings, indent=2, ensure_ascii=False) + '\n'))
+    for dest, text in updates:
+        if apply:
+            target = dest.resolve()  # preserve any user-managed config symlink
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(f'.{target.name}.install-tmp')
+            with tmp.open('w', encoding='utf-8') as stream:
+                os.chmod(tmp, target.stat().st_mode & 0o777 if target.exists() else 0o600)
+                stream.write(text)
+            os.replace(tmp, target)
+        yield dest, 'written' if apply else 'would write'
+
+
 def budget():
     """Bytes injected into every session before any work starts."""
     rows = [('AGENTS.md', (REPO / 'AGENTS.md').stat().st_size)]
+    rows += [(str(path.relative_to(REPO)), path.stat().st_size)
+             for path in (REPO / 'prompts/codex.md', REPO / 'output-styles/final-only.md')]
     for agent in sorted((REPO / 'agents').glob('*.md')):
         rows.append((f'agent {agent.stem} description', len(frontmatter(agent)[0]['description'].encode())))
     for skill in sorted((REPO / 'skills').iterdir()):
@@ -187,13 +226,18 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--apply', action='store_true', help='write changes (default is a dry run)')
     mode.add_argument('--budget', action='store_true', help='print always-loaded context size in bytes')
+    parser.add_argument('--responses-only', action='store_true', help='deploy only response instructions and settings')
     args = parser.parse_args()
     if args.budget:
         return budget()
-    results = [(dest, link(dest, source, args.apply)) for dest, source in links()]
-    results += list(install_binaries(args.apply))
-    results += list(install_commands(args.apply))
-    results += list(write_codex_agents(args.apply))
+    sources = response_links() if args.responses_only else links()
+    results = [(dest, link(dest, source, args.apply)) for dest, source in sources]
+    if not any(status.startswith('CONFLICT') for _, status in results):
+        results += list(write_response_settings(args.apply))
+    if not args.responses_only:
+        results += list(install_binaries(args.apply))
+        results += list(install_commands(args.apply))
+        results += list(write_codex_agents(args.apply))
     for dest, status in results:
         if status != 'ok':
             print(f'{status:12s} {dest}')

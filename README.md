@@ -11,6 +11,8 @@ The previous Omega project (memory, code graph, dashboard) is archived under the
 | Path | Deployed to | Role |
 | --- | --- | --- |
 | `AGENTS.md` | `~/.agents/AGENTS.md` (`~/.claude/CLAUDE.md` imports it, `~/.codex/AGENTS.md` links to it) | Global instructions, loaded in every session |
+| `prompts/codex.md` | `~/.codex/instructions.md` (link), selected by `model_instructions_file` | Compact replacement for Codex's stock base prompt; final response only |
+| `output-styles/final-only.md` | `~/.claude/output-styles/final-only.md` (link), selected by `outputStyle` | Final response only, preserving Claude's coding instructions |
 | `agents/*.md` | `~/.claude/agents/` (link), `~/.codex/agents/*.toml` (generated) | The 4 workers: scout, coder, architect, robotics-rl |
 | `skills/*/SKILL.md` | `~/.agents/skills/` (Codex scans it), `~/.claude/skills/` | Only the description is loaded until the skill is used |
 | `rust/` | `~/.agents/tools/robot-exec/native/run`, `~/.agents/tools/robot-exec/local-read`, `~/.agents/tools/shell_guard`, `~/.claude/hooks/session_name` | Cargo crate `omega-tools`: evidence executor, trusted read launcher, PreToolUse guard (Claude + Codex), session naming hook. Built and installed as real 0700 files by `install.py --apply` |
@@ -26,9 +28,15 @@ Runtime state stays outside the repository in `~/.agents/tasks/` (`active/`, `co
 python3 install.py            # dry run: lists what would change
 python3 install.py --apply    # create links, regenerate the Codex agents, build and install the Rust binaries
 python3 install.py --budget   # bytes loaded into every session
+python3 install.py --responses-only --apply  # update only response prompts and their selection
 ```
 
 Sources are symlinked: edits to `AGENTS.md`, agents and skills take effect at the next session.
+Response settings are merged into the existing Codex TOML and Claude JSON without resetting
+models, permissions or hooks. A different existing Codex `model_instructions_file` is reported
+as a conflict. Start a new Codex conversation and restart Claude Code after installation;
+existing conversations can retain their original prompts. Model caches may regenerate and
+do not control these overrides. Tool displays and required approval prompts remain visible.
 Rust binaries are only updated by `install.py --apply`, so run the tests first.
 Keep this checkout on a branch that contains these files. An existing text file or command link
 is replaced only if it is already a link or has identical content; otherwise it is reported as `CONFLICT`
@@ -83,3 +91,5 @@ they test the deployed binary; set `OMEGA_RUN_BINARY`, `OMEGA_SHELL_GUARD_BINARY
 `test_local_read.py` always builds its own binary with throwaway roots.
 `tools/test_omega_commands.py` checks both command prefixes, installer links, dispatch and guard
 policy; it defaults to the release binaries in `rust/target/release/` and accepts the same overrides.
+`python3 -m pytest tools/test_response_settings.py` checks response setting preservation,
+conflicts, idempotence, config symlinks and deployment without unrelated builds.
