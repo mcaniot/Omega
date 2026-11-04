@@ -30,16 +30,22 @@ class ResponseSettingsTest(unittest.TestCase):
         self.codex.write_text(self.original_codex)
         self.claude.write_text(json.dumps(self.original_claude))
 
-    def test_completion_contract_is_explicit_in_all_instruction_sources(self):
-        for source in (ROOT / "AGENTS.md", ROOT / "prompts/codex.md",
-                       ROOT / "output-styles/final-only.md"):
+    def test_completion_contract_is_centralized_in_agents(self):
+        text = (ROOT / 'AGENTS.md').read_text()
+        for clause in ('entire final response must be one short line',
+                       '`commit and push done`', '`task <short label> done`',
+                       'Never claim done after failure or partial completion',
+                       'unless explicitly requested'):
+            self.assertIn(clause, text)
+        for source in (ROOT / 'prompts/codex.md', ROOT / 'output-styles/final-only.md'):
             with self.subTest(source=source):
                 text = source.read_text()
-                self.assertIn("entire final response must be one short line", text)
-                self.assertIn("`commit and push done`", text)
-                self.assertIn("`task <short label> done`", text)
-                self.assertIn("Never claim done after failure or partial completion", text)
-                self.assertIn("unless explicitly requested", text)
+                self.assertIn('AGENTS.md', text)
+                self.assertNotIn('`task <short label> done`', text)
+                self.assertLess(len(text.encode()), 400)
+        style = (ROOT / 'output-styles/final-only.md').read_text()
+        self.assertIn('keep-coding-instructions: true', style)
+        self.assertIn('over default preamble and progress-update guidance', style)
 
     def test_preserves_settings_and_is_idempotent(self):
         original = tomllib.loads(self.codex.read_text())

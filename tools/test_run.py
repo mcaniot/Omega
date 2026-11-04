@@ -70,6 +70,29 @@ class CaptureTests(unittest.TestCase):
                 self.assertEqual(result['status'], 'FAIL')
                 self.assertNotIn('masked', (Path(result['evidence']) / 'stdout.log').read_text())
 
+    def test_validation_rejects_consumed_shell_failures_before_execution(self):
+        for script in ('false || echo recovered',
+                       'if false; then exit 9; fi; echo recovered',
+                       'false & wait; echo recovered',
+                       'false || echo récupéré'):
+            for options in ([], ['--shell-keep-going']):
+                with self.subTest(script=script, options=options):
+                    process = subprocess.run(
+                        [*RUNNER, 'run', '--validation', *options, '--shell', script],
+                        capture_output=True)
+                    result = json.loads(process.stdout)
+                    self.assertEqual(process.returncode, 2)
+                    self.assertEqual(result['status'], 'FAIL')
+                    self.assertIn('independent argv', result['error'])
+                    self.assertNotIn('evidence', result)  # rejected before spawning
+
+    def test_validation_checks_have_independent_exit_statuses(self):
+        for code in ("raise SystemExit(7)", "print('check réussi')"):
+            with self.subTest(code=code):
+                status, result, _ = invoke(code, '--validation')
+                self.assertEqual(status, 7 if 'SystemExit' in code else 0)
+                self.assertEqual(result['status'], 'FAIL' if status else 'PASS')
+
     def test_zsh_fail_fast_when_available(self):
         if not Path('/bin/zsh').exists():
             self.skipTest('zsh unavailable')

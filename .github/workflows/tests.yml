@@ -1,0 +1,34 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OMEGA_RUN_BINARY: ${{ github.workspace }}/rust/target/release/run
+      OMEGA_OPTIMIZE_BINARY: ${{ github.workspace }}/rust/target/release/optimize
+      OMEGA_SHELL_GUARD_BINARY: ${{ github.workspace }}/rust/target/release/shell_guard
+      OMEGA_SESSION_NAME_BINARY: ${{ github.workspace }}/rust/target/release/session_name
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Install test dependencies
+        run: python -m pip install pytest
+      - name: Build
+        run: cargo +stable build --release --locked --manifest-path rust/Cargo.toml
+      - name: Rust tests
+        run: rust/target/release/run run --validation -- cargo +stable test --locked --manifest-path rust/Cargo.toml
+      - name: Python regressions
+        run: rust/target/release/run run --validation -- python -m pytest tools hooks

@@ -41,6 +41,10 @@ POSIX sh compatibility. It requires `--shell` and is not for required validation
 Shells can explicitly handle failures in conditionals, `||`, `!`, or background jobs;
 required checks must be separate argv commands or unconditional top-level steps.
 PASS means the child exited zero, not that arbitrary output or every branch was valid.
+Use `--validation -- COMMAND ARGS` for each required check independently. This mode
+rejects `--shell` before execution, including recovered/conditional/background failures
+and keep-going mode. It trusts the executable's exit status, not its internal logic;
+passing a shell or a failure-masking script as argv is not a validated check.
 
 Evidence directories and writes are anchored to nofollow directory descriptors under the
 configured tasks root. Queued control signals are drained before status selection and stay

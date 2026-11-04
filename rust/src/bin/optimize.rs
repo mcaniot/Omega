@@ -563,13 +563,16 @@ fn resume(args: Vec<String>) -> Result<(), String> {
                 if entry.file_type().map_err(|e| e.to_string())?.is_file()
                     && name.strip_suffix(".md").is_some_and(|s| !s.is_empty() && s.len() <= 128
                         && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')) {
-                    tasks.push((state, name));
+                    let modified = entry.metadata().and_then(|m| m.modified())
+                        .map_err(|e| e.to_string())?;
+                    tasks.push((modified, state, name));
                 }
             }
         }
-        tasks.sort();
+        tasks.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| (&a.1, &a.2).cmp(&(&b.1, &b.2))));
         let total = tasks.len();
         tasks.truncate(20);
+        let tasks: Vec<_> = tasks.into_iter().map(|(_, state, name)| (state, name)).collect();
         println!("{}", json!({"tasks": tasks, "total": total, "truncated": total > 20,
             "next": "Select the matching task with omega resume TASK; inspect Git and referenced evidence before transcripts."}));
         return Ok(());

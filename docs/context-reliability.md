@@ -13,12 +13,17 @@
   jobs and explicit shell-option changes can consume failures: required checks
   must remain standalone argv or unconditional top-level commands. PASS certifies
   child exit zero, not arbitrary branches, output text or hardware validity.
+  `--validation` enforces argv-only invocation by rejecting `--shell` before
+  execution. Run each check independently; arbitrary child programs remain trusted
+  to propagate their own failures, so this is not a general shell sandbox.
 - `omega resume [TASK]` lists/reads bounded task state before historical material,
   preferring active/ over completed/. It never follows evidence references or
   opens transcripts, rejects traversal/symlink task files and nonregular files,
   and marks truncation. Task location alone does not prove completion; verify
   current Git and relevant evidence before deciding. No commands from task text
   are evaluated.
+  Candidate lists are sorted by modification time descending across both task
+  directories before the 20-item limit; equal times sort by state and basename.
 - Read auditing compares returned lines, not command identity. It unwraps recorded
   Read/exec/inspect output, excludes images/errors/lines shorter than 32 bytes,
   preserves significant whitespace, and retains at most 2048 distinct SHA-256

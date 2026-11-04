@@ -99,6 +99,27 @@ class OptimizeTest(unittest.TestCase):
             with self.subTest(task=task):
                 self.run_command('resume', task, success=False)
 
+    def test_resume_lists_newest_tasks_before_truncation_with_stable_ties(self):
+        tasks = self.home / '.agents/tasks'
+        for state in ('active', 'completed'):
+            (tasks / state).mkdir(parents=True)
+        for i in range(25):
+            task = tasks / 'active' / f'a-{i:02}.md'
+            task.write_text('old')
+            os.utime(task, (100, 100))
+        for state, name in (('completed', 'z-new'), ('active', 'z-new'), ('active', 'b-new')):
+            task = tasks / state / f'{name}.md'
+            task.write_text('recent')
+            os.utime(task, (200, 200))
+        (tasks / 'active' / 'symlink.md').symlink_to(self.transcript)
+        result = json.loads(self.run_command('resume').stdout)
+        self.assertEqual(result['total'], 28)
+        self.assertTrue(result['truncated'])
+        self.assertEqual(len(result['tasks']), 20)
+        self.assertEqual(result['tasks'][:4], [
+            ['active', 'b-new.md'], ['active', 'z-new.md'],
+            ['completed', 'z-new.md'], ['active', 'a-00.md']])
+
     def test_resume_output_budget_and_truncation_are_explicit(self):
         tasks = self.home / '.agents/tasks/active'
         tasks.mkdir(parents=True)

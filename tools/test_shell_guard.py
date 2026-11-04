@@ -98,6 +98,24 @@ class GuardTest(unittest.TestCase):
         argv = [NATIVE, 'run', '--', 'echo', ';', '>', '$(date)', chr(96) + 'date' + chr(96), "a'b", 'line\nbreak']
         self.assertEqual(self.call(shlex.join(argv)), {})
 
+    def test_inert_noncanonical_quoting_is_accepted(self):
+        for command in [f"{NATIVE} run -- sed -i '47,106d' f.py",
+                        f'{NATIVE} run -- rg -n "a|b(c)" src',
+                        f'{NATIVE}  run\t-- echo "it\'s" \'"q"\' x\'y\'"z" \'\'',
+                        f"{NATIVE} run --shell \"cd repo; ls | head\"",
+                        f'"{NATIVE}" inspect /tmp/e --search "Traceback"']:
+            with self.subTest(command=command):
+                self.assertEqual(self.call(command), {})
+        self.assertEqual(self.call(f'{NATIVE} run --shell "git push origin HEAD"')['hookSpecificOutput']
+                         ['permissionDecision'], 'ask')
+        for command in [f'{NATIVE} run -- echo "$HOME"', f'{NATIVE} run -- echo "`date`"',
+                        f'{NATIVE} run -- echo "a\\"b"', f'{NATIVE} run -- echo "hi!"',
+                        f"{NATIVE} run -- echo 'a''b'", f'{NATIVE} run -- echo ~/x', f'{NATIVE} run -- ls *.py',
+                        f'{NATIVE} run -- echo {{a,b}}', f'{NATIVE} run -- echo "a\nb"\necho leak',
+                        f'{NATIVE} run -- echo a\\ b']:
+            with self.subTest(command=command):
+                self.assertDenied(self.call(command))
+
     def decision(self, *inner, shell=None):
         argv = [NATIVE, 'run']
         argv += ['--shell', shell] if shell is not None else ['--', *inner]

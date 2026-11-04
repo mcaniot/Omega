@@ -215,6 +215,49 @@ fn shlex_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\"'\"'"))
 }
 
+/// Split commands whose quoting is inert in POSIX shells and zsh, even if not canonical:
+/// space/tab-separated words built from `shlex.quote`-safe or alphabetic characters,
+/// single-quoted text and double-quoted text without `$`, backquote, backslash or `!`.
+/// Adjacent single-quoted runs (`'a''b'`) are refused because zsh RC_QUOTES reads them
+/// differently. Anything else (newlines, globs, `~`, expansions) returns `None`.
+fn inert_split(text: &str) -> Option<Vec<String>> {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c) || (!c.is_ascii() && c.is_alphabetic());
+    let mut chars = text.chars().peekable();
+    let mut tokens = Vec::new();
+    let mut token: Option<String> = None;
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => tokens.extend(token.take()),
+            '\'' => {
+                let word = token.get_or_insert_with(String::new);
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        c => word.push(c),
+                    }
+                }
+                if chars.peek() == Some(&'\'') {
+                    return None;
+                }
+            }
+            '"' => {
+                let word = token.get_or_insert_with(String::new);
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '$' | '`' | '\\' | '!' => return None,
+                        c => word.push(c),
+                    }
+                }
+            }
+            c if safe(c) => token.get_or_insert_with(String::new).push(c),
+            _ => return None,
+        }
+    }
+    tokens.extend(token);
+    Some(tokens)
+}
+
 fn shlex_join(argv: &[String]) -> String {
     argv.iter().map(|arg| shlex_quote(arg)).collect::<Vec<_>>().join(" ")
 }
@@ -628,7 +671,8 @@ impl Guard {
         let Some(mut argv) = shlex_split(command) else {
             return self.denied("Malformed shell quoting.");
         };
-        if argv.is_empty() || command.trim_matches(py_isspace) != shlex_join(&argv) {
+        let command = command.trim_matches(py_isspace);
+        if argv.is_empty() || (command != shlex_join(&argv) && inert_split(command).as_ref() != Some(&argv)) {
             return self.denied("Unwrapped or noncanonical shell command.");
         }
         if matches!(argv[0].as_str(), "omega" | "omega-optimize" | "Ω-optimize") {

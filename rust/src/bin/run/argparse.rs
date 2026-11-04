@@ -435,6 +435,8 @@ options:
   -h, --help            show this help message and exit
   --cwd CWD
   --timeout TIMEOUT
+  --validation
+                        Require an independent argv check (reject --shell)
   --shell SHELL
                         Fail fast with errexit and pipefail (bash/zsh)
   --shell-keep-going
@@ -498,6 +500,7 @@ pub static RUN: Parser = Parser {
         HELP,
         Opt { names: &["--cwd"], dest: "cwd", kind: Kind::Str },
         Opt { names: &["--timeout"], dest: "timeout", kind: Kind::Float },
+        Opt { names: &["--validation"], dest: "validation", kind: Kind::Flag },
         Opt { names: &["--shell"], dest: "shell", kind: Kind::Str },
         Opt { names: &["--shell-keep-going"], dest: "shell_keep_going", kind: Kind::Flag },
         Opt { names: &["--shell-executable"], dest: "shell_executable", kind: Kind::Str },

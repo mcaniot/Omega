@@ -260,6 +260,11 @@ class GoldenTests(unittest.TestCase):
                 if name == 'run_help':
                     expected['stdout'] = expected['stdout'].replace(
                         '  --shell SHELL\n',
+                        '  --validation\n'
+                        '                        Require an independent argv check (reject --shell)\n'
+                        '  --shell SHELL\n')
+                    expected['stdout'] = expected['stdout'].replace(
+                        '  --shell SHELL\n',
                         '  --shell SHELL\n'
                         '                        Fail fast with errexit and pipefail (bash/zsh)\n'
                         '  --shell-keep-going\n'

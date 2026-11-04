@@ -100,6 +100,7 @@ fn native_config(args: &[Arg]) -> Option<Config> {
     let (mut cwd_arg, mut shell): (Option<&Arg>, Option<&Arg>) = (None, None);
     let mut shell_executable: Arg = b"/bin/bash".to_vec();
     let mut shell_keep_going = false;
+    let mut validation = false;
     let (mut timeout, mut grace, mut inline_bytes, mut max_log_bytes) = (0.0, 10.0, 8192i64, 2i64 << 30);
     let mut pos = 0;
     while pos < args.len() {
@@ -113,6 +114,11 @@ fn native_config(args: &[Arg]) -> Option<Config> {
         }
         if arg == b"--shell-keep-going" {
             shell_keep_going = true;
+            pos += 1;
+            continue;
+        }
+        if arg == b"--validation" {
+            validation = true;
             pos += 1;
             continue;
         }
@@ -147,6 +153,9 @@ fn native_config(args: &[Arg]) -> Option<Config> {
         }
         pos += 2;
     }
+    if validation && shell.is_some() {
+        fail("--validation requires an independent argv command, not --shell");
+    }
     let command: Vec<Arg> = match shell {
         Some(script) => {
             if pos < args.len() {
@@ -174,6 +183,9 @@ fn native_config(args: &[Arg]) -> Option<Config> {
 }
 
 fn python_run(p: &argparse::Parsed) -> Config {
+    if p.flag("validation") && p.string("shell").is_some() {
+        fail("--validation requires an independent argv command, not --shell");
+    }
     if p.flag("shell_keep_going") && p.string("shell").is_none() {
         fail("--shell-keep-going requires --shell");
     }

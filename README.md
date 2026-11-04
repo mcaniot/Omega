@@ -115,9 +115,13 @@ disables successful previews. Shell sequences now fail fast with errexit/pipefai
 not required validations. Bash inherits errexit in substitutions. Shell conditionals,
 `||`, `!` and background jobs can still intentionally consume errors: run required
 checks as standalone argv or unconditional steps and inspect their exit statuses.
+For required checks, use `omega-run --validation -- COMMAND ARGS` once per check.
+This rejects `--shell` (including keep-going mode) before execution; it does not
+inspect arbitrary executables or scripts. PASS only means that child exited zero.
 
 For handoff/resume, `omega resume TASK` reads bounded task state, preferring active/
-over completed/, without opening transcripts or logs; `omega resume` lists candidates.
+over completed/, without opening transcripts or logs; `omega resume` lists the 20
+most recently modified candidates across both directories (ties: state, then name).
 Check current Git and the relevant referenced evidence before opening a transcript
 for a specific missing detail. Task location alone does not prove completion.
 
@@ -139,6 +143,10 @@ See [native executor usage](tools/robot-exec/native/README.md) and
 - Long output goes through `Ω-run`: complete log on disk, bounded JSON in the context.
 
 ## Tests
+
+The GitHub Actions `Tests` workflow builds fresh binaries and runs Rust/Python
+checks as independent steps on push, pull request, or manual dispatch. Adding this
+workflow does not itself establish a successful remote CI run.
 
 ```sh
 cargo build --release --locked --manifest-path rust/Cargo.toml
