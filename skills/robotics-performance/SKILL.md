@@ -1,6 +1,6 @@
 ---
 name: robotics-performance
-description: Measures and diagnoses robotics latency, control jitter or simulation/rendering throughput. Use for performance investigations and optimization requests.
+description: Use when the task concerns latency, control-loop jitter or deadline misses, profiling, simulation/rendering/camera throughput, or realtime optimization of robotics code.
 ---
 
 # Robotics performance

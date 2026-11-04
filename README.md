@@ -13,8 +13,8 @@ The previous Omega project (memory, code graph, dashboard) is archived under the
 | `AGENTS.md` | `~/.agents/AGENTS.md` (`~/.claude/CLAUDE.md` imports it, `~/.codex/AGENTS.md` links to it) | Global instructions, loaded in every session |
 | `prompts/codex.md` | `~/.codex/instructions.md` (link), selected by `model_instructions_file` | Compact replacement for Codex's stock base prompt; final response only |
 | `output-styles/final-only.md` | `~/.claude/output-styles/final-only.md` (link), selected by `outputStyle` | Final response only, preserving Claude's coding instructions |
-| `agents/*.md` | `~/.claude/agents/` (link), `~/.codex/agents/*.toml` (generated standalone roles) | The 3 workers: scout, coder, architect; robotics is a skill domain (`robotics-learning`, …), not a role. Obsolete generated roles, legacy `[agents.*]` registrations and dangling links are removed |
-| `skills/*/SKILL.md` | `~/.agents/skills/` (Codex scans it), `~/.claude/skills/` | Only the description is loaded until the skill is used |
+| `agents/*.md` | `~/.claude/agents/` (link), `~/.codex/agents/*.toml` (generated standalone roles) | The 3 workers: scout, coder, architect; robotics is a skill domain (`robotics-learning`, …), not a role. Retired Omega roles (`RETIRED_AGENTS`), their legacy `[agents.*]` registrations and dangling links are removed |
+| `skills/*/SKILL.md` | `~/.agents/skills/` (Codex scans it), `~/.claude/skills/` | Only the description (`Use when …` triggers) is loaded until the task matches; agents never preload skills |
 | `rust/` | `~/.agents/tools/robot-exec/native/run`, `~/.agents/tools/robot-exec/local-read`, `~/.agents/tools/shell_guard`, `~/.claude/hooks/session_name` | Cargo crate `omega-tools`: evidence executor, trusted read launcher, PreToolUse guard (Claude + Codex), session naming hook. Built and installed as real 0700 files by `install.py --apply` |
 | Command links | `~/.local/bin/Ω-{run,read,inspect,prune}` | Short names for the native executables; `omega-*` names are also installed |
 | Context maintenance | `~/.local/bin/omega optimize`, `Ω-optimize` | Incremental Claude/Codex analysis, saved report and evidence-driven safe fixes; no transcript rewriting |
@@ -81,12 +81,24 @@ and cumulative token totals are not context size. Tool calls/results are dedupli
 calls are review indicators, not proof of context rot; image serialization is excluded from
 text-size indicators. Model window utilization and hardware validity are not inferred.
 Keep this checkout on a branch that contains these files. An existing text file or command link
-is replaced only if it is already a link or has identical content; otherwise it is reported as `CONFLICT`
-and left untouched.
+is replaced only if it already links into this repository or has identical content; otherwise it is
+reported as `CONFLICT` and left untouched.
 
 The Codex model of each agent is set in `CODEX_AGENTS` (`install.py`); `install.py --apply` generates
-standalone `~/.codex/agents/<name>.toml` roles, no `[agents.<name>]` entry is needed. Claude skills listed in `CLAUDE_SKIP_SKILLS` are visible
-only to Codex.
+standalone `~/.codex/agents/<name>.toml` roles, no `[agents.<name>]` entry is needed. An existing role
+file is rewritten only if it has the exact shape the installer writes; otherwise it is a `CONFLICT`.
+Only retired Omega roles listed in `RETIRED_AGENTS` are removed; other agent files, TOML and
+configuration are never deleted. Claude skills listed in `CLAUDE_SKIP_SKILLS` are visible only to Codex.
+
+Read-only roles (`scout`, `architect`) — actual enforcement:
+
+- Claude: the `tools` allowlist removes `Edit`, `Write`, `NotebookEdit` and `Agent` (runtime-enforced).
+  `Bash` is kept for `Ω-run`/`Ω-inspect`; it can still write under the parent's permission mode and
+  allow rules (verified: an allowlisted `touch` succeeds even with `permissionMode: plan`), so no
+  `permissionMode` is set. Bash read-only behavior is instruction-only.
+- Codex: subagents inherit the parent turn's sandbox and approvals (including `/permissions`, `--yolo`);
+  an agent file cannot narrow them, so no `sandbox_mode` is generated. Read-only is instruction-only
+  unless the parent session itself runs `--sandbox read-only`.
 
 ## Native commands
 

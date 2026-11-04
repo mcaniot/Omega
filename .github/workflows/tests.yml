@@ -28,6 +28,9 @@ jobs:
         run: python -m pip install pytest
       - name: Build
         run: cargo +stable build --release --locked --manifest-path rust/Cargo.toml
+      - name: Initialize evidence state
+        # omega-run never creates ~/.agents/tasks itself (trusted root, no symlinks).
+        run: install -d -m 700 "$HOME/.agents" "$HOME/.agents/tasks"
       - name: Rust tests
         run: rust/target/release/run run --validation -- cargo +stable test --locked --manifest-path rust/Cargo.toml
       - name: Python regressions

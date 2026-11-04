@@ -1,6 +1,6 @@
 ---
 name: tool-output
-description: Capture builds, tests, simulations and profiling as complete disk evidence with bounded diagnostics, preserved exit status and targeted log expansion.
+description: Use when Ω-run output is truncated, oversized or failed and needs targeted evidence inspection (Ω-inspect search/offsets), when interpreting exit, timeout, signal or shell-strictness status, resuming a task, or acting on an omega optimize report.
 ---
 
 Use `'Ω-run' --timeout 120 -- <argv>`.

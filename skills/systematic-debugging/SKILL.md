@@ -1,6 +1,6 @@
 ---
-name: robotics-debug
-description: Systematic root-cause debugging for any concrete failure — bug, failing or flaky test, crash, regression or unstable behavior — with specifics for controllers, QP solvers, Zenoh, threading and Isaac Lab physics.
+name: systematic-debugging
+description: Use when a bug, crash, failing or flaky test, regression or unstable behavior has a root cause that is not obvious from the error, or when root-cause analysis is requested. Includes C++ threading, QP solver, Zenoh and Isaac Lab/PhysX/Newton failures.
 ---
 
 # Systematic debugging
@@ -11,6 +11,8 @@ No fix before the root cause is established.
 2. Compare: check recent changes and the nearest working version or similar working code; list the differences. Trace the failing value to its owner, adding diagnostics at component boundaries. Check units, frames, joint/action ordering, tensor shapes, timestamps and normalization against the project contract.
 3. Test one evidence-backed hypothesis at a time with the smallest change; separate observations from hypotheses. A disproven hypothesis is replaced, never stacked with more fixes.
 4. Fix at the owner: add a test that fails before the fix, apply one correction, and verify it at the owning boundary. Symptom patches and "try X and see" are failures.
+
+Flaky or timing-dependent: measure the failure rate over bounded repeated runs; replace arbitrary sleeps with waits on the actual condition, with a timeout.
 
 Domain diagnostics:
 - C++/threads: lifetimes, races, lock ordering, callback ownership and shutdown; use an available sanitizer or debugger on a bounded reproduction.

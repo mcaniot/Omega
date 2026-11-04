@@ -4,8 +4,10 @@
 Dry run by default; --apply writes. Text sources are symlinked so edits here are
 live. The Rust binaries (rust/) are built with cargo and installed as real 0700
 files; runtime state (tasks, evidence) also stays real files in ~/.agents. An
-existing file or directory is replaced only when it is already a link or has
-identical content; anything else is reported as a conflict.
+existing file, directory or link is replaced only when it already links into this
+repository or has identical content; anything else is reported as a conflict.
+Codex agent files are rewritten only in the exact shape this installer writes, and
+only retired Omega agents (RETIRED_AGENTS) are ever removed.
 """
 import argparse
 import json
@@ -23,15 +25,17 @@ AGENTS = HOME / '.agents'
 CLAUDE = HOME / '.claude'
 CODEX = HOME / '.codex'
 
-# Codex settings per agent: (model, reasoning effort, sandbox or None to inherit).
-# Codex does not let an agent file override the parent sandbox; read-only roles
-# are also enforced by their instructions.
+# Codex settings per agent: (model, reasoning effort). Codex subagents inherit the
+# parent turn's sandbox and approvals; an agent file cannot narrow them, so no
+# sandbox_mode is written and read-only roles rely on their instructions only.
 CODEX_AGENTS = {
-    'architect': ('gpt-6.1-sol', 'high', 'read-only'),
-    'coder': ('gpt-6.1-terra', 'medium', None),
-    'scout': ('gpt-6-luna', 'low', 'read-only'),
+    'architect': ('gpt-6.1-sol', 'high'),
+    'coder': ('gpt-6.1-terra', 'medium'),
+    'scout': ('gpt-6-luna', 'low'),
 }
-# Keys of agent files written by this installer; used to recognize stale ones.
+# Former Omega agents; only these names are ever removed, never user agents.
+RETIRED_AGENTS = {'robotics-rl'}
+# Keys of agent files written by this installer (sandbox_mode: older versions).
 CODEX_AGENT_KEYS = {'name', 'description', 'model', 'model_reasoning_effort', 'sandbox_mode',
                     'developer_instructions'}
 # Cargo binary -> installed path.
@@ -116,7 +120,8 @@ def same(dest, source):
 def link(dest, source, apply):
     if dest.is_symlink() and Path(os.readlink(dest)) == source:
         return 'ok'
-    if dest.exists() and not dest.is_symlink() and not same(dest, source):
+    ours = dest.is_symlink() and Path(os.readlink(dest)).is_relative_to(REPO)
+    if dest.exists() and not ours and not same(dest, source):
         return 'CONFLICT (content differs, left untouched)'
     if apply:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -182,14 +187,21 @@ def frontmatter(path):
 
 def codex_agent(path):
     fields, body = frontmatter(path)
-    model, effort, sandbox = CODEX_AGENTS[fields['name']]
+    model, effort = CODEX_AGENTS[fields['name']]
     lines = [f'name = "{fields["name"]}"',
              f'description = {json.dumps(fields["description"], ensure_ascii=False)}',
-             f'model = "{model}"', f'model_reasoning_effort = "{effort}"']
-    if sandbox:
-        lines.append(f'sandbox_mode = "{sandbox}"')
-    lines.append(f'developer_instructions = {json.dumps(body, ensure_ascii=False)}')
+             f'model = "{model}"', f'model_reasoning_effort = "{effort}"',
+             f'developer_instructions = {json.dumps(body, ensure_ascii=False)}']
     return '\n'.join(lines) + '\n'
+
+
+def omega_agent(path):
+    """True only for a Codex agent file in the exact shape this installer writes."""
+    try:
+        table = tomllib.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
+    return set(table) <= CODEX_AGENT_KEYS and table.get('name', path.stem) == path.stem
 
 
 def legacy_agent_tables(text, names):
@@ -223,27 +235,33 @@ def write_codex_agents(apply):
         names.add(agent.stem)
         dest = CODEX / 'agents' / f'{agent.stem}.toml'
         text = codex_agent(agent)
-        if dest.is_file() and dest.read_text() == text:
+        if dest.is_file() and not dest.is_symlink() and dest.read_text() == text:
             yield dest, 'ok'
+            continue
+        if dest.is_symlink() or (dest.exists() and not omega_agent(dest)):
+            names.discard(agent.stem)  # keep its [agents.NAME] registration too
+            yield dest, 'CONFLICT (custom agent, left untouched)'
             continue
         if apply:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(text)
+            tmp = dest.with_name(f'.{dest.name}.install-tmp')
+            tmp.write_text(text)
+            os.replace(tmp, dest)
         yield dest, 'written' if apply else 'would write'
-    stale = []
-    for path in sorted((CODEX / 'agents').glob('*.toml')):
-        if path.stem in names:
+    retired = set()
+    for name in sorted(RETIRED_AGENTS):
+        path = CODEX / 'agents' / f'{name}.toml'
+        if path.is_symlink() or (path.exists() and not omega_agent(path)):
+            yield path, 'unmanaged (left untouched)'
             continue
-        if set(tomllib.loads(path.read_text())) <= CODEX_AGENT_KEYS:
-            stale.append(path.stem)
+        retired.add(name)
+        if path.exists():
             if apply:
                 path.unlink()
             yield path, 'removed stale agent' if apply else 'would remove stale agent'
-        else:
-            yield path, 'unmanaged (left untouched)'
     config = CODEX / 'config.toml'
     if config.exists():
-        text, removed = legacy_agent_tables(config.read_text(), names | set(stale))
+        text, removed = legacy_agent_tables(config.read_text(), names | retired)
         if removed:
             tomllib.loads(text)  # never write an unparsable config
             if apply:

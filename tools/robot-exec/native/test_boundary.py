@@ -51,6 +51,17 @@ class BoundaryTests(unittest.TestCase):
             self.assertEqual(metadata['status'], result['status'])
             self.assertEqual(metadata['exit_code'], process.returncode)
 
+    def test_missing_tasks_root_fails_and_ci_initializes_it_before_first_run(self):
+        fresh = self.home / 'fresh'
+        fresh.mkdir()
+        process = subprocess.run([BINARY, 'run', '--', 'true'], capture_output=True,
+                                 env={**self.env, 'HOME': str(fresh)})
+        self.assertEqual(process.returncode, 2)
+        self.assertFalse((fresh / '.agents').exists())
+        workflow = (Path(__file__).resolve().parents[3] / '.github/workflows/tests.yml').read_text()
+        init = workflow.index('"$HOME/.agents/tasks"')
+        self.assertLess(init, workflow.index('release/run run'))
+
     def test_symlink_evidence_root_is_rejected_without_changes(self):
         target = self.home / 'elsewhere'
         target.mkdir(mode=0o755)

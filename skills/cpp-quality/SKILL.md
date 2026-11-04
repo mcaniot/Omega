@@ -1,6 +1,11 @@
 ---
 name: cpp-quality
-description: Reviews or changes robotics C++ with attention to ownership, concurrency and realtime behavior. Use for C++ implementation or review, not Python-only tasks.
+description: >-
+  Use when implementing, debugging or reviewing C++ code involving
+  realtime control loops, callbacks, concurrency, mutexes, locking,
+  allocations, ownership or lifetime. Check blocking operations,
+  heap allocations, latency and deterministic execution in hot paths.
+  For simple C++ edits without these risks, no skill is needed.
 ---
 
 # C++ quality

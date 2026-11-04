@@ -1,6 +1,6 @@
 ---
 name: robotics-learning
-description: Robot learning (RL, imitation, VLA policies) and physics simulation (Isaac Lab, Newton, MuJoCo, Gazebo) — environments, rewards, observation/action spaces, training/eval scripts, datasets and sim-to-real. Use when that semantics is central, not for routine robotics code.
+description: Use when the task involves Isaac Lab, reinforcement learning, imitation learning, VLA or other learned robot policies — environments, rewards, observation/action spaces, training/evaluation, datasets or sim-to-real. Not for routine robotics code without learning or simulation semantics.
 ---
 
 # Robot learning and simulation
@@ -21,4 +21,4 @@ Imitation and datasets: verify timestamp alignment, FPS, action horizon/chunking
 
 Sim-to-real: ground domain-randomization ranges in measurements; model actuation latency, action delay, actuator limits, sensor noise and control-rate jitter; keep safety limits and e-stop semantics identical to hardware. Simulation success never certifies hardware behavior; hardware runs need explicit authorization.
 
-Validate with the cheapest discriminating check (config/shape assertions, single-env step, short headless rollout) before training; load `robotics-validation` to choose further checks and `robotics-debug` for a concrete failure. Use repository-provided Isaac Lab skills when present instead of copying them.
+Validate with the cheapest discriminating check (config/shape assertions, single-env step, short headless rollout) before training; load `robotics-validation` to choose further checks and `systematic-debugging` for a concrete failure. Use repository-provided Isaac Lab skills when present instead of copying them.

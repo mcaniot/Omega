@@ -1,6 +1,6 @@
 ---
 name: robotics-validation
-description: Selects and runs proportionate robotics regression checks, from unit contracts to simulation. Use when validating behavioral changes or deciding whether simulation evidence is sufficient.
+description: Use when choosing or running checks to prove a robotics behavior change (motion, control, policy, simulation), or judging whether unit, smoke or simulation evidence is sufficient. Not for generic non-robotics tests.
 ---
 
 # Robotics validation

@@ -1,6 +1,7 @@
 """Response configuration must preserve unrelated user settings and deployment."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import tempfile
@@ -131,15 +132,73 @@ class ResponseSettingsTest(unittest.TestCase):
         self.assertIn('# keep comment', self.codex.read_text())
         self.assertFalse((claude_agents / 'robotics-rl.md').is_symlink())
         self.assertTrue((claude_agents / 'foreign.md').is_symlink())
-        self.assertEqual([s for _, s in self.installer.write_codex_agents(True) if s != 'ok'],
-                         ['unmanaged (left untouched)'])
+        self.assertEqual([s for _, s in self.installer.write_codex_agents(True) if s != 'ok'], [])
 
-    def test_agent_skill_references_exist(self):
-        skills = {p.name for p in (ROOT / 'skills').iterdir()}
+    def test_installer_preserves_custom_agents_and_configuration(self):
+        agents = self.codex.parent / 'agents'
+        agents.mkdir()
+        # Same keys as Omega files, but not an Omega name: previously deleted as "stale".
+        mine = 'name = "mine"\ndescription = "d"\nmodel = "m"\ndeveloper_instructions = "x"\n'
+        (agents / 'mine.toml').write_text(mine)
+        custom_architect = 'name = "architect"\nmodel = "m"\nmcp_servers = {}\n'
+        (agents / 'architect.toml').write_text(custom_architect)
+        custom_retired = 'name = "robotics-rl"\nskills = {}\n'
+        (agents / 'robotics-rl.toml').write_text(custom_retired)
+        (agents / 'broken.toml').write_text('not toml [')
+        config = (self.original_codex + '[agents.architect]\ndescription = "mine"\n'
+                  'config_file = "agents/architect.toml"\n\n[agents.robotics-rl]\ndescription = "mine"\n'
+                  'config_file = "agents/robotics-rl.toml"\n')
+        self.codex.write_text(config)
+        results = dict(self.installer.write_codex_agents(True))
+        self.assertEqual((agents / 'mine.toml').read_text(), mine)
+        self.assertEqual((agents / 'architect.toml').read_text(), custom_architect)
+        self.assertEqual((agents / 'robotics-rl.toml').read_text(), custom_retired)
+        self.assertEqual((agents / 'broken.toml').read_text(), 'not toml [')
+        self.assertEqual(self.codex.read_text(), config)
+        self.assertTrue(results[agents / 'architect.toml'].startswith('CONFLICT'))
+        for name in ('coder', 'scout'):
+            self.assertNotIn('sandbox_mode', tomllib.loads((agents / f'{name}.toml').read_text()))
+        # Previously generated files (including obsolete sandbox_mode) are upgraded in place.
+        (agents / 'scout.toml').write_text('name = "scout"\nsandbox_mode = "read-only"\n')
+        list(self.installer.write_codex_agents(True))
+        self.assertEqual(tomllib.loads((agents / 'scout.toml').read_text())['model_reasoning_effort'], 'low')
+
+    def test_links_never_replace_foreign_symlinks_or_files(self):
+        claude_agents = self.installer.CLAUDE / 'agents'
+        claude_agents.mkdir()
+        own = self.home / 'my-scout.md'
+        own.write_text('mine\n')
+        (claude_agents / 'scout.md').symlink_to(own)
+        (claude_agents / 'coder.md').write_text('mine\n')
+        for name in ('scout', 'coder'):
+            status = self.installer.link(claude_agents / f'{name}.md', ROOT / f'agents/{name}.md', True)
+            self.assertTrue(status.startswith('CONFLICT'), status)
+        self.assertEqual(Path(os.readlink(claude_agents / 'scout.md')), own)
+        self.assertEqual((claude_agents / 'coder.md').read_text(), 'mine\n')
+        (claude_agents / 'architect.md').symlink_to(ROOT / 'agents/old-name.md')
+        self.assertEqual(self.installer.link(claude_agents / 'architect.md', ROOT / 'agents/architect.md', True),
+                         'linked')
+
+    def test_read_only_roles_are_enforced_where_the_runtime_allows(self):
+        for name in ('architect', 'scout'):
+            fields, _ = self.installer.frontmatter(ROOT / f'agents/{name}.md')
+            tools = {tool.strip() for tool in fields['tools'].split(',')}
+            self.assertFalse(tools & {'Edit', 'Write', 'NotebookEdit', 'Agent'}, name)
+        self.assertNotIn('tools', self.installer.frontmatter(ROOT / 'agents/coder.md')[0])
+
+    def test_agents_never_preload_skills(self):
         for agent in (ROOT / 'agents').glob('*.md'):
-            text = agent.read_text()
-            preloaded = re.search(r'^skills:\n((?:  - .*\n)+)', text, re.M)
-            names = re.findall(r'`([a-z-]+)` for', text)
-            names += re.findall(r'- ([a-z-]+)', preloaded.group(1)) if preloaded else []
-            for name in names:
-                self.assertIn(name, skills, agent)
+            self.assertNotIn('skills', self.installer.frontmatter(agent)[0], agent)
+
+    def test_skill_references_and_trigger_descriptions(self):
+        skills = {p.name for p in (ROOT / 'skills').iterdir()}
+        sources = [*(ROOT / 'agents').glob('*.md'), *(ROOT / 'skills').glob('*/SKILL.md'), ROOT / 'AGENTS.md']
+        for source in sources:
+            for name in re.findall(r'[Ll]oad `([a-z][a-z-]*)`|and `([a-z][a-z-]*)` for', source.read_text()):
+                self.assertIn(''.join(name), skills, source)
+        for name in ('systematic-debugging', 'cpp-quality', 'robotics-learning', 'robotics-performance',
+                     'robotics-validation', 'tool-output'):
+            fields, _ = self.installer.frontmatter(ROOT / 'skills' / name / 'SKILL.md')
+            self.assertEqual(fields['name'], name)
+            self.assertTrue(fields['description'].startswith('Use when '), name)
+            self.assertLessEqual(len(fields['description']), 1024, name)
