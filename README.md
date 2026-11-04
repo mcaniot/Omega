@@ -17,6 +17,7 @@ The previous Omega project (memory, code graph, dashboard) is archived under the
 | `skills/*/SKILL.md` | `~/.agents/skills/` (Codex scans it), `~/.claude/skills/` | Only the description is loaded until the skill is used |
 | `rust/` | `~/.agents/tools/robot-exec/native/run`, `~/.agents/tools/robot-exec/local-read`, `~/.agents/tools/shell_guard`, `~/.claude/hooks/session_name` | Cargo crate `omega-tools`: evidence executor, trusted read launcher, PreToolUse guard (Claude + Codex), session naming hook. Built and installed as real 0700 files by `install.py --apply` |
 | Command links | `~/.local/bin/Ω-{run,read,inspect,prune}` | Short names for the native executables; `omega-*` names are also installed |
+| Context maintenance | `~/.local/bin/omega optimize`, `Ω-optimize` | Local transcript audit; `--apply` enables the installed Read guard, without purging or compacting sessions |
 | `tools/`, `hooks/` | `~/.agents/tools/`, `~/.claude/hooks/` | Docs, tests and golden fixtures for those binaries (tests and fixtures are not linked) |
 | `docs/` | — | Notes (backend audit) |
 
@@ -29,6 +30,7 @@ python3 install.py            # dry run: lists what would change
 python3 install.py --apply    # create links, regenerate the Codex agents, build and install the Rust binaries
 python3 install.py --budget   # bytes loaded into every session
 python3 install.py --responses-only --apply  # update only response prompts and their selection
+python3 install.py --context-only --apply    # install context guard, audit CLI and command links only
 ```
 
 Sources are symlinked: edits to `AGENTS.md`, agents and skills take effect at the next session.
@@ -38,6 +40,25 @@ as a conflict. Start a new Codex conversation and restart Claude Code after inst
 existing conversations can retain their original prompts. Model caches may regenerate and
 do not control these overrides. Tool displays and required approval prompts remain visible.
 Rust binaries are only updated by `install.py --apply`, so run the tests first.
+
+### Recurring context maintenance
+
+Run `omega optimize` (or `Ω-optimize`) periodically. The default is a read-only audit of
+the 12 most recently modified top-level Claude transcripts, not a live-session inventory.
+`--sessions 1..50` changes the sample; `--json` emits aggregates and `--report NEW.json`
+saves a private report without overwriting files. No raw messages or tool output are emitted.
+`--apply` only adds the installed Read guard if missing, preserving other hooks, settings,
+permissions and configuration symlinks. It never edits conversations or triggers compaction.
+
+The guard redirects evidence files over 8 KiB to Ω-inspect; other text over 8 KiB requires
+an explicit Read limit of 1..200 lines. This is a line bound, not a byte/token guarantee.
+Images, PDFs and notebooks retain native behavior. Restart Claude Code after first installing
+the hook; existing conversation context is not reclaimed by the guard.
+
+Input context is measured as input + cache creation + cache read tokens, deduplicated by
+message ID. Tool calls/results are deduplicated by tool-use ID. Large text reads and repeated
+calls are review indicators, not proof of context rot; image serialization is excluded from
+text-size indicators. Model window utilization and hardware validity are not inferred.
 Keep this checkout on a branch that contains these files. An existing text file or command link
 is replaced only if it is already a link or has identical content; otherwise it is reported as `CONFLICT`
 and left untouched.

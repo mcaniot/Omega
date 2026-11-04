@@ -35,9 +35,14 @@ BINARIES = {
     'run': AGENTS / 'tools/robot-exec/native/run',
     'local_read': AGENTS / 'tools/robot-exec/local-read',
     'shell_guard': AGENTS / 'tools/shell_guard',
+    'context_guard': AGENTS / 'tools/context_guard',
+    'optimize': AGENTS / 'tools/optimize',
     'session_name': CLAUDE / 'hooks/session_name',
 }
 COMMANDS = {
+    'omega': BINARIES['optimize'],
+    'omega-optimize': BINARIES['optimize'],
+    'Ω-optimize': BINARIES['optimize'],
     'omega-run': BINARIES['run'],
     'omega-inspect': BINARIES['run'],
     'omega-prune': BINARIES['run'],
@@ -86,8 +91,10 @@ def links():
         yield CLAUDE / 'hooks' / hook.name, hook
 
 
-def install_commands(apply):
+def install_commands(apply, names=None):
     for name, target in COMMANDS.items():
+        if names is not None and name not in names:
+            continue
         yield HOME / '.local/bin' / name, link(HOME / '.local/bin' / name, target, apply)
 
 
@@ -121,19 +128,24 @@ def link(dest, source, apply):
     return 'linked' if apply else 'would link'
 
 
-def install_binaries(apply):
+def install_binaries(apply, names=None):
     """Build the Rust crate and install each binary atomically as a 0700 real file."""
-    blocked = [dest for dest in BINARIES.values() if dest.is_dir() and not dest.is_symlink()]
+    binaries = BINARIES if names is None else {name: BINARIES[name] for name in names}
+    blocked = [dest for dest in binaries.values() if dest.is_dir() and not dest.is_symlink()]
     for dest in blocked:
         yield dest, 'CONFLICT (directory, left untouched)'
     if blocked:
         return
     if not apply:
-        for dest in BINARIES.values():
+        for dest in binaries.values():
             yield dest, 'would build and install'
         return
-    subprocess.run(['cargo', 'build', '--release', '--locked'], cwd=REPO / 'rust', check=True)
-    for name, dest in BINARIES.items():
+    command = ['cargo', 'build', '--release', '--locked']
+    if names is not None:
+        for name in names:
+            command += ['--bin', name]
+    subprocess.run(command, cwd=REPO / 'rust', check=True)
+    for name, dest in binaries.items():
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(f'.{dest.name}.install-tmp')
         tmp.unlink(missing_ok=True)
@@ -207,6 +219,29 @@ def write_response_settings(apply):
         yield dest, 'written' if apply else 'would write'
 
 
+def write_context_settings(apply):
+    """Add only our Read hook; preserve third-party hooks, permissions and symlinks."""
+    dest = CLAUDE / 'settings.json'
+    settings = json.loads(dest.read_text()) if dest.exists() else {}
+    groups = settings.setdefault('hooks', {}).setdefault('PreToolUse', [])
+    command = str(BINARIES['context_guard'])
+    for group in groups:
+        if group.get('matcher') in ('Read', '*') and any(
+                hook.get('type') == 'command' and hook.get('command') == command
+                for hook in group.get('hooks', [])):
+            return
+    groups.append({'matcher': 'Read', 'hooks': [{'type': 'command', 'command': command}]})
+    if apply:
+        target = dest.resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f'.{target.name}.install-tmp')
+        with tmp.open('w', encoding='utf-8') as stream:
+            os.chmod(tmp, target.stat().st_mode & 0o777 if target.exists() else 0o600)
+            stream.write(json.dumps(settings, indent=2, ensure_ascii=False) + '\n')
+        os.replace(tmp, target)
+    yield dest, 'written' if apply else 'would write'
+
+
 def budget():
     """Bytes injected into every session before any work starts."""
     rows = [('AGENTS.md', (REPO / 'AGENTS.md').stat().st_size)]
@@ -227,7 +262,20 @@ def main():
     mode.add_argument('--apply', action='store_true', help='write changes (default is a dry run)')
     mode.add_argument('--budget', action='store_true', help='print always-loaded context size in bytes')
     parser.add_argument('--responses-only', action='store_true', help='deploy only response instructions and settings')
+    parser.add_argument('--context-only', action='store_true', help='deploy only the Claude Read guard and its hook')
     args = parser.parse_args()
+    if args.context_only:
+        if args.responses_only or args.budget:
+            parser.error('--context-only cannot be combined with --responses-only or --budget')
+        # Parse settings before building/installing anything; malformed settings stay untouched.
+        list(write_context_settings(False))
+        results = list(install_binaries(args.apply, names=('context_guard', 'optimize', 'shell_guard')))
+        if not any(status.startswith('CONFLICT') for _, status in results):
+            results += list(write_context_settings(args.apply))
+            results += list(install_commands(args.apply, names=('omega', 'omega-optimize', 'Ω-optimize')))
+        for dest, status in results:
+            print(f'{status:12s} {dest}')
+        return int(any(status.startswith('CONFLICT') for _, status in results))
     if args.budget:
         return budget()
     sources = response_links() if args.responses_only else links()
@@ -236,6 +284,7 @@ def main():
         results += list(write_response_settings(args.apply))
     if not args.responses_only:
         results += list(install_binaries(args.apply))
+        results += list(write_context_settings(args.apply))
         results += list(install_commands(args.apply))
         results += list(write_codex_agents(args.apply))
     for dest, status in results:

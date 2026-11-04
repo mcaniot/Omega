@@ -542,6 +542,7 @@ impl Decision {
 struct Guard {
     native: String,
     local_read: String,
+    optimize: String,
     guidance: String,
 }
 
@@ -583,8 +584,9 @@ impl Guard {
     fn new() -> Self {
         let native = expanduser("/.agents/tools/robot-exec/native/run");
         let local_read = expanduser("/.agents/tools/robot-exec/local-read");
+        let optimize = expanduser("/.agents/tools/optimize");
         let guidance = GUIDANCE_TAIL.replace("{NATIVE}", &native);
-        Guard { native, local_read, guidance }
+        Guard { native, local_read, optimize, guidance }
     }
 
     fn denied(&self, reason: &str) -> Option<Decision> {
@@ -628,6 +630,16 @@ impl Guard {
         };
         if argv.is_empty() || command.trim_matches(py_isspace) != shlex_join(&argv) {
             return self.denied("Unwrapped or noncanonical shell command.");
+        }
+        if matches!(argv[0].as_str(), "omega" | "omega-optimize" | "Ω-optimize") {
+            if !Self::trusted_alias(&argv[0], &self.optimize) {
+                return self.denied("Untrusted omega command on PATH.");
+            }
+            argv[0] = self.optimize.clone();
+        }
+        if argv[0] == self.optimize {
+            // Fixed native CLI, no shell evaluation; retain native permission checks.
+            return None;
         }
         let alias = match argv[0].as_str() {
             "omega-run" | "Ω-run" => Some("run"),

@@ -33,7 +33,8 @@ class OmegaCommandsTest(unittest.TestCase):
         }
         for target in set(installer.COMMANDS.values()):
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.symlink_to(RUN if target.name == 'run' else RUN.parent / 'local_read')
+            binary = 'run' if target.name == 'run' else ('optimize' if target.name == 'optimize' else 'local_read')
+            target.symlink_to(RUN.parent / binary)
         self.assertTrue(all(status == 'linked' for _, status in installer.install_commands(True)))
         self.env = dict(os.environ, HOME=str(self.home), PATH=f'{self.bin}:/usr/bin:/bin')
 
@@ -68,9 +69,23 @@ class OmegaCommandsTest(unittest.TestCase):
             (['omega-read', 'status'], None),
             (['omega-read', 'text', 'AGENTS.md'], None),
             (['omega-read', 'unknown'], 'deny'),
+            (['omega-optimize', '--sessions', '2'], None),
+            (['omega', 'optimize'], None),
         ]:
             with self.subTest(argv=argv):
                 self.assertEqual(self.decision(*argv), expected)
+
+    def test_optimize_dispatch(self):
+        for argv in ([self.prefix + 'optimize', '--json'], ['omega', 'optimize', '--json']):
+            result = subprocess.run(argv, env=self.env, capture_output=True, text=True, check=True)
+            self.assertEqual(json.loads(result.stdout)['sessions'], [])
+
+    def test_shadowed_optimize_alias_is_denied(self):
+        shadow = self.home / 'optimize-shadow'
+        shadow.mkdir()
+        (shadow / (self.prefix + 'optimize')).symlink_to('/bin/echo')
+        self.env['PATH'] = f'{shadow}:{self.bin}:/usr/bin:/bin'
+        self.assertEqual(self.decision('omega-optimize'), 'deny')
 
     def test_shadowed_and_missing_aliases_are_denied(self):
         shadow = self.home / 'shadow'
