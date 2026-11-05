@@ -1,5 +1,8 @@
 //! PreToolUse hook: require the evidence wrapper without granting native execution permission.
 //!
+//! With `--allow-clean` (Claude only), a wrapper call that passes every check and matches no
+//! deny/ask policy returns `allow` instead of deferring to native permission prompts.
+//!
 //! Only the native `run` executor (run/inspect/prune) and `local-read` pass; every other
 //! shell command is denied. Stdout is the compact JSON of Python's
 //! `json.dumps(result, separators=(',', ':'))`. The JSON reader, `shlex` and `str.strip`
@@ -587,6 +590,7 @@ struct Guard {
     local_read: String,
     optimize: String,
     guidance: String,
+    allow_clean: bool,
 }
 
 /// `os.path.expanduser('~' + rest)`.
@@ -624,12 +628,18 @@ impl Guard {
         false
     }
 
-    fn new() -> Self {
+    fn new(allow_clean: bool) -> Self {
         let native = expanduser("/.agents/tools/robot-exec/native/run");
         let local_read = expanduser("/.agents/tools/robot-exec/local-read");
         let optimize = expanduser("/.agents/tools/optimize");
         let guidance = GUIDANCE_TAIL.replace("{NATIVE}", &native);
-        Guard { native, local_read, optimize, guidance }
+        Guard { native, local_read, optimize, guidance, allow_clean }
+    }
+
+    /// Outcome of a fully checked, policy-clean wrapper call.
+    fn clean(&self) -> Option<Decision> {
+        self.allow_clean
+            .then(|| Decision::new("allow", "Omega guard: wrapped command matched no deny or ask policy.".to_string()))
     }
 
     fn denied(&self, reason: &str) -> Option<Decision> {
@@ -682,8 +692,8 @@ impl Guard {
             argv[0] = self.optimize.clone();
         }
         if argv[0] == self.optimize {
-            // Fixed native CLI, no shell evaluation; retain native permission checks.
-            return None;
+            // Fixed native CLI, no shell evaluation.
+            return self.clean();
         }
         let alias = match argv[0].as_str() {
             "omega-run" | "Ω-run" => Some("run"),
@@ -713,11 +723,10 @@ impl Guard {
                 return self.denied("Unsupported read capability or arguments.");
             }
             // The compiled launcher validates roots, sensitive paths and numeric ranges.
-            // Empty output preserves native sandbox/permission checks; never grant allow.
-            return None;
+            return self.clean();
         }
         // Canonical quoting makes metacharacters literal arguments to the wrapper.
-        // Never return "allow": native sandbox and approval checks still apply.
+        // Without --allow-clean, native sandbox and approval checks still apply.
         if argv.len() < 2 || argv[0] != self.native || !matches!(argv[1].as_str(), "run" | "inspect" | "prune") {
             return self.denied("Unwrapped or noncanonical shell command.");
         }
@@ -728,12 +737,12 @@ impl Guard {
         if argv[1] == "prune" && argv.iter().any(|a| a == "--apply") {
             return Some(Decision::new("ask", "Deleting old evidence requires explicit user approval.".to_string()));
         }
-        policy(&Self::inner_text(&argv))
+        policy(&Self::inner_text(&argv)).or_else(|| self.clean())
     }
 }
 
 fn run() -> String {
-    let guard = Guard::new();
+    let guard = Guard::new(std::env::args().nth(1).as_deref() == Some("--allow-clean"));
     let mut input = Vec::new();
     if std::io::stdin().read_to_end(&mut input).is_err() {
         return Decision::render(guard.denied("Guard internal error (OSError).").as_ref());

@@ -23,12 +23,12 @@ NATIVE = f'{HOME}/.agents/tools/robot-exec/native/run'
 LOCAL_READ = f'{HOME}/.agents/tools/robot-exec/local-read'
 
 
-def guard(stdin, home=HOME):
+def guard(stdin, home=HOME, args=()):
     """(exit code, stdout, stderr) of one hook invocation."""
     env = {'PATH': '/usr/bin:/bin', 'LANG': 'en_US.UTF-8', 'LC_ALL': 'en_US.UTF-8'}
     if home is not None:
         env['HOME'] = home
-    done = subprocess.run([BINARY], input=stdin, capture_output=True, env=env, timeout=30)
+    done = subprocess.run([BINARY, *args], input=stdin, capture_output=True, env=env, timeout=30)
     return done.returncode, done.stdout, done.stderr
 
 
@@ -160,6 +160,31 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(self.call(shlex.join([NATIVE, 'prune'])), {})
         result = self.call(shlex.join([NATIVE, 'prune', '--apply']))
         self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'ask')
+
+    def test_allow_clean_grants_only_policy_clean_wrapper_calls(self):
+        def decision(command, tool='Bash'):
+            payload = json.dumps({'tool_name': tool, 'tool_input': {'command': command}}).encode()
+            code, out, err = guard(payload, args=('--allow-clean',))
+            self.assertEqual((code, err), (0, b''))
+            return json.loads(out).get('hookSpecificOutput', {}).get('permissionDecision', 'pass')
+        cases = [
+            ([NATIVE, 'run', '--', 'cargo', 'build'], 'allow'),
+            ([NATIVE, 'run', '--shell', 'make -j8 && pytest -q'], 'allow'),
+            ([NATIVE, 'inspect', '/tmp/evidence'], 'allow'),
+            ([NATIVE, 'prune'], 'allow'),
+            ([LOCAL_READ, 'status'], 'allow'),
+            ([NATIVE, 'prune', '--apply'], 'ask'),
+            ([NATIVE, 'run', '--', 'git', 'push'], 'ask'),
+            ([NATIVE, 'run', '--', 'rm', '-r', 'build'], 'ask'),
+            ([NATIVE, 'run', '--shell', 'ros2 topic pub /cmd x'], 'ask'),
+            ([NATIVE, 'run', '--', 'git', 'push', '--force'], 'deny'),
+            ([NATIVE, 'run', '--', 'echo', '=ls'], 'deny'),
+            ([LOCAL_READ, 'bogus'], 'deny'),
+        ]
+        for argv, expected in cases:
+            self.assertEqual(decision(shlex.join(argv)), expected, argv)
+        self.assertEqual(decision('pytest -q'), 'deny')
+        self.assertEqual(decision('anything', tool='Read'), 'pass')
 
     def test_zsh_equals_argument_denied(self):
         self.assertDenied(self.call(shlex.join([NATIVE, 'run', '--', 'echo', '=ls'])))

@@ -26,7 +26,9 @@ are not covered by allow rules.
 
 The native `shell_guard` Bash hook verifies canonical quoting and requests approval for remote
 access, robot-related ROS 2/Zenoh commands, destructive Git operations, uploads
-and credential paths. It never returns an unconditional `allow`. Arbitrary
+and credential paths. Without flags it never returns `allow`; the Claude hook passes
+`--allow-clean`, so a fully checked wrapper call matching no deny/ask policy is allowed
+without a native prompt (Codex keeps the flagless form). Arbitrary
 execution tools do not acquire hook coverage by using the same machine; their
 sandbox and approval checks still apply. Do not claim static command regexes
 can prove an arbitrary program will never contact a robot.
