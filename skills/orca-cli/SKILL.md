@@ -33,6 +33,15 @@ same way in POSIX shells, PowerShell, and cmd.exe.
 If the selected executable cannot run, report its exact error and stop. Do not fall through
 to another executable, which could silently target a different Orca build.
 
+## Branch naming for new worktrees
+
+When creating a worktree or branch for a ticket (for example a Linear issue such as
+`GRA-2204`), never use the ticket ID or Orca's default name as the branch name. Name it
+`<type>/<slug>`: use `fix` for bugs or `feat` for features (or the repo's
+documented prefix), and `<slug>` is a short lowercase-kebab-case summary of the ticket
+title. Example: `GRA-2204 The arms move abruptly after getting back up` →
+`fix/arms-move-abruptly-after-getting-back-up`. Repo-local branch conventions override this.
+
 ## Load the version-matched guide before running Orca commands
 
 ```text
