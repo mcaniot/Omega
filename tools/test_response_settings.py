@@ -34,16 +34,18 @@ class ResponseSettingsTest(unittest.TestCase):
 
     def test_completion_contract_is_centralized_in_agents(self):
         text = (ROOT / 'AGENTS.md').read_text()
-        for clause in ('entire final response must be one short line',
-                       '`commit and push done`', '`task <short label> done`',
-                       'Never claim done after failure or partial completion',
-                       'unless explicitly requested'):
+        for clause in ('Work silently.',
+                       'Return only the requested result.',
+                       'For successful actions, output exactly one short line: `task <label> done`.',
+                       'For failures, output only the blocker.',
+                       'Never claim success without verification.',
+                       'Provide details, commands, reviews, or explanations only when explicitly requested.'):
             self.assertIn(clause, text)
         for source in (ROOT / 'prompts/codex.md', ROOT / 'output-styles/final-only.md'):
             with self.subTest(source=source):
                 text = source.read_text()
                 self.assertIn('AGENTS.md', text)
-                self.assertNotIn('`task <short label> done`', text)
+                self.assertNotIn('`task <label> done`', text)
                 self.assertLess(len(text.encode()), 400)
         style = (ROOT / 'output-styles/final-only.md').read_text()
         self.assertIn('keep-coding-instructions: true', style)
