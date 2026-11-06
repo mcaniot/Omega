@@ -98,6 +98,8 @@ class OptimizeTest(unittest.TestCase):
         for task in ('../secret', '/tmp/secret', 'link', 'missing', '.', 'a' * 129):
             with self.subTest(task=task):
                 self.run_command('resume', task, success=False)
+        self.assertTrue(self.run_command('resume', 'missing', success=False).stderr.startswith('omega resume: '))
+        self.assertTrue(self.run_command('--bogus', success=False).stderr.startswith('omega optimize: '))
 
     def test_resume_lists_newest_tasks_before_truncation_with_stable_ties(self):
         tasks = self.home / '.agents/tasks'

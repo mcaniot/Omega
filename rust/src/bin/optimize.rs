@@ -859,7 +859,11 @@ fn run() -> Result<(), String> {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("omega optimize: {error}");
+        let command = match std::env::args().nth(1).as_deref() {
+            Some("resume") => "omega resume",
+            _ => "omega optimize",
+        };
+        eprintln!("{command}: {error}");
         std::process::exit(1);
     }
 }
