@@ -144,7 +144,7 @@ fn audit(
             for line in text.lines() {
                 // Read-tool line numbers are presentation, not source content.
                 let line = if call["name"] == "Read" {
-                    line.split_once('→').filter(|(n, _)| !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()))
+                    line.split_once(['→', '\t']).filter(|(n, _)| !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()))
                         .map_or(line, |(_, s)| s)
                 } else { line };
                 if line.len() >= 32 {
@@ -715,25 +715,30 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     println!(
-        "Claude + Codex incremental context analysis (not live-process detection)\nRead guard: {guard}\nPROVIDER SESSION   CONTEXT    PEAK       COMPACT  ERRORS/CALLS  LARGE READS/LOGS"
+        "Claude + Codex incremental context analysis (not live-process detection)\nRead guard: {guard}\nPROVIDER SESSION   CONTEXT    PEAK       COMPACT  ERRORS/CALLS  LARGE OUTPUTS  UNBOUNDED/EVIDENCE READS"
     );
     for row in output["sessions"].as_array().unwrap() {
-        let id: String = row["session"]
-            .as_str()
-            .unwrap_or("?")
-            .chars()
-            .take(8)
-            .collect();
+        let stem = row["session"].as_str().unwrap_or("?");
+        // Codex stems are rollout-<timestamp>-<uuid>; the uuid identifies the session.
+        let stem = match stem.strip_prefix("rollout-") {
+            Some(rest) if rest.len() >= 36 && rest.is_char_boundary(rest.len() - 36) => {
+                &rest[rest.len() - 36..]
+            }
+            _ => stem,
+        };
+        let id: String = stem.chars().take(8).collect();
+        // serde_json::Value ignores width specifiers; format plain integers.
+        let n = |key: &str| row[key].as_u64().unwrap_or(0);
         println!(
-            "{:8} {id:8}  {:9}  {:9}  {:7}  {}/{}  {}/{}",
+            "{:8} {id:8}  {:<9}  {:<9}  {:<7}  {:<12}  {:<13}  {}/{}",
             row["provider"].as_str().unwrap_or("?"),
-            row["context_last"],
-            row["context_peak"],
-            row["compactions"],
-            row["tool_errors"],
-            row["tool_calls"],
-            row["large_unbounded_text_reads"],
-            row["large_evidence_text_reads"]
+            n("context_last"),
+            n("context_peak"),
+            n("compactions"),
+            format!("{}/{}", n("tool_errors"), n("tool_calls")),
+            n("large_tool_outputs"),
+            n("large_unbounded_text_reads"),
+            n("large_evidence_text_reads")
         );
     }
     println!(

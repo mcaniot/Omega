@@ -25,7 +25,7 @@ class OptimizeTest(unittest.TestCase):
     def test_content_overlap_across_commands_ranges_and_checkpoints(self):
         a, b, c = [f'Unique source line {i}: with enough content to fingerprint.' for i in range(3)]
         self.transcript.write_text(self.read_rows([
-            ('Read', {'file_path': '/source', 'offset': 1, 'limit': 2}, f'1→{a}\n2→{b}'),
+            ('Read', {'file_path': '/source', 'offset': 1, 'limit': 2}, f'1→{a}\n     2\t{b}'),
             ('Bash', {'command': "'Ω-run' --shell 'sed -n \"2,3p\" source'"},
              json.dumps({'status': 'PASS', 'stdout': b + '\n' + c})),
             ('Bash', {'command': "'Ω-inspect' evidence --stream stdout"},
