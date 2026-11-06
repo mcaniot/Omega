@@ -87,7 +87,8 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0)
         result = json.loads(process.stdout)
         self.assertEqual(result['stdout'], 'café red � ok\n')
-        self.assertEqual(result['bytes'], {'stdout': len(Path(result['evidence'], 'stdout.log').read_bytes()), 'stderr': 0})
+        self.assertNotIn('bytes', result)
+        self.assertNotIn('duration_seconds', result)
 
     def test_invalid_cwd_is_a_command_failure(self):
         missing = str(self.home / 'missing')

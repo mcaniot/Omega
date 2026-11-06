@@ -440,6 +440,317 @@ class OptimizeTest(unittest.TestCase):
         self.assertEqual(row['start_offset'], 0)
         self.assertEqual(row['tool_errors'], 1)
 
+    def write_rows(self, rows):
+        self.transcript.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+
+    @staticmethod
+    def tool(id, name, arguments, content, error=False):
+        return [{'type': 'assistant', 'message': {'content': [
+                    {'type': 'tool_use', 'id': id, 'name': name, 'input': arguments}]}},
+                {'type': 'user', 'message': {'content': [
+                    {'type': 'tool_result', 'tool_use_id': id, 'content': content, 'is_error': error}]}}]
+
+    def force_row(self):
+        row, = json.loads(self.run_command('--force', '--json').stdout)['sessions']
+        return row
+
+    def test_token_totals_count_usage_once_per_message_id(self):
+        usage = {'input_tokens': 10, 'cache_creation_input_tokens': 20,
+                 'cache_read_input_tokens': 30, 'output_tokens': 5}
+        rows = [{'type': 'assistant', 'message': {'id': 'm1', 'usage': usage}},
+                {'type': 'assistant', 'message': {'id': 'm1', 'usage': usage}},
+                {'type': 'assistant', 'message': {'id': 'm2', 'usage': usage}}]
+        self.write_rows(rows)
+        row = self.force_row()
+        self.assertEqual((row['tokens_input'], row['tokens_cache_creation'], row['tokens_cache_read'],
+                          row['tokens_output'], row['tokens_total'], row['tokens_per_request']),
+                         (20, 40, 60, 10, 130, 65))
+        default = self.run_command('--force').stdout
+        self.assertIn('TOK/REQ', default)
+
+    def test_duplicate_tool_results_count_once(self):
+        rows = self.tool('t', 'Bash', {'command': 'false'}, 'Exit code 2\nboom', True)
+        self.write_rows(rows + rows[1:] * 3)
+        row = self.force_row()
+        self.assertEqual((row['tool_calls'], row['tool_errors']), (1, 1))
+
+    def test_error_classification(self):
+        cases = [
+            ('Bash', {'command': 'ls'}, 'PreToolUse:Bash hook error: Unwrapped or noncanonical shell command', 'guard'),
+            ('Read', {'file_path': '/x'}, 'Large text file: use limit', 'guard'),
+            ('Bash', {'command': "'Ω-inspect' evidence"}, 'usage: Ω-inspect: unrecognized arguments', 'wrapper_usage'),
+            ('Edit', {'file_path': '/x'}, 'File has not been read yet. Read it first', 'wrapper_usage'),
+            ('Read', {'file_path': '/h/.agents/tasks/evidence/r/out.log'}, 'File does not exist.', 'wrapper_usage'),
+            ('Bash', {'command': 'yes | head'}, 'Exit code 141', 'sigpipe'),
+            ('Bash', {'command': 'rg missing file'}, 'Exit code 1', 'no_match'),
+            ('Bash', {'command': 'rg missing file'}, 'Exit code 1\nrg: file: permission denied', 'real'),
+            ('Bash', {'command': 'cp a b'}, 'cp: No space left on device', 'data_loss'),
+            ('Bash', {'command': 'run'}, json.dumps({'status': 'DATA_LOSS'}), 'data_loss'),
+            ('Bash', {'command': 'make'}, 'Exit code 2\nerror: build failed', 'real'),
+        ]
+        rows = []
+        for i, (name, arguments, content, _) in enumerate(cases):
+            rows += self.tool(f'e{i}', name, arguments, content, True)
+        self.write_rows(rows)
+        row = self.force_row()
+        self.assertEqual(row['error_classes'], {'guard': 2, 'wrapper_usage': 3, 'sigpipe': 1,
+                                                'no_match': 1, 'data_loss': 2, 'real': 2})
+        self.assertEqual(row['workflow_errors'], 7)
+        self.assertEqual(row['tool_errors'], len(cases))
+
+    def test_reread_lines_split_legit_and_avoidable(self):
+        text = '\n'.join(f'Source line number {i} is long enough to fingerprint.' for i in range(2))
+        read = {'file_path': '/src'}
+        rows = (self.tool('r1', 'Read', read, text) + self.tool('r2', 'Read', read, text)
+                + self.tool('ed', 'Edit', {'file_path': '/src'}, 'ok')
+                + self.tool('r3', 'Read', read, text) + self.tool('r4', 'Read', read, text)
+                + [{'type': 'system', 'subtype': 'compact_boundary', 'uuid': 'c'}]
+                + self.tool('r5', 'Read', read, text))
+        self.write_rows(rows)
+        row = self.force_row()
+        self.assertEqual((row['repeated_read_lines'], row['legit_reread_lines'],
+                          row['avoidable_reread_lines']), (8, 4, 4))
+
+    def test_compare_prints_gates_and_exits_zero_even_when_ko(self):
+        base = self.home / 'base.json'
+        base.write_text(json.dumps({'sessions': [{'tokens_total': 3000}, {'tokens_total': 3000}]}))
+        report = json.loads(self.run_command('--force', '--json', '--compare', str(base)).stdout)
+        gates = {name: gate['ok'] for name, gate in report['gates'].items()}
+        self.assertEqual(gates, {'avoidable_reread_lines': True, 'compactions': False, 'context_peak': True,
+                                 'data_loss': True, 'repeated_exact_calls': False,
+                                 'workflow_error_ratio': True,
+                                 'median_tokens_per_session': True})
+        table = self.run_command('--force', '--compare', str(base)).stdout
+        self.assertIn('compactions', table)
+        self.assertRegex(table, r'compactions\s+1\s+== 0\s+KO')
+        base.write_text(json.dumps({'sessions': [{'tokens_total': 900}]}))
+        report = json.loads(self.run_command('--force', '--json', '--compare', str(base)).stdout)
+        self.assertFalse(report['gates']['median_tokens_per_session']['ok'])
+
+    def test_compare_rejects_base_without_new_fields_before_checkpointing(self):
+        base = self.home / 'old.json'
+        base.write_text(json.dumps({'sessions': [{'context_peak': 1}]}))
+        done = self.run_command('--compare', str(base), success=False)
+        self.assertIn('--force', done.stderr)
+        self.assertFalse(self.state_path().exists())
+
+
+class ReplayTest(unittest.TestCase):
+    """Counterfactual replay; every synthetic result has bytes = 3.5 * context delta, so bytes/token = 3.5."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.env = dict(os.environ, HOME=str(self.home))
+        self.transcript = self.home / '.claude/projects/project/session.jsonl'
+        self.transcript.parent.mkdir(parents=True)
+        self.settings = self.home / '.claude/settings.json'
+        self.settings.write_text('{"permissions": {}}')
+
+    @staticmethod
+    def request(id, context, calls=(), output=10):
+        content = [{'type': 'tool_use', 'id': i, 'name': n, 'input': inp} for i, n, inp in calls]
+        return {'type': 'assistant', 'message': {'id': id, 'content': content, 'usage': {
+            'input_tokens': context, 'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 0,
+            'output_tokens': output}}}
+
+    @staticmethod
+    def result(id, text, error=False):
+        return {'type': 'user', 'message': {'content': [
+            {'type': 'tool_result', 'tool_use_id': id, 'content': text, 'is_error': error}]}}
+
+    @staticmethod
+    def source(char):
+        return (char * 99 + '\n') * 35  # 3500 bytes, 35 fingerprintable lines
+
+    def replay(self, rows, *args):
+        self.transcript.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        done = subprocess.run([BINARY, 'replay', '--json', *args], env=self.env, text=True, capture_output=True, timeout=20)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def read_rows(self, second_text):
+        read = {'file_path': '/src/a.rs'}
+        return [self.request('a', 1000, [('t1', 'Read', read)]), self.result('t1', self.source('x')),
+                self.request('b', 2000, [('t2', 'Read', read)]), self.result('t2', second_text),
+                self.request('c', 3000)]
+
+    def test_noop_session_reduces_nothing(self):
+        # baseline 1000+2000+3000 + 3*10 = 6030; no rule applies.
+        row, = self.replay(self.read_rows(self.source('y')))['sessions']
+        self.assertEqual((row['baseline_tokens'], row['counterfactual_tokens'], row['reduction_pct']), (6030, 6030, 0))
+        # calibration: 3500 result bytes over (2000-1000-10 output) = 990 tokens
+        self.assertAlmostEqual(row['bytes_per_token'], 3500 / 990)
+        self.assertEqual(row['segments'], 1)
+
+    def test_avoidable_reread_saves_result_minus_deny(self):
+        # t2 is 3500 bytes = 990 tokens (calibrated net of output), replaced by 40: request c loses 950. 6030 - 950 = 5080.
+        row, = self.replay(self.read_rows(self.source('x')))['sessions']
+        self.assertEqual(row['counterfactual_tokens'], 5080)
+        self.assertEqual(row['savings'], {'r1': 950, 'r2': 0, 'r3': 0})
+
+    def bash_rows(self, error_text, error=True):
+        pad = lambda text: text.ljust(35)  # 35 bytes = 10 tokens
+        bash = {'command': 'ls | head'}
+        return [self.request('a', 1000, [('t1', 'Bash', bash)]), self.result('t1', pad(error_text), error),
+                self.request('b', 1010, [('t2', 'Bash', bash)]), self.result('t2', pad('ok')),
+                self.request('c', 1020)]
+
+    def test_sigpipe_retry_is_removed_with_its_result(self):
+        # baseline 1000+1010+1020+30 = 3060. Request a (1000+10) vanishes and its 10 result tokens
+        # leave b and c: (1010-10+10) + (1020-10+10) = 2030. Saving 1030.
+        row, = self.replay(self.bash_rows('Exit code 141'))['sessions']
+        self.assertEqual(row['counterfactual_tokens'], 2030)
+        self.assertEqual(row['savings'], {'r1': 0, 'r2': 1030, 'r3': 0})
+
+    def test_guard_and_real_errors_save_nothing(self):
+        for text in ('PreToolUse hook error: Unwrapped or noncanonical', 'boom'):
+            with self.subTest(text=text):
+                row, = self.replay(self.bash_rows(text))['sessions']
+                self.assertEqual(row['counterfactual_tokens'], 3060)
+                self.assertEqual(row['savings'], {'r1': 0, 'r2': 0, 'r3': 0})
+
+    def test_budget_splits_session_at_hard_limit(self):
+        # contexts 50k,100k,130k,135k,140k, output 10 each: baseline 555050. Cut after 130k request;
+        # later contexts 50000+3000+(135000-130000)=58000 and 50000+3000+10000=63000.
+        # Counterfactual 50000+100000+130000+58000+63000+50 = 401050; r3 saves 154000.
+        rows = [self.request(str(i), c) for i, c in enumerate([50000, 100000, 130000, 135000, 140000])]
+        row, = self.replay(rows)['sessions']
+        self.assertEqual((row['baseline_tokens'], row['counterfactual_tokens'], row['segments']), (555050, 401050, 2))
+        self.assertEqual(row['savings'], {'r1': 0, 'r2': 0, 'r3': 154000})
+
+    def handoff_rows(self, first, extra=()):
+        # First result is 3500 bytes = 1000 tokens (a->b delta 2010-1000-10). Request c (10010) crosses
+        # the 10000 handoff; d and later run in the new segment; the result of d adds 1000 tokens to e.
+        f = {'file_path': '/src/f.rs'}
+        rows = [self.request('a', 1000, [('t1', *first)]), self.result('t1', self.source('x')),
+                self.request('b', 2010), self.request('c', 10010),
+                self.request('d', 10020, [('t2', 'Read', f)]), self.result('t2', self.source('y')),
+                self.request('e', 11030, [('t3', 'Edit', f)] if extra else []), self.result('t3', 'ok')]
+        return rows + ([self.request('g', 11040)] if extra else [])
+
+    def test_post_cut_reread_is_charged(self):
+        # Cut at c: shift = 1000+3000-10010 = -6010. Segment 2 effective d=4010; d Reads f (read before
+        # the cut, 1000 tokens): extra request 4010, shift -5010; e = 11030-5010 = 6020.
+        # Counterfactual 1010+2020+10020+4020+4010+6030 = 27110; without charge 1010+2020+10020+4020+5030 = 22100.
+        # Baseline 1000+2010+10010+10020+11030+50 = 34120.
+        rows = self.handoff_rows(('Read', {'file_path': '/src/f.rs'}))
+        row, = self.replay(rows, '--handoff-tokens', '10000')['sessions']
+        self.assertEqual((row['baseline_tokens'], row['counterfactual_tokens'], row['handoffs']), (34120, 27110, 1))
+        self.assertEqual((row['r3_gross'], row['r3_reread_charge'], row['post_cut_rereads']), (12020, 5010, 1))
+        self.assertEqual(row['savings']['r3'], 7010)
+
+    def test_file_read_only_after_cut_is_not_charged(self):
+        rows = self.handoff_rows(('Bash', {'command': 'ls'}))
+        row, = self.replay(rows, '--handoff-tokens', '10000')['sessions']
+        self.assertEqual((row['counterfactual_tokens'], row['r3_reread_charge'], row['post_cut_rereads']), (22100, 0, 0))
+
+    def test_second_post_cut_access_is_not_charged_again(self):
+        # As the first case plus Edit f in e and a final request g (11040): e = 6020 (cost 6030, no charge),
+        # g = 6030 (cost 6040). Counterfactual 1010+2020+10020+4020+4010+6030+6040 = 33150; without charge 27140.
+        rows = self.handoff_rows(('Read', {'file_path': '/src/f.rs'}), extra=True)
+        row, = self.replay(rows, '--handoff-tokens', '10000')['sessions']
+        self.assertEqual((row['counterfactual_tokens'], row['r3_reread_charge'], row['post_cut_rereads']), (33150, 6010, 1))
+
+    def test_replay_never_writes_state_or_settings(self):
+        before = self.settings.read_bytes()
+        self.replay(self.read_rows(self.source('x')))
+        self.assertEqual(self.settings.read_bytes(), before)
+        self.assertEqual(sorted(p.relative_to(self.home).as_posix() for p in self.home.rglob('*') if p.is_file()),
+                         ['.claude/projects/project/session.jsonl', '.claude/settings.json'])
+
+    def test_replay_is_deterministic(self):
+        rows = self.read_rows(self.source('x'))
+        self.assertEqual(self.replay(rows), self.replay(rows))
+
+
+class PrefixTest(unittest.TestCase):
+    """Fixed-context audit with a fake HOME; every number is derived from the synthetic files."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.env = dict(os.environ, HOME=str(self.home))
+        self.cwd = self.home / 'work/proj'
+        files = {
+            '.claude/CLAUDE.md': '@~/.agents/AGENTS.md\n',
+            '.agents/AGENTS.md': 'g' * 100,
+            'work/CLAUDE.md': 'w' * 30,
+            'work/proj/CLAUDE.md': 'see @docs/extra.md.\n```\n@docs/missing.md\n```\n',
+            'work/proj/docs/extra.md': 'e' * 50,
+            'work/proj/.claude/skills/s/SKILL.md': '---\nname: s\ndescription: ' + 'd' * 100 + '\n---\nbody ' + 'b' * 500,
+            '.claude/skills/g/SKILL.md': '---\nname: g\ndescription: "' + 'd' * 40 + '"\n---\n',
+        }
+        for name, text in files.items():
+            path = self.home / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        (self.cwd / 'AGENTS.md').symlink_to(self.cwd / 'CLAUDE.md')
+        (self.home / '.claude/settings.json').write_text('{"permissions": {}}')
+        self.claude_md = len((self.cwd / 'CLAUDE.md').read_text())
+
+    @staticmethod
+    def message(id, input, cache_creation, cache_read, sidechain=False):
+        return {'type': 'assistant', 'cwd': '/ignored', 'isSidechain': sidechain, 'message': {'id': id, 'usage': {
+            'input_tokens': input, 'cache_creation_input_tokens': cache_creation,
+            'cache_read_input_tokens': cache_read, 'output_tokens': 1}}}
+
+    def session(self, directory, name, rows, age_days=0):
+        path = self.home / '.claude/projects' / directory / f'{name}.jsonl'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(''.join(json.dumps(dict(r, cwd=str(self.cwd))) + '\n' for r in rows))
+        if age_days:
+            stamp = path.stat().st_mtime - age_days * 86400
+            os.utime(path, (stamp, stamp))
+
+    def snapshot(self):
+        return {str(p): p.read_bytes() for p in sorted(self.home.rglob('*')) if p.is_file() and not p.is_symlink()}
+
+    def run_prefix(self, *args):
+        done = subprocess.run([BINARY, 'prefix', *args], env=self.env, text=True, capture_output=True, timeout=20)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
+
+    def test_prefix_instruction_chain_and_skills(self):
+        self.session('p1', 'a', [self.message('a', 10, 500, 0), self.message('a', 10, 500, 0),
+                                 self.message('side', 9999, 0, 0, sidechain=True), self.message('b', 5, 0, 600)])
+        self.session('p1', 'b', [self.message('c', 20, 300, 400), self.message('d', 800, 0, 0)])
+        self.session('p1', 'old', [self.message('o', 1, 0, 0)], age_days=40)
+        self.session('bench-run', 'x', [self.message('x', 1, 0, 0)])
+        before = self.snapshot()
+        out = self.run_prefix('--json')
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(out, self.run_prefix('--json'))
+        report = json.loads(out)
+        project, = report['projects']
+        self.assertEqual((project['cwd'], project['sessions'], project['requests']), (str(self.cwd), 2, 4))
+        self.assertEqual((project['first_context_min'], project['first_context_median'], project['context_total']), (510, 615.0, 2635))
+        self.assertAlmostEqual(project['prefix_share'], 510 * 4 / 2635)
+        project_bytes = self.claude_md + 50 + 30
+        self.assertEqual([(Path(f['path']).name, f['bytes'], f['scope']) for f in project['instruction_files']],
+                         [('CLAUDE.md', 21, 'global'), ('AGENTS.md', 100, 'global'),
+                          ('CLAUDE.md', self.claude_md, 'project'), ('extra.md', 50, 'project'), ('CLAUDE.md', 30, 'project')])
+        self.assertEqual(project['project_instruction_bytes'], project_bytes)
+        self.assertEqual([(Path(d['path']).name, d['bytes']) for d in project['duplicates']], [('AGENTS.md', self.claude_md)])
+        self.assertEqual(project['skills'], {'count': 1, 'description_bytes': 100})
+        self.assertEqual(report['global']['skills'], {'count': 1, 'description_bytes': 40})
+        reducible = project_bytes + 100 + self.claude_md
+        self.assertEqual((project['reducible_bytes'], project['reducible_tokens_per_request']), (reducible, reducible // 4))
+        self.assertEqual([f['kind'] for f in report['findings']], ['duplicate_instruction_file'])
+        self.assertEqual(report['aggregate']['global_floor_tokens'], 510)
+        self.assertAlmostEqual(report['aggregate']['weighted_prefix_share'], 510 * 4 / 2635)
+
+    def test_report_is_create_new_private(self):
+        self.session('p1', 'a', [self.message('a', 1, 2, 3)])
+        report = self.home / 'report.json'
+        self.run_prefix('--report', str(report))
+        self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(report.read_text())['projects'][0]['first_context_min'], 6)
+        again = subprocess.run([BINARY, 'prefix', '--report', str(report)], env=self.env, text=True, capture_output=True, timeout=20)
+        self.assertNotEqual(again.returncode, 0)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -44,8 +44,27 @@ BINARIES = {
     'local_read': AGENTS / 'tools/robot-exec/local-read',
     'shell_guard': AGENTS / 'tools/shell_guard',
     'context_guard': AGENTS / 'tools/context_guard',
+    'context_budget': AGENTS / 'tools/context_budget',
     'optimize': AGENTS / 'tools/optimize',
     'session_name': CLAUDE / 'hooks/session_name',
+}
+# Claude hooks: (event, matcher or None, binary).
+CONTEXT_HOOKS = (
+    ('PreToolUse', 'Read', 'context_guard'),
+    ('PostToolUse', 'Edit|Write|MultiEdit', 'context_guard'),
+    ('SessionStart', None, 'context_guard'),
+    ('PostCompact', None, 'context_guard'),
+    ('PreToolUse', '*', 'context_budget'),
+    ('PostToolUse', '*', 'context_budget'),
+    ('UserPromptSubmit', None, 'context_budget'),
+    ('SessionStart', None, 'context_budget'),
+    ('PostCompact', None, 'context_budget'),
+)
+# 1M-context model so normal sessions never hand off or compact (0 re-read, no context rot).
+CONTEXT_ENV = {
+    'ANTHROPIC_MODEL': 'opus[1m]',
+    'OMEGA_CONTEXT_SOFT': '850000',
+    'OMEGA_CONTEXT_HARD': '900000',
 }
 COMMANDS = {
     'omega': BINARIES['optimize'],
@@ -305,17 +324,30 @@ def write_response_settings(apply):
 
 
 def write_context_settings(apply):
-    """Add only our Read hook; preserve third-party hooks, permissions and symlinks."""
+    """Add only our context hooks; preserve third-party hooks, permissions and symlinks."""
     dest = CLAUDE / 'settings.json'
     settings = json.loads(dest.read_text()) if dest.exists() else {}
-    groups = settings.setdefault('hooks', {}).setdefault('PreToolUse', [])
-    command = str(BINARIES['context_guard'])
-    for group in groups:
-        if group.get('matcher') in ('Read', '*') and any(
+    hooks = settings.setdefault('hooks', {})
+    changed = False
+    for event, matcher, binary in CONTEXT_HOOKS:
+        groups = hooks.setdefault(event, [])
+        command = str(BINARIES[binary])
+        if any(group.get('matcher', '*') in (matcher, '*') and any(
                 hook.get('type') == 'command' and hook.get('command') == command
-                for hook in group.get('hooks', [])):
-            return
-    groups.append({'matcher': 'Read', 'hooks': [{'type': 'command', 'command': command}]})
+                for hook in group.get('hooks', [])) for group in groups):
+            continue
+        group = {'hooks': [{'type': 'command', 'command': command}]}
+        if matcher:
+            group['matcher'] = matcher
+        groups.append(group)
+        changed = True
+    env = settings.setdefault('env', {})
+    for key, value in CONTEXT_ENV.items():
+        if env.get(key) != value:
+            env[key] = value
+            changed = True
+    if not changed:
+        return
     if apply:
         target = dest.resolve()
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -354,7 +386,7 @@ def main():
             parser.error('--context-only cannot be combined with --responses-only or --budget')
         # Parse settings before building/installing anything; malformed settings stay untouched.
         list(write_context_settings(False))
-        results = list(install_binaries(args.apply, names=('context_guard', 'optimize', 'shell_guard')))
+        results = list(install_binaries(args.apply, names=('context_guard', 'context_budget', 'optimize', 'shell_guard')))
         if not any(status.startswith('CONFLICT') for _, status in results):
             results += list(write_context_settings(args.apply))
             results += list(install_commands(args.apply, names=('omega', 'omega-optimize', 'Ω-optimize')))

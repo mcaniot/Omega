@@ -56,7 +56,7 @@ class CaptureTests(unittest.TestCase):
         self.assertIn('START', json.dumps(result['preview']))
         self.assertIn('END', json.dumps(result['preview']))
         _, result, _ = invoke("print('x'*30000)", '--inline-bytes', '0')
-        self.assertEqual(result['diagnostics'], [])
+        self.assertNotIn('diagnostics', result)
 
     def test_shell_mandatory_steps_fail_fast(self):
         for script in ('false; echo masked', 'false | cat; echo masked',
@@ -268,8 +268,13 @@ class CaptureTests(unittest.TestCase):
         result = json.loads(process.stdout)
         self.assertEqual(len(result['fragments']), 1)
         self.assertIn('fatal marker', result['fragments'][0]['text'])
-        invalid = subprocess.run([*RUNNER, 'inspect', str(path), '--lines', '100'], capture_output=True)
-        self.assertEqual(invalid.returncode, 2)
+        clamped = subprocess.run([*RUNNER, 'inspect', str(path), '--lines', '100', '--max-bytes', '99999'], capture_output=True)
+        self.assertEqual(clamped.returncode, 0)
+        result = json.loads(clamped.stdout)
+        self.assertLessEqual(len(result['fragments']), 40)
+        self.assertLess(len(clamped.stdout), 8192)
+        self.assertIn('--lines 100 clamped to 40', result['note'])
+        self.assertIn('--max-bytes 99999 clamped to 7000', result['note'])
 
     def test_search_across_chunk_boundary(self):
         _, _, path = invoke("print('x'*1020+'fatal boundary marker'+'y'*5000)")
@@ -337,6 +342,100 @@ class CaptureTests(unittest.TestCase):
         if statusfile.exists():
             self.assertIn('Z (zombie)', statusfile.read_text())
         self.assertTrue(json.loads((path/'result.json').read_text())['background_children_terminated'])
+
+
+def run_with(*arguments, env=None, preexec_fn=None):
+    process = subprocess.run([*RUNNER, *arguments], capture_output=True, env={**os.environ, **(env or {})}, preexec_fn=preexec_fn)
+    assert not process.stderr, process.stderr
+    return process.returncode, json.loads(process.stdout)
+
+
+def run_shell(script, *options):
+    return run_with('run', *options, '--shell', script)
+
+
+class InspectAliasTests(unittest.TestCase):
+    def inspect(self, *arguments):
+        process = subprocess.run([*RUNNER, 'inspect', *arguments], capture_output=True)
+        self.assertEqual(process.returncode, 0, process.stdout)
+        return json.loads(process.stdout)
+
+    def test_auto_reads_stdout_when_stderr_empty_and_both_labeled_otherwise(self):
+        _, _, path = invoke("print('only out')")
+        result = self.inspect(str(path))
+        self.assertEqual(result['stream'], 'stdout')
+        self.assertEqual(result['fragments'][0]['text'], 'only out\n')
+        _, _, path = invoke("import sys;print('to out');sys.stderr.write('to err\\n')")
+        result = self.inspect(str(path))
+        self.assertEqual(result['stream'], 'both')
+        self.assertEqual([s['stream'] for s in result['streams']], ['stderr', 'stdout'])
+        self.assertEqual(result['streams'][0]['fragments'][0]['text'], 'to err\n')
+
+    def test_stream_and_path_aliases(self):
+        _, _, path = invoke("import sys;print('out');sys.stderr.write('err\\n')")
+        for argument in (f'{path}/stdout', f'{path}/stdout.log'):
+            self.assertEqual(self.inspect(argument)['fragments'][0]['text'], 'out\n')
+        self.assertEqual(self.inspect(f'{path}/stderr.log')['fragments'][0]['text'], 'err\n')
+        self.assertEqual(self.inspect(str(path), '--stream', 'stdout.log')['fragments'][0]['text'], 'out\n')
+        self.assertEqual(self.inspect(str(path), '--stream', 'stderr')['fragments'][0]['text'], 'err\n')
+
+    def test_default_max_bytes_and_hard_caps(self):
+        _, _, path = invoke("print(('y'*100+'\\n')*100)")
+        result = self.inspect(str(path), '--lines', '0', '--max-bytes', '0')
+        self.assertLessEqual(len(result['fragments']), 1)
+        self.assertIn('clamped to 1', result['note'])
+        big = self.inspect(str(path), '--lines', '1000')
+        self.assertLessEqual(len(big['fragments']), 40)
+        self.assertLess(len(json.dumps(big)), 8192)
+
+
+class ReliabilityTests(unittest.TestCase):
+    def test_low_disk_blocks_before_execution(self):
+        marker = Path(os.environ.get('TMPDIR', '/tmp')) / f'omega-blocked-{os.getpid()}'
+        code, result = run_with('run', '--', 'touch', str(marker), env={'OMEGA_MIN_FREE_MB': '999999999999'})
+        self.assertEqual((code, result['status']), (75, 'BLOCKED_DISK'))
+        self.assertIn('MB free', result['error'])
+        self.assertIn('prune', result['error'])
+        self.assertFalse(marker.exists())
+
+    def test_evidence_write_failure_is_data_loss_never_pass(self):
+        _, probe = run_with('run', '--', 'true')
+        size = (Path(probe['evidence']) / 'result.json').stat().st_size
+
+        def limit():
+            import resource
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (size - 40, size - 40))
+
+        code, result = run_with('run', '--', 'true', preexec_fn=limit)
+        self.assertEqual((code, result['status']), (74, 'DATA_LOSS'))
+
+    def test_early_pipe_close_is_pass_outside_validation_only(self):
+        code, result = run_shell('yes | head -n 1')
+        self.assertEqual((code, result['status']), (0, 'PASS'))
+        self.assertEqual(result['note'], 'SIGPIPE from early pipe close ignored')
+        # errexit skips later commands, so a non-final pipeline must stay a failure.
+        code, result = run_shell('yes | head -n 1; echo after')
+        self.assertEqual((code, result['status'], result['exit_code']), (141, 'FAIL', 141))
+        code, result = run_shell('exit 141')
+        self.assertEqual((code, result['status']), (141, 'FAIL'))
+        code, result = run_with('run', '--validation', '--', 'sh', '-c', 'exit 141')
+        self.assertEqual((code, result['status']), (141, 'FAIL'))
+
+    def test_search_without_match_is_not_a_failure(self):
+        here = str(Path(__file__).parent)
+        needle = 'qq' + 'needle'
+        for script in ('grep zzz /dev/null', 'cat /dev/null | rg zzz', f'git grep {needle} -- .'):
+            code, result = run_shell(script, '--cwd', here)
+            self.assertEqual((code, result['status'], result['exit_code']), (0, 'NO_MATCH', 0), script)
+        code, result = run_with('run', '--', 'grep', 'zzz', '/dev/null')
+        self.assertEqual((code, result['status']), (0, 'NO_MATCH'))
+        for arguments in (('--validation', '--', 'grep', 'zzz', '/dev/null'), ('--', 'false')):
+            code, result = run_with('run', *arguments)
+            self.assertEqual((code, result['status']), (1, 'FAIL'), arguments)
+        for script, expected in (('grep zzz /dev/null | cat', 1), ('grep zzz /dev/null; echo done', 1), ('grep zzz /nonexistent-file', 2)):
+            code, result = run_shell(script)
+            self.assertEqual((code, result['status']), (expected, 'FAIL'), script)
 
 
 if __name__ == '__main__':

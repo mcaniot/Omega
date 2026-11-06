@@ -9,6 +9,9 @@ use std::os::fd::FromRawFd;
 use std::os::unix::ffi::OsStringExt;
 use std::process::exit;
 
+#[path = "../state/ledger.rs"]
+mod ledger;
+
 const PROJECT: &str = match option_env!("LOCAL_READ_PROJECT") {
     Some(root) => root,
     None => "/home/mcaniot/Documents/project",
@@ -182,6 +185,7 @@ fn read_source(args: &[Vec<u8>], find: bool) -> i32 {
     let matcher = pattern.map(|pattern| literal_regex(pattern));
     // SAFETY: source returns a freshly opened fd that this File now owns.
     let file = unsafe { std::fs::File::from_raw_fd(source(path)) };
+    let meta = file.metadata().ok();
     let mut stream = BufReader::new(file);
     let mut line = Vec::new();
     let mut output = Vec::new();
@@ -221,7 +225,26 @@ fn read_source(args: &[Vec<u8>], find: bool) -> i32 {
     let mut stdout = std::io::stdout().lock();
     let _ = stdout.write_all(&output);
     let _ = stdout.flush();
+    if let (false, false, Some(meta), Some(session)) = (find, failed, meta, SESSION.get()) {
+        record_read(session, path, &meta, start, shown);
+    }
     i32::from(failed)
+}
+
+/// Claude session id, captured before the environment is cleared.
+static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Best effort: note the lines shown in the shared read ledger; errors are ignored.
+fn record_read(session: &str, path: &[u8], meta: &std::fs::Metadata, start: i64, shown: i64) {
+    if shown < 1 || start < 1 {
+        return;
+    }
+    let Some(state) = ledger::state_file(std::path::Path::new("/home/mcaniot"), "read-ledger", session) else { return };
+    let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(path.to_vec()));
+    let (first, last) = (start as u64, (start + shown - 1) as u64);
+    let mut book = ledger::Ledger::load(&state);
+    book.record(&ledger::key(&path), ledger::stamp(meta), first, last);
+    book.save(&state);
 }
 
 fn trusted_environment() {
@@ -240,6 +263,9 @@ fn main() {
     // Rust ignores SIGPIPE by default; the C launcher relies on the default disposition.
     // SAFETY: restoring the default handler is always valid.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    if let Ok(session) = std::env::var("CLAUDE_CODE_SESSION_ID") {
+        let _ = SESSION.set(session);
+    }
     trusted_environment();
     let args: Vec<Vec<u8>> = std::env::args_os().map(OsStringExt::into_vec).collect();
     let argc = args.len();

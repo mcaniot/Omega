@@ -179,7 +179,7 @@ fn native_config(args: &[Arg]) -> Option<Config> {
     if home.iter().chain(&cwd).any(|&b| b >= 128) {
         return None;
     }
-    Some(Config { command, cwd, home, timeout, grace, inline_bytes, max_log_bytes, python: false })
+    Some(Config { command, cwd, home, timeout, grace, inline_bytes, max_log_bytes, python: false, validation, script: shell.cloned() })
 }
 
 fn python_run(p: &argparse::Parsed) -> Config {
@@ -224,6 +224,8 @@ fn python_run(p: &argparse::Parsed) -> Config {
         inline_bytes: p.int("inline_bytes").unwrap_or(8192),
         max_log_bytes,
         python: true,
+        validation: p.flag("validation"),
+        script: p.string("shell"),
     }
 }
 

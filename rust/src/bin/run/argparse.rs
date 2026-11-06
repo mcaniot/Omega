@@ -452,12 +452,12 @@ options:
                         Stop the command (status LOG_LIMIT, exit 125) when one
                         stream exceeds this
 ";
-const INSPECT_USAGE: &str = "usage: run.py inspect [-h] [--stream {stdout,stderr}] [--offset OFFSET]
+const INSPECT_USAGE: &str = "usage: run.py inspect [-h] [--stream {auto,stdout,stderr,stdout.log,stderr.log}] [--offset OFFSET]
                       [--lines LINES] [--max-bytes MAX_BYTES]
                       [--search SEARCH]
                       evidence
 ";
-const INSPECT_HELP: &str = "usage: run.py inspect [-h] [--stream {stdout,stderr}] [--offset OFFSET]
+const INSPECT_HELP: &str = "usage: run.py inspect [-h] [--stream {auto,stdout,stderr,stdout.log,stderr.log}] [--offset OFFSET]
                       [--lines LINES] [--max-bytes MAX_BYTES]
                       [--search SEARCH]
                       evidence
@@ -467,7 +467,7 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
-  --stream {stdout,stderr}
+  --stream {auto,stdout,stderr,stdout.log,stderr.log}
   --offset OFFSET
   --lines LINES
   --max-bytes MAX_BYTES
@@ -517,7 +517,7 @@ pub static INSPECT: Parser = Parser {
     help: INSPECT_HELP,
     opts: &[
         HELP,
-        Opt { names: &["--stream"], dest: "stream", kind: Kind::Choice(&["stdout", "stderr"]) },
+        Opt { names: &["--stream"], dest: "stream", kind: Kind::Choice(&["auto", "stdout", "stderr", "stdout.log", "stderr.log"]) },
         Opt { names: &["--offset"], dest: "offset", kind: Kind::Int },
         Opt { names: &["--lines"], dest: "lines", kind: Kind::Int },
         Opt { names: &["--max-bytes"], dest: "max_bytes", kind: Kind::Int },

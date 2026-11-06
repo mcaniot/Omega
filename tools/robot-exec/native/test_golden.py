@@ -39,6 +39,19 @@ def normalize(data, home):
     return text
 
 
+def compact_envelope(text):
+    """Derive the compact stdout envelope from a recorded legacy one: no duration, no empty diagnostics,
+    and byte counts only when output exists but is not inline."""
+    if not text.startswith('{"status":'):
+        return text
+    text = re.sub(r'"duration_seconds":<D>,', '', text, count=1)
+    text = text.replace(',"diagnostics":[]', '')
+    match = re.search(r'"bytes":\{"stdout":(\d+),"stderr":(\d+)\},', text)
+    if match and (re.search(r'"std(?:out|err)":"', text[match.end():]) or sum(map(int, match.groups())) == 0):
+        text = text[:match.start()] + text[match.end():]
+    return text
+
+
 def shell(script):
     # Frozen fixtures describe legacy shell semantics. Strict defaults have
     # dedicated mandatory-step tests in tools/test_run.py.
@@ -257,6 +270,7 @@ class GoldenTests(unittest.TestCase):
                     actual.pop("metadata")
                 actual = comparable(actual)
                 expected = comparable(self.golden[name])
+                expected['stdout'] = compact_envelope(expected['stdout'])
                 if name == 'run_help':
                     expected['stdout'] = expected['stdout'].replace(
                         '  --shell SHELL\n',
@@ -278,15 +292,17 @@ class GoldenTests(unittest.TestCase):
                 if name in {'large_success', 'weak_words', 'passed_lines',
                             'unicode_failure_large', 'json_inflation'}:
                     actual = dict(actual)
-                    actual_summary = json.loads(actual.pop('stdout').replace(':<D>', ':0'))
+                    actual_summary = json.loads(actual.pop('stdout'))
                     expected = dict(expected)
-                    expected_summary = json.loads(expected.pop('stdout').replace(':<D>', ':0'))
+                    expected_summary = json.loads(expected.pop('stdout'))
                     out, err = expected['logs'][0]
                     if out:
                         expected_summary['stdout'] = out
                     if err:
                         expected_summary['stderr'] = err
-                    expected_summary['diagnostics'] = []
+                    expected_summary.pop('diagnostics', None)
+                    if out or err:
+                        expected_summary.pop('bytes', None)
                     self.assertEqual(actual_summary, expected_summary)
                 self.assertEqual(actual, expected)
 

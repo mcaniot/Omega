@@ -23,11 +23,11 @@ pub struct Item {
 pub struct Summary {
     pub status: String,
     pub exit_code: i32,
-    /// Already formatted number (`%.4f` natively, Python float repr after finalize).
-    pub duration: String,
     pub bytes: (i64, i64),
     pub signal: Option<String>,
     pub evidence: Vec<u8>,
+    /// Why the status differs from the raw exit code; omitted when empty.
+    pub note: String,
     pub stdout: Option<String>,
     pub stderr: Option<String>,
     pub diagnostics: Vec<Item>,
@@ -39,13 +39,11 @@ impl Summary {
         let mut b = Vec::new();
         b.extend_from_slice(b"{\"status\":");
         py::json_str(&mut b, self.status.as_bytes(), style);
-        b.extend_from_slice(
-            format!(
-                ",\"exit_code\":{},\"duration_seconds\":{},\"bytes\":{{\"stdout\":{},\"stderr\":{}}}",
-                self.exit_code, self.duration, self.bytes.0, self.bytes.1
-            )
-            .as_bytes(),
-        );
+        b.extend_from_slice(format!(",\"exit_code\":{}", self.exit_code).as_bytes());
+        // Sizes matter only when output exists but was not inlined.
+        if self.stdout.is_none() && self.stderr.is_none() && self.bytes.0 + self.bytes.1 > 0 {
+            b.extend_from_slice(format!(",\"bytes\":{{\"stdout\":{},\"stderr\":{}}}", self.bytes.0, self.bytes.1).as_bytes());
+        }
         // The native writer emits evidence before signal; the Python path the reverse.
         let evidence = |b: &mut Vec<u8>| {
             b.extend_from_slice(b",\"evidence\":");
@@ -70,8 +68,12 @@ impl Summary {
                 py::json_str(&mut b, v.as_bytes(), style);
             }
         }
+        if !self.note.is_empty() {
+            b.extend_from_slice(b",\"note\":");
+            py::json_str(&mut b, self.note.as_bytes(), style);
+        }
         for (key, items) in [("diagnostics", &self.diagnostics), ("preview", &self.preview)] {
-        if key == "preview" && items.is_empty() { continue; }
+        if items.is_empty() { continue; }
         b.extend_from_slice(format!(",\"{key}\":[").as_bytes());
         for (i, item) in items.iter().enumerate() {
             if i > 0 {

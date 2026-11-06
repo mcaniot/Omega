@@ -22,6 +22,149 @@ pub struct Config {
     pub max_log_bytes: i64,
     /// Reached through the argparse path: Python-style messages and results.
     pub python: bool,
+    /// `--validation`: strict exit semantics, no SIGPIPE/NO_MATCH leniency.
+    pub validation: bool,
+    /// Script of a `--shell` run (the command is then `shell -e -o pipefail -c script`).
+    pub script: Option<Arg>,
+}
+
+const DEFAULT_MIN_FREE_MB: u64 = 512;
+const EXIT_DATA_LOSS: i32 = 74;
+const EXIT_BLOCKED_DISK: i32 = 75;
+
+/// Final pipeline of a shell script: whether it is the whole script, whether it
+/// contains a pipe, and the words of its last command. Conservative lexer:
+/// grouping, substitution and backticks yield `None` (no leniency applies).
+struct Tail {
+    whole: bool,
+    pipe: bool,
+    words: Vec<Vec<u8>>,
+}
+
+fn flush(words: &mut Vec<Vec<u8>>, word: &mut Vec<u8>) {
+    if !word.is_empty() {
+        words.push(std::mem::take(word));
+    }
+}
+
+fn tail(script: &[u8]) -> Option<Tail> {
+    let (mut whole, mut pipe) = (true, false);
+    let (mut words, mut word): (Vec<Vec<u8>>, Vec<u8>) = (Vec::new(), Vec::new());
+    let mut quote = 0u8;
+    let mut i = 0;
+    while i < script.len() {
+        let (c, next) = (script[i], script.get(i + 1).copied());
+        i += 1;
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            } else if c == b'\\' && quote == b'"' && next.is_some() {
+                word.push(next.unwrap());
+                i += 1;
+            } else {
+                word.push(c);
+            }
+            continue;
+        }
+        match c {
+            b'\'' | b'"' => quote = c,
+            b'\\' => {
+                word.push(next?);
+                i += 1;
+            }
+            b'(' | b')' | b'{' | b'}' | b'`' | b'#' => return None,
+            b' ' | b'\t' => flush(&mut words, &mut word),
+            b'>' | b'<' => {
+                flush(&mut words, &mut word);
+                if next == Some(b'&') {
+                    i += 1;
+                }
+            }
+            b'|' if next != Some(b'|') => {
+                flush(&mut words, &mut word);
+                pipe = true;
+                words.clear();
+            }
+            b'&' if next == Some(b'>') => flush(&mut words, &mut word),
+            b'|' | b'&' | b';' | b'\n' => {
+                flush(&mut words, &mut word);
+                if matches!((c, next), (b'|', Some(b'|')) | (b'&', Some(b'&'))) {
+                    i += 1;
+                }
+                if !words.is_empty() || pipe {
+                    whole = false;
+                }
+                pipe = false;
+                words.clear();
+            }
+            _ => word.push(c),
+        }
+    }
+    if quote != 0 {
+        return None;
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    Some(Tail { whole, pipe, words })
+}
+
+fn is_search(words: &[Vec<u8>]) -> bool {
+    let mut words = words.iter().skip_while(|w| w.contains(&b'='));
+    let Some(first) = words.next() else { return false };
+    match first.rsplit(|&b| b == b'/').next().unwrap_or_default() {
+        b"grep" | b"egrep" | b"fgrep" | b"rg" => true,
+        b"git" => words.next().is_some_and(|w| w == b"grep"),
+        _ => false,
+    }
+}
+
+/// Outside validation: `grep`/`rg`/`git grep` as the whole command exiting 1
+/// with no output is "no match", not a failure.
+fn is_no_match(cfg: &Config) -> bool {
+    match &cfg.script {
+        Some(script) => tail(script).is_some_and(|t| t.whole && is_search(&t.words)),
+        None => is_search(&cfg.command),
+    }
+}
+
+/// Outside validation: 141 from a final pipeline containing a pipe is a producer
+/// killed by SIGPIPE after the reader (`| head`) closed early. Only the final
+/// pipeline qualifies, so no later command was skipped by errexit.
+fn is_early_pipe_close(cfg: &Config) -> bool {
+    cfg.script.as_deref().and_then(tail).is_some_and(|t| t.pipe)
+}
+
+fn min_free_mb() -> u64 {
+    std::env::var("OMEGA_MIN_FREE_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(DEFAULT_MIN_FREE_MB)
+}
+
+fn free_mb(vfs: &libc::statvfs) -> u64 {
+    vfs.f_bavail as u64 * vfs.f_frsize as u64 / (1 << 20)
+}
+
+/// Free MB of the filesystem holding `fd` and of the temp directory, with labels.
+fn disk_shortfall(root_fd: i32) -> Option<String> {
+    let need = min_free_mb();
+    let tmp = std::env::var_os("TMPDIR").filter(|t| !t.is_empty()).unwrap_or_else(|| "/tmp".into());
+    let mut checks: Vec<(&str, u64)> = Vec::new();
+    let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatvfs(root_fd, &mut vfs) } == 0 {
+        checks.push(("evidence dir", free_mb(&vfs)));
+    }
+    if let Ok(path) = CString::new(tmp.as_bytes()) {
+        if unsafe { libc::statvfs(path.as_ptr(), &mut vfs) } == 0 {
+            checks.push(("TMPDIR", free_mb(&vfs)));
+        }
+    }
+    let low: Vec<String> = checks.iter().filter(|c| c.1 < need).map(|c| format!("{} has {} MB free", c.0, c.1)).collect();
+    (!low.is_empty()).then(|| {
+        format!(
+            "Not executed: {} (need >= {} MB, OMEGA_MIN_FREE_MB). Free space; dry-run `Ω-prune --days 1` lists reclaimable evidence bytes, then `Ω-prune --days 1 --apply`.",
+            low.join(", "),
+            need
+        )
+    })
 }
 
 unsafe extern "C" {
@@ -159,10 +302,11 @@ struct Run<'a> {
     evidence_fd: i32,
     metadata_fd: i32,
     child: libc::pid_t,
+    note: &'static str,
 }
 
 impl Run<'_> {
-    fn metadata(&mut self, status: &str, code: i32, returncode: i32, received: i32, crash_signal: i32, cleanup: bool, sizes: (i64, i64)) {
+    fn metadata(&mut self, status: &str, code: i32, returncode: i32, received: i32, crash_signal: i32, cleanup: bool, sizes: (i64, i64)) -> bool {
         let mut b: Vec<u8> = Vec::new();
         let quote = |b: &mut Vec<u8>, s: &[u8]| py::json_str(b, s, Style::C);
         b.extend_from_slice(b"{\"schema\":1,\"status\":");
@@ -225,10 +369,24 @@ impl Run<'_> {
                 .as_bytes(),
             );
         }
+        if !self.note.is_empty() {
+            b.extend_from_slice(b",\"note\":");
+            quote(&mut b, self.note.as_bytes());
+        }
         b.extend_from_slice(b"}\n");
         let fd = private_create(self.evidence_fd, c"result.tmp", 0);
-        if fd < 0 || !write_all(fd, &b) {
-            fail("Cannot write metadata");
+        // A failed or unflushed final record is data loss, reported by the caller.
+        if fd < 0 || !write_all(fd, &b) || (finished && unsafe { libc::fsync(fd) } != 0) {
+            if !finished {
+                fail("Cannot write metadata");
+            }
+            unsafe {
+                if fd >= 0 {
+                    libc::close(fd);
+                    libc::unlinkat(self.evidence_fd, c"result.tmp".as_ptr(), 0);
+                }
+            }
+            return false;
         }
         if finished {
             self.metadata_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
@@ -241,6 +399,7 @@ impl Run<'_> {
         {
             fail("Cannot finalize metadata");
         }
+        true
     }
 
     /// Stops the command group if the wrapper dies without finalizing.
@@ -365,15 +524,14 @@ fn emit(bytes: &[u8]) {
 
 /// Native fast-path summary; falls back to the complete form for anything it
 /// cannot represent exactly.
-fn summary(cfg: &Config, code: i32, crash_signal: i32, sizes: (i64, i64), status: &str, elapsed: f64, directory: &[u8], fds: (i32, i32)) {
-    let duration = format_float(c"%.4f", elapsed);
+fn summary(cfg: &Config, code: i32, crash_signal: i32, sizes: (i64, i64), status: &str, note: &str, directory: &[u8], fds: (i32, i32)) {
     let mut s = Summary {
         status: status.into(),
         exit_code: code,
-        duration,
         bytes: sizes,
         signal: (crash_signal != 0).then(|| signal_name(crash_signal)),
         evidence: directory.to_vec(),
+        note: note.into(),
         stdout: None,
         stderr: None,
         diagnostics: Vec::new(),
@@ -402,7 +560,6 @@ fn summary(cfg: &Config, code: i32, crash_signal: i32, sizes: (i64, i64), status
             return;
         }
     }
-    s.duration = py::pyfloat_repr(s.duration.parse().unwrap_or(elapsed));
     let s = diag::finalize(s, cfg.inline_bytes, fds.0, fds.1);
     let mut line = s.encode(Style::Py);
     line.push(b'\n');
@@ -429,6 +586,14 @@ pub fn execute(cfg: Config) -> i32 {
     }
     if unsafe { libc::fchmod(root_fd, 0o700) } != 0 {
         fail("Cannot protect evidence root");
+    }
+    if let Some(message) = disk_shortfall(root_fd) {
+        unsafe { libc::close(root_fd) };
+        let mut line = b"{\"status\":\"BLOCKED_DISK\",\"exit_code\":75,\"error\":".to_vec();
+        py::json_str(&mut line, message.as_bytes(), if cfg.python { Style::PyAscii } else { Style::C });
+        line.extend_from_slice(b"}\n");
+        emit(&line);
+        return EXIT_BLOCKED_DISK;
     }
     let root = join(&tasks, b"evidence");
     let prefix = strftime(c"%Y%m%dT%H%M%S-native-XXXXXX", &gmtime(unsafe { libc::time(std::ptr::null_mut()) }));
@@ -461,6 +626,7 @@ pub fn execute(cfg: Config) -> i32 {
         evidence_fd,
         metadata_fd: -1,
         child: 0,
+        note: "",
         command,
         cfg: &cfg,
     };
@@ -550,7 +716,7 @@ pub fn execute(cfg: Config) -> i32 {
     run.pending_signals(&mask, &mut received);
     let returncode = if libc::WIFSIGNALED(ws) { -libc::WTERMSIG(ws) } else { libc::WEXITSTATUS(ws) };
     let crash_signal = if returncode < 0 && received == 0 && !timed_out && !limited { -returncode } else { 0 };
-    let code = if timed_out {
+    let mut code = if timed_out {
         124
     } else if limited {
         125
@@ -561,7 +727,7 @@ pub fn execute(cfg: Config) -> i32 {
     } else {
         returncode
     };
-    let status = if timed_out {
+    let mut status = if timed_out {
         "TIMEOUT"
     } else if limited {
         "LOG_LIMIT"
@@ -575,8 +741,24 @@ pub fn execute(cfg: Config) -> i32 {
         "PASS"
     };
     let sizes = (size_of(out), size_of(err));
-    run.metadata(status, code, returncode, received, crash_signal, cleanup, sizes);
-    summary(&cfg, code, crash_signal, sizes, status, now() - run.start, &run.directory, (out, err));
+    // Exit semantics relaxed outside --validation; interrupted/timed-out runs never qualify.
+    if !cfg.validation && status == "FAIL" {
+        if returncode == 141 && is_early_pipe_close(&cfg) {
+            (status, code, run.note) = ("PASS", 0, "SIGPIPE from early pipe close ignored");
+        } else if returncode == 1 && sizes == (0, 0) && is_no_match(&cfg) {
+            (status, code, run.note) = ("NO_MATCH", 0, "search found no match (exit 1 reported as 0)");
+        }
+    }
+    // Delayed write errors (ENOSPC, EIO) surface at flush: never report such a run as complete.
+    let flushed = unsafe { libc::fsync(out) == 0 && libc::fsync(err) == 0 };
+    if !flushed {
+        (status, code, run.note) = ("DATA_LOSS", EXIT_DATA_LOSS, "evidence write or flush failed; logs may be incomplete");
+    }
+    if !run.metadata(status, code, returncode, received, crash_signal, cleanup, sizes) && status != "DATA_LOSS" {
+        (status, code, run.note) = ("DATA_LOSS", EXIT_DATA_LOSS, "evidence write or flush failed; result.json is stale");
+        run.metadata(status, code, returncode, received, crash_signal, cleanup, sizes);
+    }
+    summary(&cfg, code, crash_signal, sizes, status, run.note, &run.directory, (out, err));
     unsafe {
         libc::close(out);
         libc::close(err);

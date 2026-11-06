@@ -1,5 +1,7 @@
 //! Normalize recorded Codex events, never execute their contents.
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -53,6 +55,97 @@ pub fn read_text(call: &Value, result: &Value) -> Vec<String> {
     let mut output = Vec::new();
     text(&result["content"], 0, &mut output);
     output
+}
+
+/// Fingerprints of the source lines a read returned (Read-tool line numbers stripped, short lines ignored).
+pub fn read_fingerprints(call: &Value, result: &Value) -> HashSet<String> {
+    let mut found = HashSet::new();
+    for text in read_text(call, result) {
+        for line in text.lines() {
+            // Read-tool line numbers are presentation, not source content.
+            let line = if call["name"] == "Read" {
+                line.split_once(['→', '\t']).filter(|(n, _)| !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()))
+                    .map_or(line, |(_, s)| s)
+            } else { line };
+            if line.len() >= 32 {
+                found.insert(format!("{:x}", Sha256::digest(line.as_bytes())));
+            }
+        }
+    }
+    found
+}
+
+/// Transcript order of each successful file edit, by path.
+pub fn edit_orders<'a>(
+    calls: &'a HashMap<String, Value>,
+    results: &HashMap<String, Value>,
+    call_order: &HashMap<String, usize>,
+) -> HashMap<&'a str, Vec<usize>> {
+    let mut edits: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (id, call) in calls {
+        if matches!(call["name"].as_str(), Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit"))
+            && results.get(id).is_some_and(|r| r["is_error"] != true) {
+            if let Some(path) = call["input"]["file_path"].as_str() {
+                edits.entry(path).or_default().push(call_order.get(id).copied().unwrap_or(0));
+            }
+        }
+    }
+    edits
+}
+
+/// A re-read is legitimate when a compaction or an edit of the file happened since the earlier read.
+pub fn legit_reread(
+    earlier: Option<usize>,
+    source: Option<&str>,
+    path: Option<&str>,
+    order: usize,
+    compaction_at: &[usize],
+    edits: &HashMap<&str, Vec<usize>>,
+) -> bool {
+    earlier.is_some_and(|e| {
+        compaction_at.iter().any(|c| e < *c && *c < order)
+            || [source, path].into_iter().flatten().any(|p| {
+                edits.get(p).is_some_and(|orders| orders.iter().any(|o| e < *o && *o < order))
+            })
+    })
+}
+
+/// Classify a tool error; only `real` needs investigation, the rest is workflow friction.
+pub fn error_class(call: &Value, result: &Value) -> &'static str {
+    let text = match &result["content"] {
+        Value::String(s) => s.clone(),
+        Value::Array(blocks) => blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        other => other.to_string(),
+    };
+    let lower = text.to_lowercase();
+    let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(&n.to_lowercase()));
+    let input = call["input"].to_string();
+    let words = |names: &[&str]| input.split(|c: char| !c.is_alphanumeric() && c != '-' && c != 'Ω')
+        .any(|w| names.contains(&w));
+    if has(&["no space left on device", "DATA_LOSS", "BLOCKED_DISK", "evidence write fail", "failed to write evidence"]) {
+        return "data_loss";
+    }
+    if has(&["Unwrapped or noncanonical", "Large text file", "Large evidence", "PreToolUse", "policy block", "blocked by policy"]) {
+        return "guard";
+    }
+    if ["exitcode141", "exitcode:141", "processexitedwithcode141", "\"exit_code\":141"].iter().any(|n| compact.contains(n)) {
+        return "sigpipe";
+    }
+    let mut lines = lower.lines().map(str::trim);
+    let first = lines.next().unwrap_or("");
+    if ["exit code 1", "exit code: 1", "process exited with code 1"].contains(&first)
+        && lines.all(str::is_empty) && words(&["grep", "egrep", "fgrep", "rg"]) {
+        return "no_match";
+    }
+    if has(&["file has not been read yet"])
+        || (words(&["Ω-inspect", "Ω-run", "omega-inspect"])
+            && has(&["usage", "unrecognized", "invalid", "required", "no such file", "not found", "unknown argument"]))
+        || (has(&["file does not exist", "no such file"])
+            && call["input"]["file_path"].as_str().is_some_and(|p| p.contains("/evidence/"))) {
+        return "wrapper_usage";
+    }
+    "real"
 }
 
 pub fn discover(root: &Path, recursive: bool, files: &mut Vec<PathBuf>) -> Result<(), String> {

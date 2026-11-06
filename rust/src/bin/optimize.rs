@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 
 #[path = "optimize/ingest.rs"]
 mod ingest;
+#[path = "optimize/prefix.rs"]
+mod prefix;
+#[path = "optimize/replay.rs"]
+mod replay;
 
 fn audit(
     path: &Path,
@@ -36,6 +40,7 @@ fn audit(
     let carried: HashSet<_> = calls.keys().cloned().collect();
     let mut results = HashMap::new();
     let mut compactions = HashSet::new();
+    let mut compaction_at = Vec::new();
     let mut malformed = 0;
     let mut project = String::new();
     let mut index = 0;
@@ -72,6 +77,7 @@ fn audit(
             .as_str()
             .is_some_and(|s| s.contains("compact"))
         {
+            compaction_at.push(index);
             compactions.insert(
                 row["uuid"]
                     .as_str()
@@ -94,7 +100,10 @@ fn audit(
                 .or_else(|| row["uuid"].as_str())
                 .map(str::to_owned)
                 .unwrap_or_else(|| index.to_string());
-            messages.insert(id, (index, context, row["timestamp"].clone()));
+            let tokens = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]
+                .map(|k| usage[k].as_u64().unwrap_or(0));
+            // Transcripts repeat assistant records per message id: the last record wins, counted once.
+            messages.insert(id, (index, context, row["timestamp"].clone(), tokens));
             if let Some(cwd) = row["cwd"].as_str() {
                 project = cwd.to_owned();
             }
@@ -124,8 +133,19 @@ fn audit(
     let mut large_unbounded_reads = 0;
     let mut large_evidence_reads = 0;
     let mut large_tool_outputs = 0;
-    let mut seen_reads: HashSet<String> = read_history.iter().cloned().collect();
+    // Carried fingerprints have unknown origin, so overlaps with them are never excused.
+    let mut seen_reads: HashMap<String, (Option<usize>, Option<String>)> =
+        read_history.iter().map(|f| (f.clone(), (None, None))).collect();
     let (mut read_calls, mut overlapping_read_calls, mut repeated_read_lines, mut novel_read_lines) = (0, 0, 0, 0);
+    let mut legit_reread_lines = 0;
+    let edits = ingest::edit_orders(&calls, &results, &call_order);
+    let mut error_classes = [("guard", 0u64), ("wrapper_usage", 0), ("sigpipe", 0), ("no_match", 0), ("data_loss", 0), ("real", 0)];
+    for (id, result) in &results {
+        if result["is_error"] == true {
+            let class = ingest::error_class(calls.get(id).unwrap_or(&Value::Null), result);
+            if let Some(slot) = error_classes.iter_mut().find(|(name, _)| *name == class) { slot.1 += 1; }
+        }
+    }
     let mut sorted_calls: Vec<_> = calls.iter().collect();
     sorted_calls.sort_by_key(|(id, _)| (call_order.get(*id).copied().unwrap_or(0), *id));
     for (id, call) in sorted_calls {
@@ -139,29 +159,29 @@ fn audit(
         let Some(result) = results.get(id) else {
             continue;
         };
-        let mut this_read = HashSet::new();
-        for text in ingest::read_text(call, result) {
-            for line in text.lines() {
-                // Read-tool line numbers are presentation, not source content.
-                let line = if call["name"] == "Read" {
-                    line.split_once(['→', '\t']).filter(|(n, _)| !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()))
-                        .map_or(line, |(_, s)| s)
-                } else { line };
-                if line.len() >= 32 {
-                    this_read.insert(format!("{:x}", Sha256::digest(line.as_bytes())));
-                }
-            }
-        }
+        let order = call_order.get(id).copied().unwrap_or(0);
+        let path = call["input"]["file_path"].as_str().map(str::to_owned);
+        let this_read = ingest::read_fingerprints(call, result);
         if !this_read.is_empty() {
             read_calls += 1;
-            let overlap = this_read.intersection(&seen_reads).count();
+            let mut overlap = 0;
+            for fingerprint in &this_read {
+                let Some((earlier, source)) = seen_reads.get(fingerprint) else { continue };
+                overlap += 1;
+                // Legitimate: the file was changed, or a compaction dropped the earlier read, in between.
+                let legit = ingest::legit_reread(*earlier, source.as_deref(), path.as_deref(), order, &compaction_at, &edits);
+                if legit { legit_reread_lines += 1; }
+            }
             repeated_read_lines += overlap;
             novel_read_lines += this_read.len() - overlap;
             if overlap > 0 { overlapping_read_calls += 1; }
             let mut fingerprints: Vec<_> = this_read.into_iter().collect();
             fingerprints.sort();
             for fingerprint in fingerprints {
-                if seen_reads.insert(fingerprint.clone()) { read_history.push_back(fingerprint); }
+                // The newest read is the origin for the next overlap.
+                if seen_reads.insert(fingerprint.clone(), (Some(order), path.clone())).is_none() {
+                    read_history.push_back(fingerprint);
+                }
                 if read_history.len() > 2048 {
                     if let Some(old) = read_history.pop_front() { seen_reads.remove(&old); }
                 }
@@ -205,6 +225,8 @@ fn audit(
                 "file_path": call["input"]["file_path"], "limit": call["input"]["limit"]}});
         }
     }
+    let token_sum = |i: usize| ordered.iter().map(|v| v.3[i]).sum::<u64>();
+    let tokens_total = (0..4).map(token_sum).sum::<u64>();
     Ok((
         json!({
             "provider": provider,
@@ -221,11 +243,21 @@ fn audit(
             "compactions": compactions.len(),
             "tool_calls": calls.keys().filter(|id| !carried.contains(*id)).count(),
             "tool_errors": results.values().filter(|r| r["is_error"] == true).count(),
+            "error_classes": error_classes.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
+            "workflow_errors": error_classes[..4].iter().map(|(_, v)| v).sum::<u64>(),
+            "tokens_input": token_sum(0),
+            "tokens_cache_creation": token_sum(1),
+            "tokens_cache_read": token_sum(2),
+            "tokens_output": token_sum(3),
+            "tokens_total": tokens_total,
+            "tokens_per_request": tokens_total / (ordered.len() as u64).max(1),
             "repeated_exact_calls_extra": repeated,
             "read_calls": read_calls,
             "overlapping_read_calls": overlapping_read_calls,
             "repeated_read_lines": repeated_read_lines,
             "novel_read_lines": novel_read_lines,
+            "legit_reread_lines": legit_reread_lines,
+            "avoidable_reread_lines": repeated_read_lines - legit_reread_lines,
             "large_unbounded_text_reads": large_unbounded_reads,
             "large_evidence_text_reads": large_evidence_reads,
             "large_tool_outputs": large_tool_outputs,
@@ -613,6 +645,44 @@ fn resume(args: Vec<String>) -> Result<(), String> {
     Err(format!("Task not found in active/ or completed/: {slug}"))
 }
 
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    match values.len() {
+        0 => 0.0,
+        n if n % 2 == 1 => values[n / 2],
+        n => (values[n / 2 - 1] + values[n / 2]) / 2.0,
+    }
+}
+
+/// Only reads data already in the base report; older reports lack tokens_total.
+fn base_median_tokens(path: &Path) -> Result<f64, String> {
+    let base: Value = serde_json::from_slice(&fs::read(path).map_err(|e| format!("--compare: {e}"))?)
+        .map_err(|e| format!("--compare: invalid JSON: {e}"))?;
+    let rows = base["sessions"].as_array().filter(|rows| !rows.is_empty())
+        .ok_or("--compare: base report has no sessions")?;
+    let tokens: Option<Vec<f64>> = rows.iter().map(|r| r["tokens_total"].as_u64().map(|t| t as f64)).collect();
+    tokens.map(median).ok_or_else(|| "--compare: base lacks tokens_total; rerun the base sessions with --force using this version".to_owned())
+}
+
+fn gates(rows: &[Value], base_median: f64) -> Value {
+    let sum = |key: &str| rows.iter().map(|r| r[key].as_u64().unwrap_or(0)).sum::<u64>();
+    let peak = rows.iter().map(|r| r["context_peak"].as_u64().unwrap_or(0)).max().unwrap_or(0);
+    let calls = sum("tool_calls");
+    let ratio = if calls == 0 { 0.0 } else { sum("workflow_errors") as f64 / calls as f64 };
+    let tokens = median(rows.iter().map(|r| r["tokens_total"].as_u64().unwrap_or(0) as f64).collect());
+    let compactions = sum("compactions");
+    let data_loss = rows.iter().map(|r| r["error_classes"]["data_loss"].as_u64().unwrap_or(0)).sum::<u64>();
+    json!({
+        "avoidable_reread_lines": {"value": sum("avoidable_reread_lines"), "limit": "== 0", "ok": sum("avoidable_reread_lines") == 0},
+        "compactions": {"value": compactions, "limit": "== 0", "ok": compactions == 0},
+        "context_peak": {"value": peak, "limit": "< 180000", "ok": peak < 180_000},
+        "data_loss": {"value": data_loss, "limit": "== 0", "ok": data_loss == 0},
+        "repeated_exact_calls": {"value": sum("repeated_exact_calls_extra"), "limit": "== 0", "ok": sum("repeated_exact_calls_extra") == 0},
+        "workflow_error_ratio": {"value": ratio, "limit": "< 0.02", "ok": ratio < 0.02},
+        "median_tokens_per_session": {"value": tokens, "limit": base_median / 3.0, "ok": tokens <= base_median / 3.0},
+    })
+}
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1).peekable();
     if args.peek().is_some_and(|a| a == "resume") {
@@ -622,12 +692,21 @@ fn run() -> Result<(), String> {
     if args.peek().is_some_and(|a| a == "optimize") {
         args.next();
     }
+    if args.peek().is_some_and(|a| a == "prefix") {
+        args.next();
+        return prefix::run(args.collect());
+    }
+    if args.peek().is_some_and(|a| a == "replay") {
+        args.next();
+        return replay::run(args.collect());
+    }
     let mut apply = false;
     let mut limit = 12;
     let mut report = None;
     let mut json_output = false;
     let mut force = false;
     let mut check = false;
+    let mut compare = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--apply" => apply = true,
@@ -644,6 +723,9 @@ fn run() -> Result<(), String> {
                     return Err("--sessions requires 1..50".to_owned());
                 }
             }
+            "--compare" => {
+                compare = Some(PathBuf::from(args.next().ok_or("--compare requires BASE.json")?))
+            }
             "--report" => {
                 report = Some(PathBuf::from(
                     args.next()
@@ -652,7 +734,7 @@ fn run() -> Result<(), String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "omega resume [TASK]\nRead bounded task state first; never opens transcripts or logs.\nomega optimize [--sessions 1..50] [--json] [--report NEW.json] [--apply | --check] [--force]\nAnalyze new Claude and Codex records since the last successful checkpoint.\nAlways saves a private report with findings and fix statuses before advancing checkpoints.\nDefault: enable the installed Claude Read guard when findings justify it.\n--check disables automatic fixes; --apply explicitly enables the guard.\n--force audits full sessions. Never deletes, rewrites or compacts conversations."
+                    "omega resume [TASK]\nRead bounded task state first; never opens transcripts or logs.\nomega optimize prefix [--json] [--report NEW.json]\nRead-only per-project fixed context (min first-request context, instruction chain, skill descriptions) of Claude transcripts from the last 30 days; never loads or saves checkpoint state, never touches settings. Estimates 4 bytes/token.\nomega optimize replay [--sessions 1..50] [--json] [--report NEW.json] [--handoff-tokens N]\nRead-only counterfactual token replay of recent Claude transcripts; never loads or saves checkpoint state, never touches settings. Baseline = sum(context_i + output_i) per deduplicated request. Tool-result tokens = bytes / calibrated bytes-per-token (median over single-result context deltas, fallback 3.5). R1: fully avoidable Read re-reads become a 40-token deny. R2: sigpipe/no_match/wrapper_usage errors followed by another call of the same tool are removed with their request. R3: at context >= 130000 (or --handoff-tokens N; alias --soft-reset-tokens) an automatic handoff restarts the session at first-request context + 3000 resume tokens and charges the first post-cut Read/Edit of each file read earlier (largest earlier Read result plus one request); baseline compactions are kept.\nomega optimize [--sessions 1..50] [--json] [--report NEW.json] [--apply | --check] [--force] [--compare BASE.json]\nAnalyze new Claude and Codex records since the last successful checkpoint.\nAlways saves a private report with findings and fix statuses before advancing checkpoints.\nDefault: enable the installed Claude Read guard when findings justify it.\n--check disables automatic fixes; --apply explicitly enables the guard.\n--force audits full sessions. --compare prints OK/KO gates against a BASE.json report produced by this version (rerun base sessions with --force); exit status stays 0.\nNever deletes, rewrites or compacts conversations."
                 );
                 return Ok(());
             }
@@ -662,6 +744,8 @@ fn run() -> Result<(), String> {
     if check && apply {
         return Err("--check and --apply are mutually exclusive".to_owned());
     }
+    // Validate the base before any checkpoint can advance.
+    let base_median = compare.as_deref().map(base_median_tokens).transpose()?;
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is required")?);
     let (_lock, state_path, mut state) = load_state(&home)?;
     let batch = sessions(&home, limit, &mut state, force)?;
@@ -687,7 +771,8 @@ fn run() -> Result<(), String> {
     let auto_fix = !check && needs_guard && current_guard.starts_with("missing;");
     let guard = configure(&home, apply || auto_fix)?;
     let findings = ingest::findings(&batch.rows, guard);
-    let output = json!({
+    let gates = base_median.map(|base| gates(&batch.rows, base));
+    let mut output = json!({
         "snapshot_unix_seconds": timestamp()?,
         "selection": "most recently modified top-level transcripts; not proof of live sessions",
         "context_measure": "Claude: input + cache creation + cache read; Codex: last_token_usage.input_tokens (cached tokens already included); never byte estimates or cumulative cost",
@@ -701,6 +786,9 @@ fn run() -> Result<(), String> {
         "sessions_changed_during_audit": batch.unstable,
         "sessions": batch.rows,
     });
+    if let Some(gates) = &gates {
+        output["gates"] = gates.clone();
+    }
     serde_json::to_writer_pretty(&mut report_file, &output).map_err(|e| e.to_string())?;
     report_file
         .write_all(b"\n")
@@ -715,7 +803,7 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     println!(
-        "Claude + Codex incremental context analysis (not live-process detection)\nRead guard: {guard}\nPROVIDER SESSION   CONTEXT    PEAK       COMPACT  ERRORS/CALLS  LARGE OUTPUTS  UNBOUNDED/EVIDENCE READS"
+        "Claude + Codex incremental context analysis (not live-process detection)\nRead guard: {guard}\nPROVIDER SESSION   CONTEXT    PEAK       COMPACT  ERRORS/CALLS  LARGE OUTPUTS  UNBOUNDED/EVIDENCE READS  TOKENS     TOK/REQ    WORKFLOW-ERR  REREAD AVOID/LEGIT"
     );
     for row in output["sessions"].as_array().unwrap() {
         let stem = row["session"].as_str().unwrap_or("?");
@@ -730,16 +818,27 @@ fn run() -> Result<(), String> {
         // serde_json::Value ignores width specifiers; format plain integers.
         let n = |key: &str| row[key].as_u64().unwrap_or(0);
         println!(
-            "{:8} {id:8}  {:<9}  {:<9}  {:<7}  {:<12}  {:<13}  {}/{}",
+            "{:8} {id:8}  {:<9}  {:<9}  {:<7}  {:<12}  {:<13}  {:<25} {:<10} {:<10} {:<13} {}/{}",
             row["provider"].as_str().unwrap_or("?"),
             n("context_last"),
             n("context_peak"),
             n("compactions"),
             format!("{}/{}", n("tool_errors"), n("tool_calls")),
             n("large_tool_outputs"),
-            n("large_unbounded_text_reads"),
-            n("large_evidence_text_reads")
+            format!("{}/{}", n("large_unbounded_text_reads"), n("large_evidence_text_reads")),
+            n("tokens_total"),
+            n("tokens_per_request"),
+            n("workflow_errors"),
+            n("avoidable_reread_lines"),
+            n("legit_reread_lines")
         );
+    }
+    if let Some(gates) = &gates {
+        println!("GATE                      VALUE        LIMIT        STATUS");
+        for (name, gate) in gates.as_object().unwrap() {
+            let limit = gate["limit"].as_str().map_or_else(|| gate["limit"].to_string(), str::to_owned);
+            println!("{name:25} {:<12} {limit:<12} {}", gate["value"], if gate["ok"] == true { "OK" } else { "KO" });
+        }
     }
     println!(
         "Unchanged skipped: {}; changed during audit (not marked): {}.\nPriorities: inspect evidence slices; bound code reads; checkpoint at phase changes.\nCounts indicate review targets, not proof of context rot. No transcript was modified.",

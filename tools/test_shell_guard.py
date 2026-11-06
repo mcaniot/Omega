@@ -84,6 +84,33 @@ class GuardTest(unittest.TestCase):
         reason = self.call('pytest -q')['hookSpecificOutput']['permissionDecisionReason']
         self.assertIn(f'{NATIVE} run [--cwd DIR] [--timeout S] -- COMMAND ARGS', reason)
 
+    def reason(self, command):
+        result = self.call(command)
+        self.assertDenied(result)
+        return result['hookSpecificOutput']['permissionDecisionReason']
+
+    def test_denial_offers_ready_to_run_rewrite(self):
+        for command in ['pytest -q | head', "echo 'it''s' && ls"]:
+            rewrite = shlex.join(['Ω-run', '--shell', command])
+            self.assertIn(f'Ready-to-run: {rewrite} ', self.reason(command))
+        self.assertIn("Ready-to-run: 'Ω-run' --shell 'echo \"unterminated'", self.reason('echo "unterminated'))
+
+    def test_no_rewrite_for_policy_denied_or_oversized_commands(self):
+        self.assertNotIn('Ready-to-run', self.reason('rm -rf /tmp/x'))
+        self.assertNotIn('Ready-to-run', self.reason('echo ' + 'a' * 400))
+
+    def test_evidence_reads_suggest_bounded_inspect(self):
+        directory = f'{HOME}/.agents/tasks/evidence/20260101T000000-native-abcdef'
+        expected = {
+            f'cat {directory}/stdout.log': 'stdout',
+            f'tail -n 5 {directory}/stderr.log | head': 'stderr',
+            f'head {directory}/stdout': 'stdout',
+            f'cat {directory}/result.json': 'auto',
+        }
+        for command, stream in expected.items():
+            hint = shlex.join(['Ω-inspect', '--stream', stream, '--lines', '40', '--max-bytes', '7000', directory])
+            self.assertIn(f'Ready-to-run: {hint} ', self.reason(command))
+
     def test_bad_payloads_and_unwrapped_commands_are_denied(self):
         for payload in [None, [], {}, {'tool_name': None}, {'tool_name': 'Bash'},
                         {'tool_name': 'Bash', 'tool_input': []}]:

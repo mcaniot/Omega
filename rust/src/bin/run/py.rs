@@ -233,7 +233,3 @@ pub fn parse_float(text: &[u8]) -> Option<f64> {
 pub fn py_space(c: char) -> bool {
     c.is_whitespace() || ('\x1c'..='\x1f').contains(&c)
 }
-
-pub fn pyfloat_repr(x: f64) -> String {
-    format!("{:?}", x)
-}

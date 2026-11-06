@@ -17,6 +17,9 @@ const GUIDANCE_TAIL: &str = "Shell output must use the evidence wrapper. Invoke 
 For shell syntax pass one single-quoted --shell 'SCRIPT' argument; no outer operators, \
 redirection or cd (use --cwd).";
 
+/// Longest suggested rewrite; keeps hook output bounded.
+const MAX_REWRITE_BYTES: usize = 300;
+
 /// CPython's recursion headroom for the C JSON scanner (see `Parser::fail`).
 const MAX_OPEN_CONTAINERS: usize = 9997;
 /// Python refuses `int()` of more decimal digits than this.
@@ -646,6 +649,36 @@ impl Guard {
         Some(Decision::new("deny", format!("{reason} {}", self.guidance)))
     }
 
+    /// Deny an unwrapped command, appending the exact wrapped command when one is safe to offer.
+    fn denied_unwrapped(&self, reason: &str, command: &str, argv: &[String]) -> Option<Decision> {
+        let hint = Self::rewrite(command, argv).filter(|h| h.len() <= MAX_REWRITE_BYTES);
+        let hint = hint.map(|h| format!(" Ready-to-run: {h}")).unwrap_or_default();
+        Some(Decision::new("deny", format!("{reason}{hint} {}", self.guidance)))
+    }
+
+    /// `cat`/`head`/`tail` of evidence become a bounded `Ω-inspect`; any other command is
+    /// wrapped in `Ω-run --shell` unless the policy would still deny or ask for it.
+    fn rewrite(command: &str, argv: &[String]) -> Option<String> {
+        const EVIDENCE: &str = ".agents/tasks/evidence/";
+        if matches!(argv.first().map(String::as_str), Some("cat" | "head" | "tail")) {
+            if let Some(path) = argv.iter().skip(1).find(|a| a.contains(EVIDENCE)) {
+                let path = path.trim_end_matches('/');
+                let (dir, stream) = match path.rsplit_once('/') {
+                    Some((dir, "stdout.log" | "stdout")) => (dir, "stdout"),
+                    Some((dir, "stderr.log" | "stderr")) => (dir, "stderr"),
+                    Some((dir, "result.json")) => (dir, "auto"),
+                    _ => (path, "auto"),
+                };
+                let args = ["\u{3a9}-inspect", "--stream", stream, "--lines", "40", "--max-bytes", "7000", dir];
+                return Some(shlex_join(&args.map(String::from)));
+            }
+        }
+        if policy(command).is_some() {
+            return None;
+        }
+        Some(shlex_join(&["\u{3a9}-run".to_string(), "--shell".to_string(), command.to_string()]))
+    }
+
     /// The command the wrapper will execute, as text for policy matching.
     fn inner_text(argv: &[String]) -> String {
         if argv[1] != "run" {
@@ -679,11 +712,11 @@ impl Guard {
             _ => return self.denied("Missing shell command."),
         };
         let Some(mut argv) = shlex_split(command) else {
-            return self.denied("Malformed shell quoting.");
+            return self.denied_unwrapped("Malformed shell quoting.", command.trim_matches(py_isspace), &[]);
         };
         let command = command.trim_matches(py_isspace);
         if argv.is_empty() || (command != shlex_join(&argv) && inert_split(command).as_ref() != Some(&argv)) {
-            return self.denied("Unwrapped or noncanonical shell command.");
+            return self.denied_unwrapped("Unwrapped or noncanonical shell command.", command, &argv);
         }
         if matches!(argv[0].as_str(), "omega" | "omega-optimize" | "Ω-optimize") {
             if !Self::trusted_alias(&argv[0], &self.optimize) {
@@ -728,7 +761,7 @@ impl Guard {
         // Canonical quoting makes metacharacters literal arguments to the wrapper.
         // Without --allow-clean, native sandbox and approval checks still apply.
         if argv.len() < 2 || argv[0] != self.native || !matches!(argv[1].as_str(), "run" | "inspect" | "prune") {
-            return self.denied("Unwrapped or noncanonical shell command.");
+            return self.denied_unwrapped("Unwrapped or noncanonical shell command.", command, &argv);
         }
         if argv.iter().any(|arg| arg.starts_with('=')) {
             // zsh EQUALS expansion rewrites an unquoted "=cmd" into a path.
