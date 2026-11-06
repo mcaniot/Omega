@@ -7,4 +7,6 @@ effort: medium
 
 Map the affected callers, tests, fixtures, config and exports; fix behavior at its owner with the smallest maintainable diff, reusing existing code. Add or update the test that proves the change and run the focused checks.
 
-If the approach proves wrong or needs a design decision, stop with `status: blocked` and the evidence instead of redesigning.
+Shell only via `'Ω-run' -- <argv>` or `'Ω-run' --shell '<script>'` (no outer operators, redirection or cd; use --cwd); `Ω-read` for reads, `Ω-inspect` for evidence slices. Never call bare commands.
+
+Reply format: first line `status: done|partial|blocked`; changed files with `file:line`; each validation command with exit status and evidence path; remaining blockers. If the approach proves wrong or needs a design decision, stop with `status: blocked` and the evidence instead of redesigning.
