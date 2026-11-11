@@ -20,6 +20,19 @@ import unittest
 
 BINARY = os.environ.get('OMEGA_RUN_BINARY', str(Path.home() / '.agents/tools/robot-exec/native/run'))
 GOLDEN = Path(__file__).with_name('fixtures') / 'run_golden.json.gz'
+SUBCOMMAND_USAGE = {
+    'run': 'usage: run.py run [-h] [--cwd CWD] [--timeout TIMEOUT] [--shell SHELL]\n'
+           '                  [--shell-executable SHELL_EXECUTABLE]\n'
+           '                  [--inline-bytes INLINE_BYTES] [--kill-after KILL_AFTER]\n'
+           '                  [--max-log-bytes MAX_LOG_BYTES]\n'
+           '                  ...\n',
+    'inspect': 'usage: run.py inspect [-h] [--stream {auto,stdout,stderr,stdout.log,stderr.log}] [--offset OFFSET]\n'
+               '                      [--lines LINES] [--max-bytes MAX_BYTES]\n'
+               '                      [--search SEARCH]\n'
+               '                      evidence\n',
+    'prune': 'usage: run.py prune [-h] [--days DAYS] [--apply]\n',
+}
+SUBCOMMAND_EXTRAS = {'unknown_option': 'run', 'inspect_extra': 'inspect', 'prune_extra': 'prune'}
 PY = sys.executable
 
 VOLATILE = [
@@ -283,6 +296,12 @@ class GoldenTests(unittest.TestCase):
                         '                        Fail fast with errexit and pipefail (bash/zsh)\n'
                         '  --shell-keep-going\n'
                         '                        Explicit legacy shell semantics; not for validations\n')
+                if name in SUBCOMMAND_EXTRAS:
+                    # Intentional: subcommand extras report the subcommand usage.
+                    sub = SUBCOMMAND_EXTRAS[name]
+                    expected['stderr'] = expected['stderr'].replace(
+                        'usage: run.py [-h] {run,inspect,prune} ...\nrun.py: error:',
+                        f'{SUBCOMMAND_USAGE[sub]}run.py {sub}: error:')
                 if name == 'ambiguous_abbreviation':
                     expected['stderr'] = expected['stderr'].replace(
                         'could match --shell, --shell-executable',

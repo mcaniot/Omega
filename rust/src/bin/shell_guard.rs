@@ -34,12 +34,19 @@ fn deny_patterns() -> Vec<String> {
     vec![
         r"\bsudo\b|\bsu\s+-".to_string(),
         format!(r"{GIT}push\s+{ARGS}(?:-f|--force)(?:\s|$)"),
-        format!(r"\brm\s+{ARGS}-[a-zA-Z]*(?:[rR][a-zA-Z]*f|f[a-zA-Z]*[rR])"),
+        // Any rm invocation (also /bin/rm, xargs rm, -- rm); not --rm flags. `git rm` is masked in `policy`.
+        r"(?:^|[^\w.\-])rm(?:\s|$)".to_string(),
         format!(r"\bmkfs(?:\.\w+)?\b|\bdd\s+{ARGS}of=/dev/"),
     ]
 }
 
-const DENY_LABELS: [&str; 4] = ["privilege escalation", "git force push", "rm -rf", "raw device write"];
+const DENY_LABELS: [&str; 4] = ["privilege escalation", "git force push", "rm", "raw device write"];
+const DENY_HINTS: [&str; 4] = [
+    "Ask the user to run it themselves.",
+    "Ask the user to run it themselves.",
+    "Delete with trash-put PATH... (recoverable via trash-restore); never rm.",
+    "Ask the user to run it themselves.",
+];
 
 fn ask_patterns() -> Vec<String> {
     vec![
@@ -110,10 +117,13 @@ fn first_match(patterns: &[String], text: &[u8]) -> Option<usize> {
 /// `(kind, reason)` of a policy hit, or `None` for pass.
 fn policy(text: &str) -> Option<Decision> {
     let text = normalize(text);
-    if let Some(index) = first_match(&deny_patterns(), &text) {
+    // `git rm` is versioned (recoverable); keep it out of the rm deny rule only.
+    let git_rm = ByteRegex::new(&format!(r"(?-u){GIT}rm\b")).unwrap_or_else(|_| std::process::abort());
+    let masked = git_rm.replace_all(&text, &b"git x"[..]);
+    if let Some(index) = first_match(&deny_patterns(), &masked) {
         return Some(Decision::new(
             "deny",
-            format!("Blocked by agent policy: {}. Ask the user to run it themselves.", DENY_LABELS[index]),
+            format!("Blocked by agent policy: {}. {}", DENY_LABELS[index], DENY_HINTS[index]),
         ));
     }
     first_match(&ask_patterns(), &text).map(|index| {

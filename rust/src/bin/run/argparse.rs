@@ -548,11 +548,13 @@ pub fn parse_command(args: &[Arg]) -> Result<(&'static str, &'static Parser, Par
         _ => ("prune", &PRUNE),
     };
     let mut sub = parser.parse(&rest)?;
+    // Subcommand-only extras report the subcommand usage, which lists its accepted options.
+    let reporter = if top.extras.is_empty() { parser } else { &TOP };
     let mut extras = top.extras;
     extras.append(&mut sub.extras);
     if !extras.is_empty() {
         let joined: Vec<String> = extras.iter().map(|e| String::from_utf8_lossy(e).into_owned()).collect();
-        return Err(TOP.error(&format!("unrecognized arguments: {}", joined.join(" "))));
+        return Err(reporter.error(&format!("unrecognized arguments: {}", joined.join(" "))));
     }
     Ok((label, parser, sub))
 }

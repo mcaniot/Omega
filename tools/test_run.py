@@ -360,6 +360,14 @@ class InspectAliasTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stdout)
         return json.loads(process.stdout)
 
+    def test_unrecognized_option_shows_inspect_usage(self):
+        _, _, path = invoke("print('x')")
+        process = subprocess.run([*RUNNER, 'inspect', str(path), '--limit', '7000'], capture_output=True, text=True)
+        self.assertEqual(process.returncode, 2)
+        self.assertIn('usage: run.py inspect', process.stderr)
+        self.assertIn('--search SEARCH', process.stderr)
+        self.assertIn('unrecognized arguments: --limit 7000', process.stderr)
+
     def test_auto_reads_stdout_when_stderr_empty_and_both_labeled_otherwise(self):
         _, _, path = invoke("print('only out')")
         result = self.inspect(str(path))

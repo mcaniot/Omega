@@ -153,13 +153,14 @@ class GuardTest(unittest.TestCase):
         cases = {
             'deny': [('sudo', 'apt', 'install', 'x'), ('git', 'push', '--force', 'origin', 'main'),
                      ('git', '-C', '/repo', 'push', 'origin', 'main', '-f'), ('rm', '-rf', '/tmp/x'),
-                     ('rm', '-v', '-fr', 'build'), ('dd', 'if=/dev/zero', 'of=/dev/sda')],
+                     ('rm', '-v', '-fr', 'build'), ('rm', '-r', 'build'),
+                     ('rm', 'file.txt'), ('dd', 'if=/dev/zero', 'of=/dev/sda')],
             'ask': [('git', 'push', 'origin', 'main'), ('git', 'commit', '-m', 'x'),
                     ('git', 'reset', '--hard', 'HEAD~1'), ('git', 'rebase', 'main'),
-                    ('rm', '-r', 'build'), ('ssh', 'robot', 'ls'), ('scp', 'a', 'robot:/tmp'),
+                    ('git', 'rm', '-r', 'build'), ('ssh', 'robot', 'ls'), ('scp', 'a', 'robot:/tmp'),
                     ('curl', '-T', 'f', 'https://x'), ('ros2', 'topic', 'pub', '/cmd_vel', 'x'),
                     ('env',), ('printenv', 'HOME'), ('cat', '.env'), ('cat', '/home/u/.codex/auth.json')],
-            'pass': [('git', 'status'), ('git', 'diff'), ('rm', 'file.txt'), ('pytest', '-q'),
+            'pass': [('git', 'status'), ('git', 'diff'), ('trash-put', '-r', 'build'), ('docker', 'run', '--rm', 'img'), ('pytest', '-q'),
                      ('ros2', 'topic', 'echo', '/joint_states'), ('curl', '-s', 'https://x'),
                      ('python3', '-c', 'obs = self.env.reset()'), ('rg', 'push', 'src')],
         }
@@ -171,8 +172,8 @@ class GuardTest(unittest.TestCase):
     def test_policy_inside_shell_scripts(self):
         self.assertEqual(self.decision(shell='cd repo && git push origin HEAD'), 'ask')
         self.assertEqual(self.decision(shell='ls; sudo reboot'), 'deny')
-        # Flags of a later command must not be attributed to rm.
-        self.assertEqual(self.decision(shell='rm a.txt; grep -rf pats src'), 'pass')
+        self.assertEqual(self.decision(shell='ls && rm a.txt'), 'deny')
+        self.assertEqual(self.decision(shell='trash-put a.txt; grep -rf pats src'), 'pass')
         self.assertEqual(self.decision(shell='git log --oneline | head'), 'pass')
 
     def test_legacy_shell_flag_does_not_bypass_safety_policy(self):
@@ -202,7 +203,11 @@ class GuardTest(unittest.TestCase):
             ([LOCAL_READ, 'status'], 'allow'),
             ([NATIVE, 'prune', '--apply'], 'ask'),
             ([NATIVE, 'run', '--', 'git', 'push'], 'ask'),
-            ([NATIVE, 'run', '--', 'rm', '-r', 'build'], 'ask'),
+            ([NATIVE, 'run', '--', 'rm', '-r', 'build'], 'deny'),
+            ([NATIVE, 'run', '--shell', 'cd x && rm out.txt'], 'deny'),
+            ([NATIVE, 'run', '--shell', 'find . -name a -exec rm {} +'], 'deny'),
+            ([NATIVE, 'run', '--', 'trash-put', 'build'], 'allow'),
+            ([NATIVE, 'run', '--', 'git', 'rm', '--cached', 'a'], 'allow'),
             ([NATIVE, 'run', '--shell', 'ros2 topic pub /cmd x'], 'ask'),
             ([NATIVE, 'run', '--', 'git', 'push', '--force'], 'deny'),
             ([NATIVE, 'run', '--', 'echo', '=ls'], 'deny'),
@@ -266,9 +271,9 @@ class GoldenTest(unittest.TestCase):
                 outcomes.add((hook.get('permissionDecision', 'pass'), hook.get('permissionDecisionReason', '').split(' Shell output')[0]))
         kinds = {kind for kind, _ in outcomes}
         self.assertEqual(kinds, {'deny', 'ask', 'pass'})
-        for label in ['privilege escalation', 'git force push', 'rm -rf', 'raw device write',
+        for label in ['privilege escalation', 'git force push', 'rm. Delete with trash-put', 'raw device write',
                       'sensitive credential access', 'git history or remote change', 'git destructive change',
-                      'recursive delete', 'remote host access', 'network upload', 'possible robot actuation',
+                      'remote host access', 'network upload', 'possible robot actuation',
                       'possible secret exposure', 'Invalid hook JSON.', 'Invalid hook input.',
                       'Missing shell command.', 'Malformed shell quoting.', 'Unwrapped or noncanonical shell command.',
                       'Unsupported read capability or arguments.', 'Argument starting with "=" is expanded by zsh.',
