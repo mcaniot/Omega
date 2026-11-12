@@ -1,5 +1,6 @@
 //! Context budget hook: one checkpoint reminder per crossing, never a denial (forced handoffs
-//! break the flow). Reads only the transcript tail and fails open on any error.
+//! break the flow). Reads only the transcript tail and fails open on any error. On PreCompact it
+//! also tells the summary what must survive.
 use serde_json::{Value, json};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -17,6 +18,7 @@ const FLOOR_SOFT_PERCENT: u64 = 69;
 const FLOOR_MIN_TOKENS: u64 = 50_000;
 const FLOOR_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 3600);
 const COMPACTED_NOTE: &str = "Context was compacted: earlier details are lossy. Run `omega resume [TASK]`, then re-read only what the next action needs.";
+const COMPACT_INSTRUCTIONS: &str = "Keep in the summary: the user's requests and corrections in their own words; the path of the active task file under ~/.agents/tasks/active/ and its next action; decisions and facts verified in this session; files changed and not yet committed; evidence paths and validation commands with their exit status; approaches that failed, so they are not retried. Leave out tool output bodies and file contents: they can be read again.";
 
 fn limit(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
@@ -91,7 +93,10 @@ fn evaluate(payload: &Value) -> Value {
                 let _ = ledger::write_private(&path, json!({"tokens": tokens}).to_string().as_bytes());
             }
         }
-        return json!({});
+        // Claude Code uses PreCompact stdout as instructions for the summary. Subagents have no
+        // task file; instructions the user typed after /compact are left alone.
+        let custom = payload.get("custom_instructions").and_then(Value::as_str).is_some_and(|c| !c.trim().is_empty());
+        return if payload.get("agent_id").is_some() || custom { Value::Null } else { Value::from(COMPACT_INSTRUCTIONS) };
     }
     let is_reset = event == "PostCompact"
         || (event == "SessionStart" && matches!(payload.get("source").and_then(Value::as_str), Some("compact" | "clear")));
@@ -140,5 +145,10 @@ fn main() {
         Ok(_) => serde_json::from_slice::<Value>(&input).map_or_else(|_| json!({}), |p| evaluate(&p)),
         Err(_) => json!({}),
     };
-    let _ = writeln!(std::io::stdout().lock(), "{output}");
+    // PreCompact: plain text is the instruction, nothing means no instruction.
+    let _ = match &output {
+        Value::Null => Ok(()),
+        Value::String(text) => writeln!(std::io::stdout().lock(), "{text}"),
+        other => writeln!(std::io::stdout().lock(), "{other}"),
+    };
 }

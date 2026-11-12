@@ -25,7 +25,9 @@ class ContextGuardTest(unittest.TestCase):
             env=dict(os.environ, HOME=str(self.home)))
         self.assertEqual(result.stderr, '')
         value = json.loads(result.stdout)
-        self.assertNotEqual(value.get('hookSpecificOutput', {}).get('permissionDecision'), 'allow')
+        hook = value.get('hookSpecificOutput', {})
+        # The guard allows only its own bounded rewrite, never the call as written.
+        self.assertEqual(hook.get('permissionDecision') == 'allow', 'updatedInput' in hook)
         return value
 
     def large_file(self, name='source.py'):
@@ -34,12 +36,17 @@ class ContextGuardTest(unittest.TestCase):
         path.write_text('line\n' * 2000)
         return path
 
-    def test_large_text_requires_small_explicit_range(self):
+    def test_large_text_without_small_range_is_bounded_not_denied(self):
         path = self.large_file()
         for limit in (None, 0, -1, 201, True, '100', 1.5):
             with self.subTest(limit=limit):
-                result = self.evaluate(path, **({} if limit is None else {'limit': limit}))
-                self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
+                hook = self.evaluate(path, pages='keep', **({} if limit is None else {'limit': limit}))['hookSpecificOutput']
+                self.assertEqual(hook['permissionDecision'], 'allow')
+                self.assertEqual(hook['updatedInput'], {'file_path': str(path), 'pages': 'keep', 'limit': 200})
+                self.assertIn(f'lines 1-200 of 2000 of {path}', hook['additionalContext'])
+        hook = self.evaluate(path, offset=1901, limit=500)['hookSpecificOutput']
+        self.assertEqual(hook['updatedInput'], {'file_path': str(path), 'offset': 1901, 'limit': 200})
+        self.assertIn('lines 1901-2000 of 2000', hook['additionalContext'])
         for limit in (1, 200):
             self.assertEqual(self.evaluate(path, limit=limit, offset=10), {})
 
@@ -117,6 +124,13 @@ class ReadLedgerTest(unittest.TestCase):
         self.assertEqual(self.read(50, 51), {})
         self.assertIn('offset=1 limit=49', self.reason(self.read(1, 150)))
         self.assertIn('offset=101 limit=50', self.reason(self.read(50, 101)))
+
+    def test_bounded_read_is_recorded_and_checked_as_its_real_range(self):
+        hook = self.read()['hookSpecificOutput']  # 1500 lines, no limit: runs as lines 1-200
+        self.assertEqual(hook['updatedInput']['limit'], 200)
+        self.assertEqual(self.reason(self.read()), f'already in context: lines 1-200 of {self.path} (unchanged since read)')
+        self.assertIn('offset=201 limit=149', self.reason(self.read(150)))
+        self.assertEqual(self.read(201, 500)['hookSpecificOutput']['updatedInput']['offset'], 201)
 
     def test_changed_file_drops_ranges(self):
         self.assertEqual(self.read(1, 100), {})
@@ -212,7 +226,7 @@ class ContextSettingsTest(unittest.TestCase):
         self.assertEqual(hooks['PostToolUse'][-1], retired)
         self.assertNotIn(retired, hooks['PreToolUse'])
         for event in ('SessionStart', 'PostCompact', 'PreCompact', 'UserPromptSubmit'):
-            self.assertIn({'type': 'command', 'command': budget}, hooks[event][-1]['hooks'])
+            self.assertIn({'hooks': [{'type': 'command', 'command': budget}]}, hooks[event])
         for event in ('SessionStart', 'PostCompact'):
             self.assertEqual(hooks[event][0], {'hooks': [{'type': 'command', 'command': self.command}]})
         for key, value in self.installer.CONTEXT_ENV.items():
@@ -228,9 +242,43 @@ class ContextSettingsTest(unittest.TestCase):
         target.write_text(json.dumps(actual))
         self.assertEqual(len(list(self.installer.write_context_settings(True))), 1)
         cleaned = json.loads(target.read_text())
-        self.assertEqual(cleaned['hooks']['PreToolUse'], [self.original['hooks']['PreToolUse'][0], guard[0]])
+        shell = {'matcher': 'Bash', 'hooks': [{
+            'type': 'command', 'command': f'{self.installer.BINARIES["shell_guard"]} --allow-clean',
+            'timeout': 5, 'onFailure': 'block'}]}
+        self.assertEqual(cleaned['hooks']['PreToolUse'], [self.original['hooks']['PreToolUse'][0], guard[0], shell])
         self.assertNotIn('OMEGA_CONTEXT_HARD', cleaned['env'])
         self.assertEqual(list(self.installer.write_context_settings(True)), [])
+
+    def test_hand_registered_omega_hooks_are_normalised_in_place(self):
+        binaries = self.installer.BINARIES
+        naming = {'type': 'command', 'command': '"$HOME/.claude/hooks/session_name"'}
+        self.settings.write_text(json.dumps({'hooks': {
+            'PreToolUse': [{'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': str(binaries['shell_guard'])}]},
+                           self.original['hooks']['PreToolUse'][0]],
+            'SessionStart': [{'hooks': [naming]}]}}))
+        list(self.installer.write_context_settings(True))
+        hooks = json.loads(self.settings.read_text())['hooks']
+        self.assertEqual(hooks['PreToolUse'][0]['hooks'], [{
+            'type': 'command', 'command': f'{binaries["shell_guard"]} --allow-clean', 'timeout': 5, 'onFailure': 'block'}])
+        self.assertEqual(hooks['PreToolUse'][1], self.original['hooks']['PreToolUse'][0])
+        self.assertEqual(hooks['SessionStart'][0]['hooks'],
+                         [{'type': 'command', 'command': str(binaries['session_name']), 'timeout': 5}])
+        self.assertEqual(sum(str(binaries['shell_guard']) in json.dumps(group) for group in hooks['PreToolUse']), 1)
+        self.assertEqual(list(self.installer.write_context_settings(True)), [])
+
+    def test_codex_hook_is_added_once_and_existing_groups_keep_their_position(self):
+        self.installer.CODEX = self.home / '.codex'
+        self.installer.CODEX.mkdir()
+        dest = self.installer.CODEX / 'hooks.json'
+        other = {'matcher': '*', 'hooks': [{'type': 'command', 'command': 'third-party'}]}
+        dest.write_text(json.dumps({'hooks': {'PreToolUse': [other]}}))
+        self.assertEqual(len(list(self.installer.write_codex_hooks(False))), 1)
+        self.assertEqual(json.loads(dest.read_text()), {'hooks': {'PreToolUse': [other]}})
+        list(self.installer.write_codex_hooks(True))
+        ours = {'matcher': 'Bash', 'hooks': [{
+            'type': 'command', 'command': str(self.installer.BINARIES['shell_guard']), 'timeout': 5}]}
+        self.assertEqual(json.loads(dest.read_text())['hooks']['PreToolUse'], [other, ours])
+        self.assertEqual(list(self.installer.write_codex_hooks(True)), [])
 
     def test_invalid_settings_do_not_write(self):
         self.settings.write_text('{invalid')
@@ -244,7 +292,7 @@ class ContextSettingsTest(unittest.TestCase):
                 patch.object(self.installer, 'install_commands', return_value=[]) as commands, \
                 patch.object(self.installer, 'write_response_settings') as responses:
             self.assertEqual(self.installer.main(), 0)
-        binaries.assert_called_once_with(False, names=('context_guard', 'context_budget', 'optimize', 'shell_guard'))
+        binaries.assert_called_once_with(False, names=('context_guard', 'context_budget', 'optimize', 'shell_guard', 'session_name'))
         commands.assert_called_once_with(False, names=('omega', 'omega-optimize', 'Ω-optimize'))
         responses.assert_not_called()
 

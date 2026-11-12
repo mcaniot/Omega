@@ -16,7 +16,7 @@ Work silently. No preamble, progress, narration, unsolicited explanations or clo
 
 ## Tools and context
 
-- Shell only via `'Ω-run' -- <argv>` or `'Ω-run' --shell '<command>'`; `Ω-read` for trusted reads, `'Ω-inspect' EVIDENCE [--stream stdout|stderr] [--search LITERAL] [--offset BYTES] [--lines N]` for evidence, `Ω-prune` dry-run (`--apply` needs approval). Load `tool-output` for statuses and inspection syntax.
+- Shell only via `'Ω-run' -- <argv>` or `'Ω-run' --shell '<command>'`; `'Ω-inspect' EVIDENCE [--stream stdout|stderr] [--search LITERAL] [--offset BYTES] [--lines N]` for evidence, `Ω-prune` dry-run (`--apply` needs approval). Load `tool-output` for statuses and inspection syntax.
 - Full output stays in evidence: read the bounded inline result once, then only needed slices; never copy logs into task state.
 - Validation: standalone argv or fail-fast `--shell`; check each exit status; never `--shell-keep-going`.
 - Locate with `rg`/symbols before reading text files over 8 KiB, then Read with offset and limit ≤200; diff stats before details. Batch independent calls in one turn; never re-read content already in context. On a context-budget message, checkpoint the task file and continue.

@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -48,7 +49,20 @@ BINARIES = {
     'optimize': AGENTS / 'tools/optimize',
     'session_name': CLAUDE / 'hooks/session_name',
 }
-# Claude hooks: (event, matcher or None, binary).
+# Every Omega hook is registered here, never by hand. Claude: (event, matcher or None, binary,
+# arguments, extra hook fields). The shell guard is a safety control, so a crash or timeout
+# blocks the call (`onFailure`, Claude Code >= 2.1.295); context hooks stay fail-open.
+GUARD_HOOKS = (
+    ('PreToolUse', 'Bash', 'shell_guard', ' --allow-clean', {'timeout': 5, 'onFailure': 'block'}),
+    ('SessionStart', None, 'session_name', '', {'timeout': 5}),
+    ('UserPromptSubmit', None, 'session_name', '', {'timeout': 5}),
+)
+# Codex hook groups (~/.codex/hooks.json): added when absent, never moved, because Codex keys
+# hook trust by position.
+CODEX_HOOKS = (
+    ('PreToolUse', 'Bash', 'shell_guard', {'timeout': 5}),
+)
+# Claude context hooks: (event, matcher or None, binary).
 CONTEXT_HOOKS = (
     ('PreToolUse', 'Read', 'context_guard'),
     ('PostToolUse', 'Edit|Write|MultiEdit', 'context_guard'),
@@ -160,7 +174,8 @@ def link(dest, source, apply):
 
 def remove_stale_links(apply):
     """Remove our links whose repository source was deleted (removed agents or skills)."""
-    for directory in (CLAUDE / 'agents', CLAUDE / 'skills', AGENTS / 'skills'):
+    for directory in (CLAUDE / 'agents', CLAUDE / 'skills', CLAUDE / 'hooks', AGENTS / 'skills',
+                      AGENTS / 'tools', AGENTS / 'tools/robot-exec', AGENTS / 'tools/robot-exec/native'):
         if not directory.is_dir():
             continue
         for dest in sorted(directory.iterdir()):
@@ -324,24 +339,69 @@ def write_response_settings(apply):
         yield dest, 'written' if apply else 'would write'
 
 
+def hook_binary(hook):
+    """Executable a command hook runs, with `$HOME` expanded; None when it is not a plain command."""
+    command = str(hook.get('command', '')).replace('${HOME}', str(HOME)).replace('$HOME', str(HOME))
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    return argv[0] if hook.get('type') == 'command' and argv else None
+
+
+def ensure_hook(groups, matcher, binary, wanted):
+    """Register `wanted` once: rewrite our own entry in place (hand-made or older form), else append."""
+    for group in groups:
+        if group.get('matcher', '*') not in (matcher, '*'):
+            continue
+        for index, hook in enumerate(group.get('hooks', [])):
+            if hook_binary(hook) == str(binary):
+                if hook == wanted:
+                    return False
+                group['hooks'][index] = wanted
+                return True
+    group = {'hooks': [wanted]}
+    if matcher:
+        group['matcher'] = matcher
+    groups.append(group)
+    return True
+
+
+def write_codex_hooks(apply):
+    """Add our Codex hook groups when absent; existing groups keep their position and content."""
+    dest = CODEX / 'hooks.json'
+    config = json.loads(dest.read_text()) if dest.exists() else {}
+    hooks = config.setdefault('hooks', {})
+    changed = False
+    for event, matcher, binary, extra in CODEX_HOOKS:
+        groups = hooks.setdefault(event, [])
+        if any(hook_binary(hook) == str(BINARIES[binary]) for group in groups for hook in group.get('hooks', [])):
+            continue
+        groups.append({'matcher': matcher, 'hooks': [{'type': 'command', 'command': str(BINARIES[binary]), **extra}]})
+        changed = True
+    if not changed:
+        return
+    if apply:
+        target = dest.resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f'.{target.name}.install-tmp')
+        with tmp.open('w', encoding='utf-8') as stream:
+            os.chmod(tmp, target.stat().st_mode & 0o777 if target.exists() else 0o600)
+            stream.write(json.dumps(config, indent=2, ensure_ascii=False) + '\n')
+        os.replace(tmp, target)
+    yield dest, 'written (trust the new hook in Codex)' if apply else 'would write'
+
+
 def write_context_settings(apply):
     """Add only our context hooks; preserve third-party hooks, permissions and symlinks."""
     dest = CLAUDE / 'settings.json'
     settings = json.loads(dest.read_text()) if dest.exists() else {}
     hooks = settings.setdefault('hooks', {})
     changed = False
-    for event, matcher, binary in CONTEXT_HOOKS:
-        groups = hooks.setdefault(event, [])
-        command = str(BINARIES[binary])
-        if any(group.get('matcher', '*') in (matcher, '*') and any(
-                hook.get('type') == 'command' and hook.get('command') == command
-                for hook in group.get('hooks', [])) for group in groups):
-            continue
-        group = {'hooks': [{'type': 'command', 'command': command}]}
-        if matcher:
-            group['matcher'] = matcher
-        groups.append(group)
-        changed = True
+    managed = [(event, matcher, binary, '', {}) for event, matcher, binary in CONTEXT_HOOKS] + list(GUARD_HOOKS)
+    for event, matcher, binary, arguments, extra in managed:
+        wanted = {'type': 'command', 'command': str(BINARIES[binary]) + arguments, **extra}
+        changed |= ensure_hook(hooks.setdefault(event, []), matcher, BINARIES[binary], wanted)
     # Retired: the budget hook no longer gates tools (PreToolUse) and has no hard limit.
     budget = [{'type': 'command', 'command': str(BINARIES['context_budget'])}]
     kept = [group for group in hooks.get('PreToolUse', []) if group.get('hooks') != budget]
@@ -395,7 +455,7 @@ def main():
             parser.error('--context-only cannot be combined with --responses-only or --budget')
         # Parse settings before building/installing anything; malformed settings stay untouched.
         list(write_context_settings(False))
-        results = list(install_binaries(args.apply, names=('context_guard', 'context_budget', 'optimize', 'shell_guard')))
+        results = list(install_binaries(args.apply, names=('context_guard', 'context_budget', 'optimize', 'shell_guard', 'session_name')))
         if not any(status.startswith('CONFLICT') for _, status in results):
             results += list(write_context_settings(args.apply))
             results += list(install_commands(args.apply, names=('omega', 'omega-optimize', 'Ω-optimize')))
@@ -412,6 +472,7 @@ def main():
         results += list(remove_stale_links(args.apply))
         results += list(install_binaries(args.apply))
         results += list(write_context_settings(args.apply))
+        results += list(write_codex_hooks(args.apply))
         results += list(install_commands(args.apply))
         results += list(write_codex_agents(args.apply))
     for dest, status in results:

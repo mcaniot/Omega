@@ -30,13 +30,17 @@ class ContextBudgetTest(unittest.TestCase):
         self.transcript.write_text('\n'.join(json.dumps(line) for line in lines) + '\n')
 
     def run_hook(self, event, raw=None, env=None, **payload):
+        return json.loads(self.run_raw(event, raw, env, **payload))
+
+    def run_raw(self, event, raw=None, env=None, **payload):
+        """Stdout as printed: PreCompact emits plain-text compaction instructions or nothing."""
         payload = {'hook_event_name': event, 'session_id': 's1', 'transcript_path': str(self.transcript), **payload}
         done = subprocess.run([BINARY], input=raw if raw is not None else json.dumps(payload), text=True,
                               capture_output=True, check=True,
                               env={**{k: v for k, v in os.environ.items() if not k.startswith('OMEGA_CONTEXT_')},
                                    'HOME': str(self.home), **(env or {})})
         self.assertEqual(done.stderr, '')
-        return json.loads(done.stdout)
+        return done.stdout
 
     def test_soft_fires_once_per_crossing_and_rearms(self):
         self.assertEqual(self.run_hook('PostToolUse'), {})
@@ -99,9 +103,9 @@ class ContextBudgetTest(unittest.TestCase):
         self.set_tokens(217_000)
         self.assertEqual(self.run_hook('PostToolUse', env=env), {})
         for ignored in ({'trigger': 'manual'}, {'trigger': 'auto', 'agent_id': 'a1'}):
-            self.assertEqual(self.run_hook('PreCompact', env=env, **ignored), {})
+            self.run_raw('PreCompact', env=env, **ignored)
             self.assertFalse(floor.exists())
-        self.assertEqual(self.run_hook('PreCompact', env=env, trigger='auto'), {})
+        self.run_raw('PreCompact', env=env, trigger='auto')
         self.assertEqual(json.loads(floor.read_text()), {'tokens': 217_000})
         self.set_tokens(149_000)  # 69 % of 217k = 149.7k
         self.assertEqual(self.run_hook('PostToolUse', env=env), {})
@@ -112,8 +116,19 @@ class ContextBudgetTest(unittest.TestCase):
         floor.write_text('{"tokens": 10}')  # implausible floor is ignored
         self.assertEqual(self.run_hook('PostToolUse', env=env, session_id='s3'), {})
         self.set_tokens(10_000)  # implausible compaction point is not recorded
-        self.run_hook('PreCompact', trigger='auto')
+        self.run_raw('PreCompact', trigger='auto')
         self.assertEqual(json.loads(floor.read_text()), {'tokens': 10})
+
+    def test_precompact_stdout_is_the_summary_instruction(self):
+        for payload in ({'trigger': 'auto'}, {'trigger': 'manual', 'custom_instructions': None},
+                        {'trigger': 'manual', 'custom_instructions': ' '}):
+            text = self.run_raw('PreCompact', **payload)
+            self.assertIn('~/.agents/tasks/active/', text)
+            self.assertLess(len(text), 10_000)  # documented cap for PreCompact stdout
+            self.assertFalse(text.lstrip().startswith('{'))
+        # The user's own /compact instructions and subagent compactions get none.
+        self.assertEqual(self.run_raw('PreCompact', trigger='manual', custom_instructions='keep the API notes'), '')
+        self.assertEqual(self.run_raw('PreCompact', trigger='auto', agent_id='a1'), '')
 
     def test_fail_open_on_garbage(self):
         self.set_tokens(200_000)

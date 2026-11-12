@@ -125,7 +125,8 @@ Keep `~/.local/bin` on `PATH`. Use the short commands directly, without repeatin
 
 `Ω-run` captures complete output in `~/.agents/tasks/evidence/` and returns bounded JSON;
 `Ω-inspect` reads that evidence. `Ω-read` provides restricted source reads (`status`, `files`,
-`text`, `find`). `Ω-prune` previews cleanup of evidence older than `--days` (default 14) that no active or
+`text`, `find`) under the single project root compiled into it (`LOCAL_READ_PROJECT`); it is not
+advertised in `AGENTS.md` or the agents, which read files with their native Read tool. `Ω-prune` previews cleanup of evidence older than `--days` (default 14) that no active or
 completed task cites; deletion requires `--apply` and approval.
 Quote the `Ω-*` names as shown to match the shell guard's canonical `shlex.join` quoting.
 The ASCII names (`omega-run`, `omega-read`, `omega-inspect`, `omega-prune`) and original absolute
@@ -168,8 +169,18 @@ See [native executor usage](tools/robot-exec/native/README.md) and
 - Context budget: `context_budget` never blocks a tool. It reminds once, at `OMEGA_CONTEXT_SOFT`
   (150k), to update the task file. Its `PreCompact` hook records the context size of each automatic
   compaction in `~/.agents/state/budget/compact-floor.json`; for 14 days the reminder is capped at
-  69 % of it, so it fires before compaction whatever window the model really has. After a
-  compaction, `SessionStart` tells the session to resume from the task file.
+  69 % of it, so it fires before compaction whatever window the model really has. The same hook
+  prints the compaction instructions (task file and next action, verified decisions, uncommitted
+  files, evidence paths, failed approaches), except when the user passed their own to `/compact`.
+  After a compaction, `SessionStart` tells the session to resume from the task file.
+- A Read of a text file over 8 KiB without a limit of 1..200 is not denied: `context_guard` runs it
+  as 200 lines from the requested offset (`updatedInput`) and says which range was returned. That
+  rewrite is its only `allow`; Claude Code still applies deny and ask rules after it.
+- Every Omega hook is registered by `install.py` (`GUARD_HOOKS`, `CONTEXT_HOOKS`, `CODEX_HOOKS`),
+  never by hand: an entry running one of our binaries is rewritten in place to the canonical form,
+  anything else is left alone. The shell guard carries `onFailure: block`, so a crash or timeout
+  blocks the command instead of letting it through; context hooks stay fail-open. The Codex hook
+  is only added when absent, because Codex keys hook trust by position.
 - An unwrapped Bash command that the policy would allow once wrapped is rewritten to
   `Ω-run --shell` by `shell_guard` instead of being denied (Claude only); the first C/C++ edit of a
   session gets a one-time pointer to `cpp-quality`; `omega optimize` reports
