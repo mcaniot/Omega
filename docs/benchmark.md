@@ -12,7 +12,7 @@ no network access except the one-time tokenizer download, no change to the check
 
 ## Results
 
-Run of 2026-11-12 on `8e1c995`. Tokens are counted with the GPT-2 tokenizer (pinned by sha256),
+Run of 2026-11-12 on `dd4c8b8`. Tokens are counted with the GPT-2 tokenizer (pinned by sha256),
 not with Claude's tokenizer or billing, so compare ratios rather than absolute numbers.
 
 ### Plain Claude Code tools vs omega
@@ -22,13 +22,13 @@ Deterministic: one run is enough.
 
 | Scenario | Plain Claude Code | omega | Change |
 | --- | ---: | ---: | ---: |
-| Read a 3000-line file without a limit | 42,952 | 4,173 | −90 % |
-| Read the same small file twice | 5,016 | 2,551 | −49 % |
-| Read lines 1–200, then 101–300 | 8,108 | 6,159 | −24 % |
+| Read a 3000-line file without a limit | 42,952 | 4,174 | −90 % |
+| Read the same small file twice | 5,016 | 2,552 | −49 % |
+| Read lines 1–200, then 101–300 | 8,108 | 6,160 | −24 % |
 | Read, edit, read again (must not be refused) | 5,027 | 5,027 | 0 % |
-| 4000-line build log with one failure, then find it ¹ | 13,689 | 335 | −98 % |
-| Read a large saved log to find the failure ¹ | 68,656 | 149 | −100 % |
-| **Total** | **143,448** | **18,394** | **−87 %** |
+| 4000-line build log with one failure, then find it ¹ | 13,689 | 341 | −98 % |
+| Read a large saved log to find the failure ¹ | 68,656 | 152 | −100 % |
+| **Total** | **143,448** | **18,406** | **−87 %** |
 
 omega's counts vary by a few tokens between runs: they include evidence paths and timestamps.
 
@@ -43,17 +43,17 @@ fail-fast shell) and on the current version. Medians of 15 replays.
 
 | Workload | Returned tokens | Reads | Local latency (ms) |
 | --- | ---: | ---: | ---: |
-| Oversized output: recover beginning, middle error, end | 351 → 139 | 4 → 1 | 8.6 → 34.1 |
-| Small inline output | 92 → 66 | 1 → 1 | 3.0 → 21.5 |
-| Resume a task: transcript-first → task-first | 294 → 104 | 3 → 1 | 8.9 → 1.6 |
-| Mandatory shell failure (now reported as FAIL) | 92 → 64 | 0 → 0 | 4.3 → 23.1 |
-| Advisory read audit (`Ω-optimize --check`) | 405 → 695 | 0 → 0 | 20.1 → 20.9 |
-| **Total** | **1,234 → 1,068 (−13 %)** | | |
+| Oversized output: recover beginning, middle error, end | 358 → 141 | 4 → 1 | 6.5 → 15.0 |
+| Small inline output | 92 → 67 | 1 → 1 | 2.5 → 11.7 |
+| Resume a task: transcript-first → task-first | 297 → 105 | 3 → 1 | 6.7 → 1.1 |
+| Mandatory shell failure (now reported as FAIL) | 93 → 66 | 0 → 0 | 3.1 → 12.3 |
+| Advisory read audit (`Ω-optimize --check`) | 408 → 699 | 0 → 0 | 19.1 → 19.7 |
+| **Total** | **1,248 → 1,078 (−14 %)** | | |
 
 What got worse, and is tracked:
 
 - The read-audit report is longer (+72 %): it now carries more findings per session.
-- `Ω-run` costs about 13–18 ms per call instead of 3–9 ms. Since `be61af2` it `fsync`s stdout,
+- `Ω-run` costs about 12–15 ms per call instead of 2–7 ms. Since `be61af2` it `fsync`s stdout,
   stderr and `result.json` before reporting, so that a delayed write error (disk full, I/O error)
   is reported as `DATA_LOSS` instead of a false PASS. This is deliberate data-loss protection,
   not a bug. Each `fsync` forced its own ext4 journal commit (about 9 ms, two in series, so
@@ -69,7 +69,7 @@ Claude's current tokenizer is not public, so the same run was repeated with two 
 
 | Tokenizer | Plain → omega | Change | Previous → current omega |
 | --- | ---: | ---: | ---: |
-| GPT-2 (default, pinned) | 143,448 → 18,394 | −87 % | −13 % |
+| GPT-2 (default, pinned) | 143,448 → 18,406 | −87 % | −14 % |
 | Legacy Claude (`Xenova/claude-tokenizer`) | 135,885 → 15,925 | −88 % | −13 % |
 | GPT-4o o200k (`Xenova/gpt-4o`) | 135,964 → 17,268 | −87 % | −15 % |
 
