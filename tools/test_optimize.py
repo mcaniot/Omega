@@ -122,6 +122,23 @@ class OptimizeTest(unittest.TestCase):
             ['active', 'b-new.md'], ['active', 'z-new.md'],
             ['completed', 'z-new.md'], ['active', 'a-00.md']])
 
+    def test_resume_flags_only_old_active_tasks_as_stale(self):
+        tasks = self.home / '.agents/tasks'
+        for state in ('active', 'completed'):
+            (tasks / state).mkdir(parents=True)
+        for state, name, mtime in (('active', 'old', 100), ('completed', 'done', 100), ('active', 'fresh', None)):
+            task = tasks / state / f'{name}.md'
+            task.write_text('x')
+            if mtime:
+                os.utime(task, (mtime, mtime))
+        result = json.loads(self.run_command('resume').stdout)
+        self.assertEqual(result['stale'], ['old.md'])
+        self.assertIn('Stale active tasks', result['next'])
+        os.utime(tasks / 'active' / 'old.md')
+        result = json.loads(self.run_command('resume').stdout)
+        self.assertEqual(result['stale'], [])
+        self.assertNotIn('Stale', result['next'])
+
     def test_resume_output_budget_and_truncation_are_explicit(self):
         tasks = self.home / '.agents/tasks/active'
         tasks.mkdir(parents=True)

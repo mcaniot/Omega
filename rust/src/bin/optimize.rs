@@ -605,10 +605,22 @@ fn resume(args: Vec<String>) -> Result<(), String> {
         }
         tasks.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| (&a.1, &a.2).cmp(&(&b.1, &b.2))));
         let total = tasks.len();
+        // Active tasks untouched for 5+ days: candidates to close, so old cautions stop piling up.
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 86400);
+        let mut stale: Vec<&String> = tasks.iter()
+            .filter(|(modified, state, _)| *state == "active" && *modified < cutoff)
+            .map(|(_, _, name)| name).collect();
+        stale.sort();
+        stale.truncate(20);
+        let mut next = String::from("Select the matching task with omega resume TASK; inspect Git and referenced evidence before transcripts.");
+        if !stale.is_empty() {
+            next.push_str(" Stale active tasks: ask the user whether to move them to completed/.");
+        }
+        let stale = json!(stale);
         tasks.truncate(20);
         let tasks: Vec<_> = tasks.into_iter().map(|(_, state, name)| (state, name)).collect();
         println!("{}", json!({"tasks": tasks, "total": total, "truncated": total > 20,
-            "next": "Select the matching task with omega resume TASK; inspect Git and referenced evidence before transcripts."}));
+            "stale": stale, "next": next}));
         return Ok(());
     };
     let slug = task.strip_suffix(".md").unwrap_or(task);

@@ -14,7 +14,7 @@ Use the cheapest check that can detect the regression:
 4. Relevant integration simulation.
 5. Full validation only when the remaining risk requires it.
 
-Stop at a failed prerequisite. Do not launch a simulation to work around a known import/configuration failure. Keep the exact revision/diff, environment, seed, device, backend, timestep and configuration with each result. Capture output externally and reference artifacts, never paste logs into task state.
+Fix or report a failed prerequisite before any simulation; a simulation does not work around a known import/configuration failure. Keep the exact revision/diff, environment, seed, device, backend, timestep and configuration with each result. Capture output externally and reference artifacts, never paste logs into task state.
 
 For motion, inspect actual joint limits, forbidden contacts, finite states and control stability over the relevant interval. For policies, check temporal chunks/horizons as well as action/observation ordering. Assert observable outcomes with meaningful negative controls; unit tests do not certify physical safety.
 
