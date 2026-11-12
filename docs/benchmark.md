@@ -54,7 +54,9 @@ What got worse, and is tracked:
 - `Ω-run` costs about 20 ms per call instead of 3–4 ms. Cause (strace): since `be61af2` it
   `fsync`s stdout, stderr and `result.json` before reporting, about 9 ms each on ext4, so that a
   delayed write error (disk full, I/O error) is reported as `DATA_LOSS` instead of a false PASS.
-  This is deliberate data-loss protection, not a bug.
+  This is deliberate data-loss protection, not a bug. stdout and stderr are now flushed
+  concurrently (small output 25.0 → 20.7 ms); `result.json` must follow, since its status depends
+  on those flushes.
 
 ### Tokenizer check
 

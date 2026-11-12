@@ -750,7 +750,17 @@ pub fn execute(cfg: Config) -> i32 {
         }
     }
     // Delayed write errors (ENOSPC, EIO) surface at flush: never report such a run as complete.
-    let flushed = unsafe { libc::fsync(out) == 0 && libc::fsync(err) == 0 };
+    // Both streams are flushed concurrently (each fsync waits on its own device round trip);
+    // without a thread the second flush simply runs after the first.
+    let flushed = std::thread::scope(|scope| {
+        let stderr_flush = std::thread::Builder::new().spawn_scoped(scope, || unsafe { libc::fsync(err) == 0 });
+        let stdout_ok = unsafe { libc::fsync(out) == 0 };
+        let stderr_ok = match stderr_flush {
+            Ok(handle) => handle.join().unwrap_or(false),
+            Err(_) => unsafe { libc::fsync(err) == 0 },
+        };
+        stdout_ok && stderr_ok
+    });
     if !flushed {
         (status, code, run.note) = ("DATA_LOSS", EXIT_DATA_LOSS, "evidence write or flush failed; logs may be incomplete");
     }

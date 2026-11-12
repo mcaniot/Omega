@@ -12,6 +12,11 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
   `'Ω-optimize'`. The `omega resume` / `omega optimize` names keep working.
 - One-command token benchmark (`tools/benchmark_context.py`) and its [Benchmark](docs/benchmark.md) page.
 
+### Changed
+
+- `Ω-run` flushes stdout and stderr concurrently before reporting (about 4 ms less per call);
+  the `DATA_LOSS` guarantee is unchanged.
+
 ## [1.0.0] - 2026-11-12
 
 First production release of the versioned agent setup (the previous Omega project is archived
