@@ -1,6 +1,7 @@
-<p align="center"><img src="assets/icon.png" alt="omega" width="260"></p>
-
-# omega
+<h1 align="center">
+  <img src="assets/icon-round.png" alt="" width="120" align="absmiddle">
+  omega
+</h1>
 
 Versioned source of my Claude Code and Codex agent setup. The goal is to keep it small and limit
 context rot: one short instruction file, a few agents, skills loaded on demand, and command output
