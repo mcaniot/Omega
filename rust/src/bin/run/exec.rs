@@ -301,8 +301,37 @@ struct Run<'a> {
     start: f64,
     evidence_fd: i32,
     metadata_fd: i32,
+    /// Log descriptors flushed together with the final record (one journal round trip).
+    flush_logs: Option<(i32, i32)>,
+    logs_flushed: bool,
     child: libc::pid_t,
     note: &'static str,
+}
+
+/// fsyncs every descriptor concurrently so their journal commits overlap; a descriptor whose
+/// thread cannot be spawned is flushed on the calling thread instead.
+fn fsync_all(fds: &[i32]) -> Vec<bool> {
+    let sync = |fd: i32| unsafe { libc::fsync(fd) == 0 };
+    // Write back all data first: block allocation then lands in one journal transaction, which
+    // the fsyncs below share instead of each forcing a commit. A writeback error reported here is
+    // consumed for this descriptor (fsync may then return 0), so it counts as a failed flush.
+    let flags = libc::SYNC_FILE_RANGE_WAIT_BEFORE | libc::SYNC_FILE_RANGE_WRITE | libc::SYNC_FILE_RANGE_WAIT_AFTER;
+    let written: Vec<bool> = fds.iter().map(|&fd| unsafe { libc::sync_file_range(fd, 0, 0, flags) == 0 }).collect();
+    let synced = std::thread::scope(|scope| {
+        let spawned: Vec<_> = fds[1..]
+            .iter()
+            .map(|&fd| (fd, std::thread::Builder::new().spawn_scoped(scope, move || sync(fd))))
+            .collect();
+        let mut ok = vec![sync(fds[0])];
+        for (fd, handle) in spawned {
+            ok.push(match handle {
+                Ok(handle) => handle.join().unwrap_or(false),
+                Err(_) => sync(fd),
+            });
+        }
+        ok
+    });
+    written.iter().zip(synced).map(|(&written, synced)| written && synced).collect()
 }
 
 impl Run<'_> {
@@ -375,8 +404,21 @@ impl Run<'_> {
         }
         b.extend_from_slice(b"}\n");
         let fd = private_create(self.evidence_fd, c"result.tmp", 0);
-        // A failed or unflushed final record is data loss, reported by the caller.
-        if fd < 0 || !write_all(fd, &b) || (finished && unsafe { libc::fsync(fd) } != 0) {
+        // A failed or unflushed final record is data loss, reported by the caller. The logs are
+        // flushed concurrently with it, and result.json only replaces the previous record once
+        // every flush succeeded, so a completed status never names logs that failed to flush.
+        let mut flushed = |fd: i32| {
+            if !finished {
+                return true;
+            }
+            let Some((out, err)) = self.flush_logs.take() else {
+                return unsafe { libc::fsync(fd) } == 0;
+            };
+            let ok = fsync_all(&[fd, out, err]);
+            self.logs_flushed = ok[1] && ok[2];
+            ok.iter().all(|&ok| ok)
+        };
+        if fd < 0 || !write_all(fd, &b) || !flushed(fd) {
             if !finished {
                 fail("Cannot write metadata");
             }
@@ -625,6 +667,8 @@ pub fn execute(cfg: Config) -> i32 {
         start: now(),
         evidence_fd,
         metadata_fd: -1,
+        flush_logs: None,
+        logs_flushed: true,
         child: 0,
         note: "",
         command,
@@ -750,22 +794,15 @@ pub fn execute(cfg: Config) -> i32 {
         }
     }
     // Delayed write errors (ENOSPC, EIO) surface at flush: never report such a run as complete.
-    // Both streams are flushed concurrently (each fsync waits on its own device round trip);
-    // without a thread the second flush simply runs after the first.
-    let flushed = std::thread::scope(|scope| {
-        let stderr_flush = std::thread::Builder::new().spawn_scoped(scope, || unsafe { libc::fsync(err) == 0 });
-        let stdout_ok = unsafe { libc::fsync(out) == 0 };
-        let stderr_ok = match stderr_flush {
-            Ok(handle) => handle.join().unwrap_or(false),
-            Err(_) => unsafe { libc::fsync(err) == 0 },
+    // The logs are flushed with the final record; on any failure the record is rewritten as DATA_LOSS.
+    run.flush_logs = Some((out, err));
+    if !run.metadata(status, code, returncode, received, crash_signal, cleanup, sizes) {
+        let note = if run.logs_flushed {
+            "evidence write or flush failed; result.json is stale"
+        } else {
+            "evidence write or flush failed; logs may be incomplete"
         };
-        stdout_ok && stderr_ok
-    });
-    if !flushed {
-        (status, code, run.note) = ("DATA_LOSS", EXIT_DATA_LOSS, "evidence write or flush failed; logs may be incomplete");
-    }
-    if !run.metadata(status, code, returncode, received, crash_signal, cleanup, sizes) && status != "DATA_LOSS" {
-        (status, code, run.note) = ("DATA_LOSS", EXIT_DATA_LOSS, "evidence write or flush failed; result.json is stale");
+        (status, code, run.note) = ("DATA_LOSS", EXIT_DATA_LOSS, note);
         run.metadata(status, code, returncode, received, crash_signal, cleanup, sizes);
     }
     summary(&cfg, code, crash_signal, sizes, status, run.note, &run.directory, (out, err));

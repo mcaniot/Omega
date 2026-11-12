@@ -53,13 +53,14 @@ fail-fast shell) and on the current version. Medians of 15 replays.
 What got worse, and is tracked:
 
 - The read-audit report is longer (+72 %): it now carries more findings per session.
-- `Ω-run` costs about 20–35 ms per call instead of 3–9 ms. Cause (strace): since `be61af2` it
-  `fsync`s stdout, stderr and `result.json` before reporting, about 9 ms each on ext4 and more
-  for large output, so that a delayed write error (disk full, I/O error) is reported as
-  `DATA_LOSS` instead of a false PASS. This is deliberate data-loss protection, not a bug.
-  Since `8e1c995` stdout and stderr are flushed concurrently (about 4 ms less on small output);
-  `result.json` must follow, since its status depends on those flushes. Latency depends on disk
-  load and varies by several milliseconds between runs.
+- `Ω-run` costs about 13–18 ms per call instead of 3–9 ms. Since `be61af2` it `fsync`s stdout,
+  stderr and `result.json` before reporting, so that a delayed write error (disk full, I/O error)
+  is reported as `DATA_LOSS` instead of a false PASS. This is deliberate data-loss protection,
+  not a bug. Each `fsync` forced its own ext4 journal commit (about 9 ms, two in series, so
+  21–34 ms per call). The three files are now written back first and flushed concurrently, so
+  they share one commit (strace); `result.json` replaces the previous record only once every
+  flush succeeded. The remaining ~9 ms is that single commit. Latency depends on disk load and
+  varies by several milliseconds between runs.
 
 ### Tokenizer check
 

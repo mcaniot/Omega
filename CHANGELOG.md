@@ -14,8 +14,9 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 
 ### Changed
 
-- `Ω-run` flushes stdout and stderr concurrently before reporting (about 4 ms less per call);
-  the `DATA_LOSS` guarantee is unchanged.
+- `Ω-run` writes back stdout, stderr and the final record first, then flushes all three
+  concurrently so they share one ext4 journal commit: small output about 21 → 13 ms per call.
+  `result.json` is only replaced once every flush succeeded; the `DATA_LOSS` guarantee is unchanged.
 
 ## [1.0.0] - 2026-11-12
 
