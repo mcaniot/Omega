@@ -685,8 +685,19 @@ fn gates(rows: &[Value], base_median: f64) -> Value {
     })
 }
 
+/// `Ω-resume` / `omega-resume` links run `omega resume` directly.
+fn invoked_as_resume() -> bool {
+    std::env::args_os()
+        .next()
+        .and_then(|a| std::path::Path::new(&a).file_name().map(|n| n.to_string_lossy().ends_with("-resume")))
+        .unwrap_or(false)
+}
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1).peekable();
+    if invoked_as_resume() {
+        return resume(args.collect());
+    }
     if args.peek().is_some_and(|a| a == "--version" || a == "version") {
         println!("omega {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -869,6 +880,7 @@ fn main() {
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     if let Err(error) = run() {
         let command = match std::env::args().nth(1).as_deref() {
+            _ if invoked_as_resume() => "omega resume",
             Some("resume") => "omega resume",
             _ => "omega optimize",
         };

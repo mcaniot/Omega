@@ -1,5 +1,8 @@
 # Context reliability: changes and measurements
 
+> Historical record of the 2026-11 changes. Current results and how to rerun them:
+> [Benchmark](benchmark.md).
+
 ## Contracts
 
 - Oversized execution output adds `preview` fragments: beginning/end of each
@@ -60,18 +63,24 @@ increases from 975 to 1085 tokenizer tokens (+110 always-loaded tokens); detaile
 procedures remain in the on-demand skill. The resume comparison is an explicit
 workflow replay, not evidence that a model will always follow that workflow.
 
-Reproduce with existing Python/tokenizer tooling; no runtime dependency is added:
+Reproduce with one command (no runtime dependency is added; `tokenizers` is only pulled
+into a throwaway `uv` environment):
 
 ```sh
-'Ω-run' --timeout 120 -- PYTHON tools/benchmark_context.py \
-  --before-run BEFORE_RUN --after-run rust/target/release/run \
-  --before-optimize BEFORE_OPTIMIZE --after-optimize rust/target/release/optimize \
-  --tokenizer-json LOCAL_TOKENIZER_JSON --repeats 7 --output NEW_REPORT.json
+uv run --no-project --with tokenizers python3 tools/benchmark_context.py
 ```
 
-The tokenizer option is optional; absent it, token counts are explicitly null.
-Reports use exclusive creation and never overwrite existing evidence. The report
-records the script hash, binaries, platform, Python version and tokenizer hash.
+- It builds `run` and `optimize` from the baseline commit (`--before-ref`, default the commit
+  above) and from `HEAD` (`--after-ref`) in throwaway trees, with `git archive` and
+  `cargo build --locked`; the checkout and Git state are untouched. `--before-run`,
+  `--after-run`, `--before-optimize`, `--after-optimize` use prebuilt binaries instead.
+- Tokens are counted with the GPT-2 tokenizer pinned by sha256, downloaded once into
+  `~/.cache/omega/gpt2-tokenizer.json` (or `--tokenizer-json FILE`; `--no-tokens` skips counts).
+- It prints the table above and writes the full report to
+  `~/.agents/tasks/reports/omega-benchmark/<UTC>.json` (or `--output NEW.json`). Reports use
+  exclusive creation and never overwrite existing evidence; they record the refs, script hash,
+  binaries, platform, Python version and tokenizer hash.
+- `--repeats N` (default 7) sets the number of replays per version.
 
 ## Validation
 

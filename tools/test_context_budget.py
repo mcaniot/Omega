@@ -62,7 +62,7 @@ class ContextBudgetTest(unittest.TestCase):
         self.run_hook('PostToolUse')
         note = self.run_hook('SessionStart', source='compact')['hookSpecificOutput']
         self.assertEqual(note['hookEventName'], 'SessionStart')
-        self.assertIn('omega resume', note['additionalContext'])
+        self.assertIn('Ω-resume', note['additionalContext'])
         self.assertEqual(self.run_hook('SessionStart', source='clear'), {})
         self.assertEqual(self.run_hook('SessionStart', source='startup'), {})
         self.assertIn('additionalContext', self.run_hook('PostToolUse')['hookSpecificOutput'])

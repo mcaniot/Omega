@@ -10,7 +10,7 @@ How omega is organized and the rules that keep it small.
 - **Procedures live in skills**, loaded on demand, not in `AGENTS.md`.
 - **Long output stays on disk.** `Ω-run` keeps the complete log as evidence and returns bounded JSON.
 - **Work survives the context.** Substantial work keeps its state in a task file under
-  `~/.agents/tasks/active/`, which `omega resume` and the post-compaction hook point back to.
+  `~/.agents/tasks/active/`, which `Ω-resume` and the post-compaction hook point back to.
 - **Learn from verified failures.** The `retro` skill (`/retro`) turns failures verified in
   `omega optimize` reports and task files into one-line lessons in
   `skills/<skill>/references/lessons.md` (add, merge, prune; 20 lines per file), read only when

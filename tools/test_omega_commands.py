@@ -71,6 +71,9 @@ class OmegaCommandsTest(unittest.TestCase):
             (['omega-read', 'unknown'], 'deny'),
             (['omega-optimize', '--sessions', '2'], None),
             (['omega', 'optimize'], None),
+            (['omega-resume'], None),
+            (['omega-resume', 'task'], None),
+            (['omega', 'resume'], None),
         ]:
             with self.subTest(argv=argv):
                 self.assertEqual(self.decision(*argv), expected)
@@ -79,6 +82,21 @@ class OmegaCommandsTest(unittest.TestCase):
         for argv in ([self.prefix + 'optimize', '--json'], ['omega', 'optimize', '--json']):
             result = subprocess.run(argv, env=self.env, capture_output=True, text=True, check=True)
             self.assertEqual(json.loads(result.stdout)['sessions'], [])
+
+    def test_resume_dispatch(self):
+        task = self.home / '.agents/tasks/active/demo.md'
+        task.parent.mkdir(parents=True)
+        task.write_text('Objective: demo.\n')
+        for argv in ([self.prefix + 'resume', 'demo'], ['omega', 'resume', 'demo']):
+            result = subprocess.run(argv, env=self.env, capture_output=True, text=True, check=True)
+            self.assertEqual(json.loads(result.stdout)['content'], 'Objective: demo.\n')
+
+    def test_shadowed_resume_alias_is_denied(self):
+        shadow = self.home / 'resume-shadow'
+        shadow.mkdir()
+        (shadow / (self.prefix + 'resume')).symlink_to('/bin/echo')
+        self.env['PATH'] = f'{shadow}:{self.bin}:/usr/bin:/bin'
+        self.assertEqual(self.decision('omega-resume'), 'deny')
 
     def test_shadowed_optimize_alias_is_denied(self):
         shadow = self.home / 'optimize-shadow'

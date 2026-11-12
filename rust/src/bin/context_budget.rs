@@ -17,7 +17,7 @@ const COMPACT_MARK: &[u8] = b"\"isCompactSummary\":true";
 const FLOOR_SOFT_PERCENT: u64 = 69;
 const FLOOR_MIN_TOKENS: u64 = 50_000;
 const FLOOR_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 3600);
-const COMPACTED_NOTE: &str = "Context was compacted: earlier details are lossy. Run `omega resume [TASK]`, then re-read only what the next action needs.";
+const COMPACTED_NOTE: &str = "Context was compacted: earlier details are lossy. Run `'Ω-resume' [TASK]`, then re-read only what the next action needs.";
 const COMPACT_INSTRUCTIONS: &str = "Keep in the summary: the user's requests and corrections in their own words; the path of the active task file under ~/.agents/tasks/active/ and its next action; decisions and facts verified in this session; files changed and not yet committed; evidence paths and validation commands with their exit status; approaches that failed, so they are not retried. Leave out tool output bodies and file contents: they can be read again.";
 
 fn limit(name: &str, default: u64) -> u64 {

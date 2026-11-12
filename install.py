@@ -85,6 +85,8 @@ COMMANDS = {
     'omega': BINARIES['optimize'],
     'omega-optimize': BINARIES['optimize'],
     'Ω-optimize': BINARIES['optimize'],
+    'omega-resume': BINARIES['optimize'],
+    'Ω-resume': BINARIES['optimize'],
     'omega-run': BINARIES['run'],
     'omega-inspect': BINARIES['run'],
     'omega-prune': BINARIES['run'],
@@ -458,7 +460,7 @@ def main():
         results = list(install_binaries(args.apply, names=('context_guard', 'context_budget', 'optimize', 'shell_guard', 'session_name')))
         if not any(status.startswith('CONFLICT') for _, status in results):
             results += list(write_context_settings(args.apply))
-            results += list(install_commands(args.apply, names=('omega', 'omega-optimize', 'Ω-optimize')))
+            results += list(install_commands(args.apply, names=('omega', 'omega-optimize', 'Ω-optimize', 'omega-resume', 'Ω-resume')))
         for dest, status in results:
             print(f'{status:12s} {dest}')
         return int(any(status.startswith('CONFLICT') for _, status in results))

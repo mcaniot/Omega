@@ -8,12 +8,13 @@ Reference for the native commands installed in `~/.local/bin`.
 | [`Ω-inspect`](#ω-inspect) | Read a slice of an evidence file |
 | [`Ω-prune`](#ω-prune) | Clean up old evidence |
 | [`Ω-read`](#ω-read) | Restricted source reads under one compiled-in project root |
-| [`omega resume`](#omega-resume) | Resume a task from its task file |
-| [`omega optimize`](optimize.md) | Audit recent sessions for context waste |
+| [`Ω-resume`](#ω-resume) | Resume a task from its task file |
+| [`Ω-optimize`](optimize.md) | Audit recent sessions for context waste |
 | `omega --version` | Print the installed version |
 
 Each `Ω-*` command also exists under an ASCII name (`omega-run`, `omega-inspect`, `omega-prune`,
-`omega-read`, `omega-optimize`); the original absolute paths remain supported. Write the `Ω-*`
+`omega-read`, `omega-optimize`, `omega-resume`), `Ω-optimize` and `Ω-resume` also as `omega optimize`
+and `omega resume`; the original absolute paths remain supported. Write the `Ω-*`
 names quoted, as below, to match the shell guard's canonical `shlex.join` quoting. The guard
 checks command resolution on `PATH` and preserves native sandbox and approval checks.
 
@@ -67,11 +68,11 @@ Restricted source reads (`status`, `files`, `text`, `find`) under the single pro
 into it (`LOCAL_READ_PROJECT`). It is not advertised in `AGENTS.md` or the agents, which read files
 with their native Read tool. Capabilities and limits: [trusted reads](../tools/robot-exec/README.md).
 
-## `omega resume`
+## `Ω-resume`
 
 ```sh
-omega resume TASK   # bounded task state, active/ first, then completed/
-omega resume        # the 20 most recently modified tasks (ties: state, then name)
+'Ω-resume' TASK   # bounded task state, active/ first, then completed/
+'Ω-resume'        # the 20 most recently modified tasks (ties: state, then name)
 ```
 
 Never opens transcripts or logs. After resuming, check current Git and the referenced evidence

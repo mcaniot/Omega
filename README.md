@@ -19,6 +19,9 @@ context:
 - **Command output on disk**: `Ω-run` stores the full log as evidence and returns a bounded summary.
 - **Guard hooks** that wrap shell commands, bound large reads and refuse re-reads of unchanged lines.
 
+On reproducible workloads, the model receives **87 % fewer tokens** than with plain Claude Code
+tools, without losing the information it needs ([benchmark](docs/benchmark.md)).
+
 ## How it works
 
 ```mermaid
@@ -54,11 +57,12 @@ Anything the installer does not own is reported as `CONFLICT` and left untouched
 ```sh
 'Ω-run' --timeout 120 -- python3 -m pytest     # run a command, full log kept as evidence
 'Ω-inspect' EVIDENCE --search error --lines 20 # read only the slice you need
-omega resume TASK                               # pick up a task from its task file
-omega optimize                                  # audit recent sessions for context waste
+'Ω-resume' TASK                                 # pick up a task from its task file
+'Ω-optimize'                                    # audit recent sessions for context waste
 ```
 
-Agents call these themselves; the guards rewrite plain shell commands to `Ω-run`.
+Agents call these themselves; the guards rewrite plain shell commands to `Ω-run`. The ASCII names
+(`omega-run`, `omega resume`, `omega optimize`, …) keep working.
 
 ## Documentation
 
@@ -70,7 +74,7 @@ Agents call these themselves; the guards rewrite plain shell commands to `Ω-run
 | Audit sessions and read the report | [`omega optimize`](docs/optimize.md) |
 | Understand the layout, agents and context rules | [Architecture](docs/architecture.md) |
 | Run the tests or cut a release | [Development](docs/development.md) |
-| See the measurements behind the design | [Context reliability](docs/context-reliability.md) |
+| See how many tokens omega saves | [Benchmark](docs/benchmark.md) |
 
 ## Versions
 

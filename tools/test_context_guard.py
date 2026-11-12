@@ -293,7 +293,7 @@ class ContextSettingsTest(unittest.TestCase):
                 patch.object(self.installer, 'write_response_settings') as responses:
             self.assertEqual(self.installer.main(), 0)
         binaries.assert_called_once_with(False, names=('context_guard', 'context_budget', 'optimize', 'shell_guard', 'session_name'))
-        commands.assert_called_once_with(False, names=('omega', 'omega-optimize', 'Ω-optimize'))
+        commands.assert_called_once_with(False, names=('omega', 'omega-optimize', 'Ω-optimize', 'omega-resume', 'Ω-resume'))
         responses.assert_not_called()
 
 

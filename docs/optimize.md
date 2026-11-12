@@ -5,12 +5,14 @@ supported safe fixes. It never rewrites, deletes or compacts conversations and n
 instructions found in transcripts. A [daily timer](installation.md#schedule-maintenance) can run it.
 
 ```sh
-omega optimize                       # analyze new records, save a report, apply safe fixes
-omega optimize --check               # same, without fixes
-omega optimize prefix                # read-only: fixed context cost per project
-omega optimize replay                # read-only: counterfactual token replay
-omega optimize --compare BASE.json   # OK/KO gates against a base report
+'Ω-optimize'                       # analyze new records, save a report, apply safe fixes
+'Ω-optimize' --check               # same, without fixes
+'Ω-optimize' prefix                # read-only: fixed context cost per project
+'Ω-optimize' replay                # read-only: counterfactual token replay
+'Ω-optimize' --compare BASE.json   # OK/KO gates against a base report
 ```
+
+`omega optimize` and `omega-optimize` are the same command.
 
 ## Options
 

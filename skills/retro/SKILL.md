@@ -9,7 +9,7 @@ Goal: the same mistake never costs tokens twice, and the always-loaded context d
 
 ## 1. Collect evidence, not impressions
 
-- `'Ω-run' -- omega optimize --check`, then the saved report: workflow errors, avoidable re-reads, compactions, repeated calls.
+- `'Ω-optimize' --check`, then the saved report: workflow errors, avoidable re-reads, compactions, repeated calls.
 - The task file (decisions, failed approaches) and the user's corrections in this session.
 - Open a transcript or evidence slice only to confirm one specific candidate.
 

@@ -776,7 +776,7 @@ impl Guard {
         if argv.is_empty() || (command != shlex_join(&argv) && inert_split(command).as_ref() != Some(&argv)) {
             return self.denied_unwrapped("Unwrapped or noncanonical shell command.", command, &argv);
         }
-        if matches!(argv[0].as_str(), "omega" | "omega-optimize" | "Ω-optimize") {
+        if matches!(argv[0].as_str(), "omega" | "omega-optimize" | "Ω-optimize" | "omega-resume" | "Ω-resume") {
             if !Self::trusted_alias(&argv[0], &self.optimize) {
                 return self.denied("Untrusted omega command on PATH.");
             }

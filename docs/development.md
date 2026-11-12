@@ -1,6 +1,15 @@
 # Development
 
-How to test a change and cut a release.
+How to test a change, measure its token cost and cut a release.
+
+## Token benchmark
+
+```sh
+uv run --no-project --with tokenizers python3 tools/benchmark_context.py
+```
+
+Compares plain Claude Code tools with omega, and the baseline with `HEAD`, on reproducible
+workloads. Results, options and method: [Benchmark](benchmark.md).
 
 ## Tests
 

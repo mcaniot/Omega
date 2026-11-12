@@ -6,6 +6,12 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 
 ## [Unreleased]
 
+### Added
+
+- `Ω-resume` (and `omega-resume`) runs `omega resume`; agents now call `'Ω-resume'` and
+  `'Ω-optimize'`. The `omega resume` / `omega optimize` names keep working.
+- One-command token benchmark (`tools/benchmark_context.py`) and its [Benchmark](docs/benchmark.md) page.
+
 ## [1.0.0] - 2026-11-12
 
 First production release of the versioned agent setup (the previous Omega project is archived
