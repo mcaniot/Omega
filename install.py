@@ -54,17 +54,18 @@ CONTEXT_HOOKS = (
     ('PostToolUse', 'Edit|Write|MultiEdit', 'context_guard'),
     ('SessionStart', None, 'context_guard'),
     ('PostCompact', None, 'context_guard'),
-    ('PreToolUse', '*', 'context_budget'),
     ('PostToolUse', '*', 'context_budget'),
     ('UserPromptSubmit', None, 'context_budget'),
     ('SessionStart', None, 'context_budget'),
     ('PostCompact', None, 'context_budget'),
+    ('PreCompact', None, 'context_budget'),  # records the real compaction point; caps the reminder below
 )
-# 1M-context model so normal sessions never hand off or compact (0 re-read, no context rot).
+# Sessions auto-compact near 217k whatever the model setting (measured 2026-11-12). The budget
+# hook never blocks (user decision: forced handoffs break the flow); it reminds once to
+# checkpoint the task file so compaction loses nothing that matters.
 CONTEXT_ENV = {
     'ANTHROPIC_MODEL': 'opus[1m]',
-    'OMEGA_CONTEXT_SOFT': '850000',
-    'OMEGA_CONTEXT_HARD': '900000',
+    'OMEGA_CONTEXT_SOFT': '150000',
 }
 COMMANDS = {
     'omega': BINARIES['optimize'],
@@ -341,7 +342,15 @@ def write_context_settings(apply):
             group['matcher'] = matcher
         groups.append(group)
         changed = True
+    # Retired: the budget hook no longer gates tools (PreToolUse) and has no hard limit.
+    budget = [{'type': 'command', 'command': str(BINARIES['context_budget'])}]
+    kept = [group for group in hooks.get('PreToolUse', []) if group.get('hooks') != budget]
+    if len(kept) != len(hooks.get('PreToolUse', [])):
+        hooks['PreToolUse'] = kept
+        changed = True
     env = settings.setdefault('env', {})
+    if env.pop('OMEGA_CONTEXT_HARD', None) is not None:
+        changed = True
     for key, value in CONTEXT_ENV.items():
         if env.get(key) != value:
             env[key] = value

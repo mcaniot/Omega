@@ -242,6 +242,8 @@ fn audit(
             "context_peak": ordered.iter().map(|v| v.1).max().unwrap_or(0),
             "compactions": compactions.len(),
             "tool_calls": calls.keys().filter(|id| !carried.contains(*id)).count(),
+            // Batching: every request re-reads the whole context, so ~1.0 means no parallel calls.
+            "tool_calls_per_request": calls.keys().filter(|id| !carried.contains(*id)).count() as f64 / ordered.len().max(1) as f64,
             "tool_errors": results.values().filter(|r| r["is_error"] == true).count(),
             "error_classes": error_classes.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
             "workflow_errors": error_classes[..4].iter().map(|(_, v)| v).sum::<u64>(),
@@ -858,6 +860,9 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
+    // Rust ignores SIGPIPE; restore the default so `| head` ends quietly instead of panicking.
+    // SAFETY: restoring the default handler is always valid.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     if let Err(error) = run() {
         let command = match std::env::args().nth(1).as_deref() {
             Some("resume") => "omega resume",

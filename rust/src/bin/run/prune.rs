@@ -1,4 +1,4 @@
-//! Dry-run (or `--apply`) removal of old evidence not referenced by active tasks.
+//! Dry-run (or `--apply`) removal of old evidence not referenced by active or completed tasks.
 
 use crate::argparse::Parsed;
 use crate::py;
@@ -22,13 +22,14 @@ pub fn prune(p: &Parsed, home: &[u8]) -> Result<Vec<u8>, String> {
     }
     let apply = p.flag("apply");
     let root = Path::new(OsStr::from_bytes(home)).join(".agents/tasks/evidence");
-    let active = root.parent().unwrap().join("active");
     let find = Regex::new(NAME).unwrap();
     let exact = Regex::new(&format!("^(?:{})$", NAME)).unwrap();
     let mut referenced: HashSet<String> = HashSet::new();
-    if let Ok(entries) = std::fs::read_dir(&active) {
+    // Completed tasks keep their cited evidence too: it is small and stays verifiable.
+    for tasks in ["active", "completed"].map(|d| root.parent().unwrap().join(d)) {
+        let Ok(entries) = std::fs::read_dir(&tasks) else { continue };
         for entry in entries {
-            let path = entry.map_err(io(&active))?.path();
+            let path = entry.map_err(io(&tasks))?.path();
             if path.as_os_str().as_bytes().ends_with(b".md") {
                 let text = std::fs::read(&path).map_err(io(&path))?;
                 for m in find.find_iter(&String::from_utf8_lossy(&text)) {

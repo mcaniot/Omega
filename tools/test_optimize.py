@@ -744,6 +744,13 @@ class PrefixTest(unittest.TestCase):
         self.assertEqual(report['aggregate']['global_floor_tokens'], 510)
         self.assertAlmostEqual(report['aggregate']['weighted_prefix_share'], 510 * 4 / 2635)
 
+    def test_path_imported_and_loaded_natively_is_not_a_duplicate(self):
+        (self.cwd / 'CLAUDE.local.md').write_text('@docs/extra.md\n@./docs/extra.md\n')
+        self.session('p1', 'a', [self.message('a', 1, 2, 3)])
+        project, = json.loads(self.run_prefix('--json'))['projects']
+        self.assertEqual([Path(d['path']).name for d in project['duplicates']], ['AGENTS.md'])
+        self.assertEqual(project['project_instruction_bytes'], self.claude_md + 50 + 30 + 32)
+
     def test_report_is_create_new_private(self):
         self.session('p1', 'a', [self.message('a', 1, 2, 3)])
         report = self.home / 'report.json'

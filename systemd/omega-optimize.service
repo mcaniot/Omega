@@ -1,0 +1,7 @@
+[Unit]
+Description=Omega: incremental context audit of Claude and Codex sessions (report only, no transcript change)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/omega optimize
+Nice=10

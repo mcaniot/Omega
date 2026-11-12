@@ -24,14 +24,20 @@ struct Chain {
     files: Vec<Value>,
     duplicates: Vec<Value>,
     seen: HashSet<PathBuf>,
+    paths: HashSet<PathBuf>,
 }
 
 impl Chain {
-    /// Load `path` and its `@path.md` imports; a realpath already loaded is a duplicate.
+    /// Load `path` and its `@path.md` imports. Claude Code injects one path once, even when it is
+    /// both imported and loaded natively (observed in request blobs), so a repeated path costs
+    /// nothing; the same file reached through another path (symlink) is injected again: duplicate.
     fn load(&mut self, path: &Path, home: &Path, scope: &str, depth: usize) {
         let Ok(real) = fs::canonicalize(path) else { return };
         let Ok(text) = fs::read_to_string(&real) else { return };
         let bytes = text.len();
+        if !self.paths.insert(path.to_path_buf()) {
+            return;
+        }
         if !self.seen.insert(real) {
             self.duplicates.push(json!({"path": path.display().to_string(), "bytes": bytes}));
             return;
@@ -56,7 +62,7 @@ impl Chain {
                 }
                 let target = match token.strip_prefix("~/") {
                     Some(rest) => home.join(rest),
-                    None => dir.join(token),
+                    None => dir.join(token.strip_prefix("./").unwrap_or(token)),
                 };
                 self.load(&target, home, scope, depth + 1);
             }
@@ -146,7 +152,7 @@ fn median(mut values: Vec<u64>) -> f64 {
 }
 
 fn instruction_chain(cwd: &Path, home: &Path, global: &Chain) -> Chain {
-    let mut chain = Chain { seen: global.seen.clone(), ..Chain::default() };
+    let mut chain = Chain { seen: global.seen.clone(), paths: global.paths.clone(), ..Chain::default() };
     let global_claude = home.join(".claude/CLAUDE.md");
     let mut dirs = vec![cwd.to_path_buf()];
     if cwd.starts_with(home) {

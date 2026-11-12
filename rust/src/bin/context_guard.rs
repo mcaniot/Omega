@@ -11,6 +11,7 @@ use ledger::{Coverage, Ledger};
 const LARGE_TEXT_BYTES: u64 = 8192;
 const MAX_READ_LINES: u64 = 200;
 const MAX_COUNTED_BYTES: u64 = 1 << 20;
+const CPP_HINT: &str = "C/C++ edited: if this code can run in a realtime or control path, load the `cpp-quality` skill and re-check the change (no lock, heap allocation, blocking call or unbounded work).";
 
 fn deny(reason: &str) -> Value {
     json!({"hookSpecificOutput": {
@@ -92,11 +93,35 @@ fn invalidate(payload: &Value) {
     }
 }
 
+/// Once per session or subagent, after the first C/C++ edit: point at the realtime checklist.
+/// Measured: the model never loads `cpp-quality` on its own, and it is the one skill that
+/// changed correctness (mutex and allocation in a control step).
+fn cpp_hint(payload: &Value) -> Option<Value> {
+    if payload.get("hook_event_name").and_then(Value::as_str) != Some("PostToolUse") {
+        return None;
+    }
+    let file = payload["tool_input"].get("file_path").and_then(Value::as_str)?;
+    let extension = Path::new(file).extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(extension.as_str(), "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx" | "ipp") {
+        return None;
+    }
+    let owner = payload.get("agent_id").or_else(|| payload.get("session_id"))?.as_str()?;
+    let state = ledger::state_file(Path::new(&std::env::var_os("HOME")?), "cpp-hint", owner)?;
+    if state.exists() {
+        return None;
+    }
+    ledger::write_private(&state, b"{}").ok()?;
+    Some(json!({"hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "additionalContext": CPP_HINT,
+    }}))
+}
+
 fn evaluate(payload: &Value) -> Value {
     let event = payload.get("hook_event_name").and_then(Value::as_str).unwrap_or("PreToolUse");
     if event != "PreToolUse" {
         invalidate(payload);
-        return json!({});
+        return cpp_hint(payload).unwrap_or_else(|| json!({}));
     }
     if payload.get("tool_name").and_then(Value::as_str) != Some("Read") {
         return json!({});

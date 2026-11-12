@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
@@ -217,6 +218,35 @@ class GuardTest(unittest.TestCase):
             self.assertEqual(decision(shlex.join(argv)), expected, argv)
         self.assertEqual(decision('pytest -q'), 'deny')
         self.assertEqual(decision('anything', tool='Read'), 'pass')
+
+    def test_allow_clean_auto_wraps_unwrapped_policy_clean_commands(self):
+        with tempfile.TemporaryDirectory() as home:
+            native = Path(home, '.agents/tools/robot-exec/native/run')
+            native.parent.mkdir(parents=True)
+            native.write_text('#!/bin/sh\n')
+            native.chmod(0o700)
+            Path(home, 'bin').mkdir()
+            Path(home, 'bin/Ω-run').symlink_to(native)
+
+            def output(command, args=('--allow-clean',), tool='Bash', **extra):
+                payload = json.dumps({'tool_name': tool, 'tool_input': {'command': command, **extra}}).encode()
+                done = subprocess.run([BINARY, *args], input=payload, capture_output=True, timeout=30,
+                                      env={'PATH': f'{home}/bin:/usr/bin:/bin', 'HOME': home})
+                self.assertEqual((done.returncode, done.stderr), (0, b''))
+                return json.loads(done.stdout)['hookSpecificOutput']
+
+            wrapped = output("cd x && make 'a b'", timeout=5000, description='d')
+            self.assertEqual(wrapped['permissionDecision'], 'allow')
+            self.assertEqual(wrapped['updatedInput'], {'command': shlex.join(['Ω-run', '--shell', "cd x && make 'a b'"]),
+                                                       'timeout': 5000, 'description': 'd'})
+            self.assertIn('Ω-run --shell', wrapped['additionalContext'])
+            for command in ('git push', 'rm -r build', 'ros2 topic pub /cmd x', 'echo "unterminated',
+                            'Ω-run --shell "echo $HOME"', 'omega-run -- "ls"', 'echo ' + 'a' * 400):
+                denied = output(command)
+                self.assertEqual(denied['permissionDecision'], 'deny', command)
+                self.assertNotIn('updatedInput', denied, command)
+            self.assertEqual(output('ls', args=())['permissionDecision'], 'deny')  # Codex: no rewrite
+            self.assertEqual(output('ls', tool='exec_command')['permissionDecision'], 'deny')
 
     def test_zsh_equals_argument_denied(self):
         self.assertDenied(self.call(shlex.join([NATIVE, 'run', '--', 'echo', '=ls'])))

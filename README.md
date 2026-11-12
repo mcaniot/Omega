@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon.png" alt="omega" width="260"></p>
+
 # omega
 
 Versioned source of my Claude Code and Codex agent setup. The goal is to keep it small and limit
@@ -42,6 +44,13 @@ do not control these overrides. Tool displays and required approval prompts rema
 Rust binaries are only updated by `install.py --apply`, so run the tests first.
 
 ### Recurring context maintenance
+
+A user systemd timer runs the audit daily (units in `systemd/`):
+
+```sh
+systemctl --user link "$PWD/systemd/omega-optimize.service" "$PWD/systemd/omega-optimize.timer"
+systemctl --user enable --now omega-optimize.timer
+```
 
 Run `omega optimize` (or `Ω-optimize`) periodically: analyze, save a report, then apply
 supported safe fixes. It selects up to 12 changed coding sessions across top-level Claude
@@ -114,7 +123,8 @@ Keep `~/.local/bin` on `PATH`. Use the short commands directly, without repeatin
 
 `Ω-run` captures complete output in `~/.agents/tasks/evidence/` and returns bounded JSON;
 `Ω-inspect` reads that evidence. `Ω-read` provides restricted source reads (`status`, `files`,
-`text`, `find`). `Ω-prune` previews evidence cleanup; deletion requires `--apply` and approval.
+`text`, `find`). `Ω-prune` previews cleanup of evidence older than `--days` (default 14) that no active or
+completed task cites; deletion requires `--apply` and approval.
 Quote the `Ω-*` names as shown to match the shell guard's canonical `shlex.join` quoting.
 The ASCII names (`omega-run`, `omega-read`, `omega-inspect`, `omega-prune`) and original absolute
 paths remain supported. The guard checks command resolution on `PATH` and preserves native
@@ -153,6 +163,18 @@ See [native executor usage](tools/robot-exec/native/README.md) and
   check `install.py --budget` before and after.
 - Procedures go in a skill (loaded on demand), not in `AGENTS.md`.
 - Long output goes through `Ω-run`: complete log on disk, bounded JSON in the context.
+- Context budget: `context_budget` never blocks a tool. It reminds once, at `OMEGA_CONTEXT_SOFT`
+  (150k), to update the task file. Its `PreCompact` hook records the context size of each automatic
+  compaction in `~/.agents/state/budget/compact-floor.json`; for 14 days the reminder is capped at
+  69 % of it, so it fires before compaction whatever window the model really has. After a
+  compaction, `SessionStart` tells the session to resume from the task file.
+- An unwrapped Bash command that the policy would allow once wrapped is rewritten to
+  `Ω-run --shell` by `shell_guard` instead of being denied (Claude only); the first C/C++ edit of a
+  session gets a one-time pointer to `cpp-quality`; `omega optimize` reports
+  `tool_calls_per_request` per session (about 1.0 means no batching).
+- Self-improvement: the `retro` skill (`/retro`) turns failures verified in `omega optimize` reports and
+  task files into one-line lessons in `skills/<skill>/references/lessons.md` (add, merge, prune; 20
+  lines per file), read only when that skill loads.
 
 ## Tests
 

@@ -19,7 +19,7 @@ Work silently. No preamble, progress, narration, unsolicited explanations or clo
 - Shell only via `'Ω-run' -- <argv>` or `'Ω-run' --shell '<command>'`; `Ω-read` for trusted reads, `'Ω-inspect' EVIDENCE [--stream stdout|stderr] [--search LITERAL] [--offset BYTES] [--lines N]` for evidence, `Ω-prune` dry-run (`--apply` needs approval). Load `tool-output` for statuses and inspection syntax.
 - Full output stays in evidence: read the bounded inline result once, then only needed slices; never copy logs into task state.
 - Validation: standalone argv or fail-fast `--shell`; check each exit status; never `--shell-keep-going`.
-- Locate with `rg`/symbols before reading text files over 8 KiB, then Read with offset and limit ≤200; diff stats before details. Batch independent calls in one turn; never re-read content already in context. On a context-budget message, checkpoint and hand off as instructed.
+- Locate with `rg`/symbols before reading text files over 8 KiB, then Read with offset and limit ≤200; diff stats before details. Batch independent calls in one turn; never re-read content already in context. On a context-budget message, checkpoint the task file and continue.
 
 ## Delegation
 
@@ -27,5 +27,5 @@ Do simple or known-location work directly. Unknown facts → `scout`; known impl
 
 ## State and validation
 
-- Substantial or handoff work: one `~/.agents/tasks/active/<task>.md` (objective, criteria, constraints, decisions, state, evidence refs, next action, blockers; no logs or source). Only the main session edits it; checkpoint at milestones; move to `completed/` when done.
+- Substantial or handoff work: one `~/.agents/tasks/active/<task>.md` (objective, criteria, constraints, decisions, state, evidence refs, next action, blockers; no logs or source). Only the main session edits it; checkpoint at milestones; move to `completed/` when done. After a user correction, failed approach or compaction, load `retro` before closing.
 - Validate cheapest first, then focused tests, smoke, integration; full simulation or expensive campaigns only when justified and authorized. Record exact commands, configuration, seed, backend and outcomes. Use project formatters. No unchanged retries; stop after two failed approaches. Claim completion only from a fresh passing check. Load `robotics-validation` for details.

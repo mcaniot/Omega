@@ -577,14 +577,20 @@ fn json_string(text: &str, out: &mut String) {
 
 // ---------------------------------------------------------------- guard
 
+const AUTO_WRAP_NOTE: &str = "Omega guard ran this command through \u{3a9}-run --shell (fail-fast, bounded JSON result). Write the wrapper yourself next time.";
+
 struct Decision {
     kind: &'static str,
     reason: String,
+    /// Wrapped form of a denied unwrapped command, when it is safe to run instead.
+    rewrite: Option<String>,
+    /// Serialized replacement `tool_input` (PreToolUse `updatedInput`).
+    updated: Option<String>,
 }
 
 impl Decision {
     fn new(kind: &'static str, reason: String) -> Self {
-        Decision { kind, reason }
+        Decision { kind, reason, rewrite: None, updated: None }
     }
 
     fn render(decision: Option<&Decision>) -> String {
@@ -593,6 +599,12 @@ impl Decision {
         json_string(decision.kind, &mut out);
         out.push_str(r#","permissionDecisionReason":"#);
         json_string(&decision.reason, &mut out);
+        if let Some(updated) = &decision.updated {
+            out.push_str(r#","updatedInput":"#);
+            out.push_str(updated);
+            out.push_str(r#","additionalContext":"#);
+            json_string(AUTO_WRAP_NOTE, &mut out);
+        }
         out.push_str("}}");
         out
     }
@@ -661,9 +673,45 @@ impl Guard {
 
     /// Deny an unwrapped command, appending the exact wrapped command when one is safe to offer.
     fn denied_unwrapped(&self, reason: &str, command: &str, argv: &[String]) -> Option<Decision> {
-        let hint = Self::rewrite(command, argv).filter(|h| h.len() <= MAX_REWRITE_BYTES);
-        let hint = hint.map(|h| format!(" Ready-to-run: {h}")).unwrap_or_default();
-        Some(Decision::new("deny", format!("{reason}{hint} {}", self.guidance)))
+        let rewrite = Self::rewrite(command, argv).filter(|h| h.len() <= MAX_REWRITE_BYTES);
+        let hint = rewrite.as_ref().map(|h| format!(" Ready-to-run: {h}")).unwrap_or_default();
+        let mut decision = Decision::new("deny", format!("{reason}{hint} {}", self.guidance));
+        // A miswritten wrapper call is not re-wrapped: nesting would hide the mistake.
+        let wrapper = argv.first().is_none_or(|a| a.contains('\u{3a9}') || a.starts_with("omega") || a.contains("/.agents/tools/"));
+        if !wrapper {
+            decision.rewrite = rewrite;
+        }
+        Some(decision)
+    }
+
+    /// Claude only: run the wrapped form of an unwrapped command instead of denying it, when that
+    /// exact form would be allowed had the model written it. Saves one full-context round trip.
+    fn auto_wrap(&self, decision: Option<Decision>, raw: &[u8]) -> Option<Decision> {
+        let wrapped = decision.as_ref().and_then(|d| d.rewrite.clone()).filter(|_| self.allow_clean);
+        let updated = wrapped.and_then(|wrapped| {
+            let mut payload = serde_json::from_slice::<serde_json::Value>(raw).ok()?;
+            if payload["tool_name"] != "Bash" || !payload["tool_input"]["command"].is_string() {
+                return None;
+            }
+            let probe = Json::Object(vec![
+                ("tool_name".to_string(), Json::Str("Bash".to_string())),
+                ("tool_input".to_string(), Json::Object(vec![("command".to_string(), Json::Str(wrapped.clone()))])),
+            ]);
+            if !self.evaluate(&probe).is_some_and(|d| d.kind == "allow") {
+                return None;
+            }
+            payload["tool_input"]["command"] = serde_json::Value::String(wrapped);
+            Some(payload["tool_input"].to_string())
+        });
+        match updated {
+            Some(updated) => {
+                let mut allow =
+                    Decision::new("allow", "Omega guard: unwrapped command auto-wrapped; it matched no deny or ask policy.".to_string());
+                allow.updated = Some(updated);
+                Some(allow)
+            }
+            None => decision,
+        }
     }
 
     /// `cat`/`head`/`tail` of evidence become a bounded `Ω-inspect`; any other command is
@@ -792,7 +840,7 @@ fn run() -> String {
     }
     let parsed = std::str::from_utf8(&input).map_err(|_| Fail::Invalid).and_then(parse_json);
     let decision = match parsed {
-        Ok(payload) => guard.evaluate(&payload),
+        Ok(payload) => guard.auto_wrap(guard.evaluate(&payload), &input),
         Err(Fail::Invalid) => guard.denied("Invalid hook JSON."),
         Err(Fail::Recursion) => guard.denied("Guard internal error (RecursionError)."),
     };

@@ -1,21 +1,39 @@
-//! Context budget hook: one soft checkpoint reminder, then a hard stop that only allows
-//! checkpointing. Reads only the transcript tail and fails open on any error.
+//! Context budget hook: one checkpoint reminder per crossing, never a denial (forced handoffs
+//! break the flow). Reads only the transcript tail and fails open on any error.
 use serde_json::{Value, json};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Component, Path};
+use std::path::Path;
 
 #[path = "../state/ledger.rs"]
 mod ledger;
 
 const TAIL_BYTES: u64 = 256 * 1024;
-// Last-resort guard just below observed auto-compaction (~200k): no handoff in normal sessions,
-// no compaction (context rot) ever. With a 1M-context model raise via OMEGA_CONTEXT_SOFT/HARD.
+// Early enough to checkpoint the task file before auto-compaction (observed near 217k).
 const DEFAULT_SOFT: u64 = 150_000;
-const DEFAULT_HARD: u64 = 180_000;
-const HARD_REASON: &str = "Context budget reached: auto handoff. 1) Checkpoint ~/.agents/tasks/active/<task>.md (verified facts with file:line, current state, next action). 2) Run `'Ω-run' -- orca agent launch --agent claude --prompt 'omega resume <task>' --json`. 3) Report the new agent handle and stop.";
+// Observed auto-compaction point: a reminder configured above it never fires (a "1M" setting on
+// a window that still compacts near 217k), so the limit is capped at this share of it.
+const COMPACT_MARK: &[u8] = b"\"isCompactSummary\":true";
+const FLOOR_SOFT_PERCENT: u64 = 69;
+const FLOOR_MIN_TOKENS: u64 = 50_000;
+const FLOOR_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 3600);
+const COMPACTED_NOTE: &str = "Context was compacted: earlier details are lossy. Run `omega resume [TASK]`, then re-read only what the next action needs.";
 
 fn limit(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
+
+fn floor_file(home: &Path) -> Option<std::path::PathBuf> {
+    ledger::state_file(home, "budget", "compact-floor")
+}
+
+/// Context size at the latest automatic compaction, if observed within FLOOR_MAX_AGE.
+fn compact_floor(home: &Path) -> Option<u64> {
+    let path = floor_file(home)?;
+    if path.metadata().ok()?.modified().ok()?.elapsed().ok()? > FLOOR_MAX_AGE {
+        return None;
+    }
+    let value = serde_json::from_slice::<Value>(&ledger::read_bounded(&path)?).ok()?;
+    value["tokens"].as_u64().filter(|t| *t >= FLOOR_MIN_TOKENS)
 }
 
 /// Context tokens of the newest main-thread assistant message in the transcript tail.
@@ -32,6 +50,12 @@ fn context_tokens(transcript: &Path) -> Option<u64> {
     }
     let lines: Vec<&[u8]> = lines.collect();
     for line in lines.iter().rev() {
+        // Older usage predates the compaction: the transcript lags behind the first tool calls.
+        if line.windows(COMPACT_MARK.len()).any(|w| w == COMPACT_MARK)
+            && serde_json::from_slice::<Value>(line).is_ok_and(|e| e["isCompactSummary"] == true)
+        {
+            return None;
+        }
         if !line.windows(7).any(|w| w == b"\"usage\"") {
             continue;
         }
@@ -52,55 +76,6 @@ fn context_tokens(transcript: &Path) -> Option<u64> {
     None
 }
 
-fn under_tasks(file: &str, home: &Path) -> bool {
-    let path = Path::new(file);
-    if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
-        return false;
-    }
-    let tasks = home.join(".agents/tasks");
-    let tasks = tasks.canonicalize().unwrap_or(tasks);
-    // Resolve symlinks through the nearest existing ancestor (the file may not exist yet).
-    let mut existing = path;
-    let mut tail = Vec::new();
-    while !existing.exists() {
-        let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else { return false };
-        tail.push(name);
-        existing = parent;
-    }
-    let Ok(mut real) = existing.canonicalize() else { return false };
-    real.extend(tail.iter().rev());
-    real.starts_with(tasks)
-}
-
-/// `Ω-run ... -- omega ...` or `Ω-run --shell 'omega ...'`, without command chaining.
-fn omega_command(command: &str) -> bool {
-    if command.contains(['\n', ';', '&', '|', '<', '>', '$', '`', '(', ')']) {
-        return false;
-    }
-    let tokens: Vec<&str> = command.split_whitespace().map(|t| t.trim_matches(['\'', '"'])).collect();
-    let wrapper = tokens.first().is_some_and(|t| matches!(*t, "Ω-run" | "omega-run") || t.ends_with("/native/run"));
-    let start = tokens.iter().position(|t| matches!(*t, "--" | "--shell")).map(|i| i + 1);
-    let target = start.and_then(|i| tokens.get(i));
-    // Auto handoff: a fresh agent in the current checkout resumes the task (`orca agent launch`).
-    let handoff = start.is_some_and(|i| {
-        matches!(tokens.get(i), Some(&("orca" | "orca-ide"))) && tokens.get(i + 1) == Some(&"agent") && tokens.get(i + 2) == Some(&"launch")
-    });
-    wrapper && (handoff || matches!(target, Some(&("omega" | "omega-optimize" | "Ω-optimize"))))
-}
-
-fn allowed(payload: &Value) -> bool {
-    let input = &payload["tool_input"];
-    let Some(home) = std::env::var_os("HOME") else { return false };
-    match payload.get("tool_name").and_then(Value::as_str) {
-        Some("Edit" | "Write" | "MultiEdit" | "Read") => input
-            .get("file_path")
-            .and_then(Value::as_str)
-            .is_some_and(|f| under_tasks(f, Path::new(&home))),
-        Some("Bash") => input.get("command").and_then(Value::as_str).is_some_and(omega_command),
-        _ => false,
-    }
-}
-
 fn evaluate(payload: &Value) -> Value {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let state = home
@@ -108,33 +83,35 @@ fn evaluate(payload: &Value) -> Value {
         .zip(payload.get("session_id").and_then(Value::as_str))
         .and_then(|(h, s)| ledger::state_file(h, "budget", s));
     let event = payload.get("hook_event_name").and_then(Value::as_str).unwrap_or("");
+    let tokens = || payload.get("transcript_path").and_then(Value::as_str).and_then(|p| context_tokens(Path::new(p)));
+    if event == "PreCompact" {
+        // The newest usage is the context that triggered compaction: calibrate later sessions.
+        if payload["trigger"] == "auto" && payload.get("agent_id").is_none() {
+            if let Some((tokens, path)) = tokens().filter(|t| *t >= FLOOR_MIN_TOKENS).zip(home.as_deref().and_then(floor_file)) {
+                let _ = ledger::write_private(&path, json!({"tokens": tokens}).to_string().as_bytes());
+            }
+        }
+        return json!({});
+    }
     let is_reset = event == "PostCompact"
         || (event == "SessionStart" && matches!(payload.get("source").and_then(Value::as_str), Some("compact" | "clear")));
     if is_reset {
         if let Some(state) = &state {
             ledger::remove(state);
         }
-        return json!({});
-    }
-    if payload.get("agent_id").is_some() || !matches!(event, "PreToolUse" | "PostToolUse" | "UserPromptSubmit") {
-        return json!({});
-    }
-    let Some(tokens) = payload.get("transcript_path").and_then(Value::as_str).and_then(|p| context_tokens(Path::new(p))) else {
-        return json!({});
-    };
-    let (soft, hard) = (limit("OMEGA_CONTEXT_SOFT", DEFAULT_SOFT), limit("OMEGA_CONTEXT_HARD", DEFAULT_HARD));
-    if event == "PreToolUse" {
-        return if tokens >= hard && !allowed(payload) {
-            json!({"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": HARD_REASON,
-            }})
+        return if event == "SessionStart" && payload["source"] == "compact" {
+            json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": COMPACTED_NOTE}})
         } else {
             json!({})
         };
     }
-    let Some(state) = state else { return json!({}) };
+    // PreToolUse is ignored: settings written by earlier versions may still register it.
+    if payload.get("agent_id").is_some() || !matches!(event, "PostToolUse" | "UserPromptSubmit") {
+        return json!({});
+    }
+    let (Some(tokens), Some(state)) = (tokens(), state) else { return json!({}) };
+    let soft = limit("OMEGA_CONTEXT_SOFT", DEFAULT_SOFT);
+    let soft = home.as_deref().and_then(compact_floor).map_or(soft, |f| soft.min(f * FLOOR_SOFT_PERCENT / 100));
     let fired = ledger::read_bounded(&state)
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .is_some_and(|v| v["soft_fired"] == true);
@@ -151,9 +128,8 @@ fn evaluate(payload: &Value) -> Value {
     json!({"hookSpecificOutput": {
         "hookEventName": event,
         "additionalContext": format!(
-            "Context {}k/{}k: checkpoint ~/.agents/tasks/active/<task>.md now.",
-            tokens / 1000,
-            hard / 1000
+            "Context {}k: update ~/.agents/tasks/active/<task>.md now (verified facts, state, next action), then keep working.",
+            tokens / 1000
         ),
     }})
 }

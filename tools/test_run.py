@@ -8,6 +8,7 @@ import signal
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
@@ -241,6 +242,22 @@ class CaptureTests(unittest.TestCase):
         process = subprocess.run([*RUNNER, 'prune', '--days', '100000'], capture_output=True)
         result = json.loads(process.stdout)
         self.assertEqual((process.returncode, result['applied'], result['runs']), (0, False, 0))
+
+    def test_prune_keeps_evidence_cited_by_active_and_completed_tasks(self):
+        with tempfile.TemporaryDirectory() as home:
+            tasks = Path(home, '.agents/tasks')
+            names = [f'20260101T00000{i}-native-AAAAA{i}' for i in range(3)]
+            for name in names:
+                (tasks/'evidence'/name).mkdir(parents=True)
+                os.utime(tasks/'evidence'/name, (0, 0))
+            for folder, name in (('active', names[0]), ('completed', names[1])):
+                (tasks/folder).mkdir()
+                (tasks/folder/'task.md').write_text(f'evidence {name}\n')
+            process = subprocess.run([*RUNNER, 'prune', '--days', '1', '--apply'], capture_output=True,
+                                     env={**os.environ, 'HOME': home})
+            result = json.loads(process.stdout)
+            self.assertEqual((result['applied'], result['runs'], result['kept_referenced']), (True, 1, 2))
+            self.assertEqual(sorted(p.name for p in (tasks/'evidence').iterdir()), names[:2])
 
     def test_concurrent_unique_paths(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:

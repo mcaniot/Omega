@@ -123,6 +123,20 @@ class ReadLedgerTest(unittest.TestCase):
         self.path.write_text(self.path.read_text() + 'more\n')
         self.assertEqual(self.read(1, 100), {})
 
+    def test_first_cpp_edit_hints_cpp_quality_once_per_session_or_subagent(self):
+        def edit(name, **extra):
+            return self.run_hook('PostToolUse', tool_name='Edit', tool_input={'file_path': f'/w/{name}'}, **extra)
+        self.assertEqual(edit('a.py'), {})
+        hint = edit('ctrl/loop.CPP')['hookSpecificOutput']
+        self.assertEqual(hint['hookEventName'], 'PostToolUse')
+        self.assertIn('`cpp-quality`', hint['additionalContext'])
+        self.assertEqual(edit('b.hpp'), {})
+        self.assertIn('additionalContext', edit('b.hpp', agent_id='a1')['hookSpecificOutput'])
+        self.assertEqual(edit('c.h', agent_id='a1'), {})
+        self.assertIn('additionalContext', edit('c.h', session_id='s2')['hookSpecificOutput'])
+        self.assertEqual(edit('c.h', session_id='../x'), {})
+        self.assertEqual(self.run_hook('PreToolUse', tool_name='Edit', tool_input={'file_path': '/w/z.cpp'}), {})
+
     def test_edit_and_write_drop_ranges(self):
         for tool in ('Edit', 'Write', 'MultiEdit'):
             self.assertEqual(self.read(1, 100), {})
@@ -194,9 +208,10 @@ class ContextSettingsTest(unittest.TestCase):
         self.assertEqual(hooks['PreToolUse'][1], guard[0])
         self.assertEqual(hooks['PostToolUse'][0]['matcher'], 'Edit|Write|MultiEdit')
         budget = str(self.installer.BINARIES['context_budget'])
-        for event in ('PreToolUse', 'PostToolUse'):
-            self.assertEqual(hooks[event][-1], {'matcher': '*', 'hooks': [{'type': 'command', 'command': budget}]})
-        for event in ('SessionStart', 'PostCompact', 'UserPromptSubmit'):
+        retired = {'matcher': '*', 'hooks': [{'type': 'command', 'command': budget}]}
+        self.assertEqual(hooks['PostToolUse'][-1], retired)
+        self.assertNotIn(retired, hooks['PreToolUse'])
+        for event in ('SessionStart', 'PostCompact', 'PreCompact', 'UserPromptSubmit'):
             self.assertIn({'type': 'command', 'command': budget}, hooks[event][-1]['hooks'])
         for event in ('SessionStart', 'PostCompact'):
             self.assertEqual(hooks[event][0], {'hooks': [{'type': 'command', 'command': self.command}]})
@@ -206,6 +221,15 @@ class ContextSettingsTest(unittest.TestCase):
         self.assertEqual(hooks['Stop'], self.original['hooks']['Stop'])
         self.assertEqual(hooks['PreToolUse'][0], self.original['hooks']['PreToolUse'][0])
         self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(self.installer.write_context_settings(True)), [])
+        # Settings written by earlier versions: the tool gate and hard limit are removed, nothing else.
+        actual['hooks']['PreToolUse'] = [*hooks['PreToolUse'], retired]
+        actual['env']['OMEGA_CONTEXT_HARD'] = '130000'
+        target.write_text(json.dumps(actual))
+        self.assertEqual(len(list(self.installer.write_context_settings(True))), 1)
+        cleaned = json.loads(target.read_text())
+        self.assertEqual(cleaned['hooks']['PreToolUse'], [self.original['hooks']['PreToolUse'][0], guard[0]])
+        self.assertNotIn('OMEGA_CONTEXT_HARD', cleaned['env'])
         self.assertEqual(list(self.installer.write_context_settings(True)), [])
 
     def test_invalid_settings_do_not_write(self):
