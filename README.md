@@ -45,11 +45,12 @@ Rust binaries are only updated by `install.py --apply`, so run the tests first.
 
 ### Recurring context maintenance
 
-A user systemd timer runs the audit daily (units in `systemd/`):
+User systemd timers run the audit and the evidence cleanup (`omega-prune --apply`, 14 days)
+daily (units in `systemd/`):
 
 ```sh
-systemctl --user link "$PWD/systemd/omega-optimize.service" "$PWD/systemd/omega-optimize.timer"
-systemctl --user enable --now omega-optimize.timer
+systemctl --user link "$PWD"/systemd/omega-{optimize,prune}.{service,timer}
+systemctl --user enable --now omega-optimize.timer omega-prune.timer
 ```
 
 Run `omega optimize` (or `Ω-optimize`) periodically: analyze, save a report, then apply

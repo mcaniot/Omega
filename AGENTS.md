@@ -23,7 +23,7 @@ Work silently. No preamble, progress, narration, unsolicited explanations or clo
 
 ## Delegation
 
-Do simple or known-location work directly. Unknown facts → `scout`; known implementation → `coder`; unresolved root cause or design tradeoff → `architect` (`scout`/`architect` are read-only). Load a skill only when it materially improves correctness, safety or execution. Delegate only to save main context or parallelize; brief objective, facts/paths, constraints, acceptance criteria. Workers reply `status: done|partial|blocked`, findings with `file:line`, commands with exit status and evidence paths; the main session verifies. Orca only when requested.
+Do simple or known-location work directly. Unknown facts → `scout`; known implementation → `coder`; unresolved root cause or design tradeoff → `architect` (`scout`/`architect` are read-only). Load a skill when its description matches the task; a skill named in this file is mandatory at its trigger. Delegate only to save main context or parallelize; brief objective, facts/paths, constraints, acceptance criteria. Workers reply `status: done|partial|blocked`, findings with `file:line`, commands with exit status and evidence paths; the main session verifies. Orca only when requested.
 
 ## State and validation
 

@@ -21,3 +21,5 @@ Domain diagnostics:
 - Isaac Lab/PhysX/Newton: selected backend and imported source, timestep/substeps, contact configuration, joint axes/order and asset conversion. Load only the relevant repository skill, such as diagnosing-joint-poses or setup-troubleshooting.
 
 Do not repeat an unchanged failure. After two distinct failed approaches, or when each fix reveals a new problem elsewhere, stop: checkpoint evidence and escalate the design question (architect) instead of a third patch. Never substitute a plausible explanation for reproduction evidence.
+
+Read references/lessons.md before acting.

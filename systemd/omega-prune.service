@@ -1,0 +1,7 @@
+[Unit]
+Description=Omega: delete evidence older than 14 days that no active or completed task cites
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/omega-prune --apply
+Nice=10
