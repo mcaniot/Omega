@@ -1,0 +1,1 @@
+- [2026-11-12 n=3] When a fail-fast `Ω-run --shell` chain contains a command that exits non-zero by design (rg without match, ruff or diff with findings), run it as its own call or last in the chain, never before required steps. (ref: datagen-simplification, evidence 20261112T165221-native-D3vQYw, 20261112T165227-native-dNIEp8)

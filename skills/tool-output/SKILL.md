@@ -23,3 +23,5 @@ Claude's Read guard rejects large evidence files: use Ω-inspect rather than ope
 Native shell guards require loaded configuration (Codex additionally requires /hooks trust). They preserve native permission checks; they do not cover arbitrary other execution tools. Always call the wrapper explicitly from those tools. Do not claim universal enforcement or token savings from byte counts.
 
 Content-overlap findings from `omega optimize` compare returned lines across commands/ranges, retain only bounded content digests across checkpoints, and report novel lines separately. They are advisory, not a freshness test: never suppress reads or changed data based on overlap.
+
+Read references/lessons.md before acting.
