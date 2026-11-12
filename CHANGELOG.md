@@ -2,7 +2,7 @@
 
 All notable changes are listed here. Versions follow [Semantic Versioning](https://semver.org/):
 the version in `rust/Cargo.toml` is the single source, `omega --version` prints it, and each
-release is the annotated Git tag `vX.Y.Z` (see [Versioning and release](README.md#versioning-and-release)).
+release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#release)).
 
 ## [Unreleased]
 
