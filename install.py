@@ -36,13 +36,15 @@ CODEX_AGENTS = {
 }
 # Former Omega agents; only these names are ever removed, never user agents.
 RETIRED_AGENTS = {'robotics-rl'}
+# Removed trusted reader: its command links and the 0700 binary this installer deployed.
+RETIRED_READ = AGENTS / 'tools/robot-exec/local-read'
+RETIRED_READ_LINKS = ('omega-read', 'Ω-read')
 # Keys of agent files written by this installer (sandbox_mode: older versions).
 CODEX_AGENT_KEYS = {'name', 'description', 'model', 'model_reasoning_effort', 'sandbox_mode',
                     'developer_instructions'}
 # Cargo binary -> installed path.
 BINARIES = {
     'run': AGENTS / 'tools/robot-exec/native/run',
-    'local_read': AGENTS / 'tools/robot-exec/local-read',
     'shell_guard': AGENTS / 'tools/shell_guard',
     'context_guard': AGENTS / 'tools/context_guard',
     'context_budget': AGENTS / 'tools/context_budget',
@@ -90,11 +92,9 @@ COMMANDS = {
     'omega-run': BINARIES['run'],
     'omega-inspect': BINARIES['run'],
     'omega-prune': BINARIES['run'],
-    'omega-read': BINARIES['local_read'],
     'Ω-run': BINARIES['run'],
     'Ω-inspect': BINARIES['run'],
     'Ω-prune': BINARIES['run'],
-    'Ω-read': BINARIES['local_read'],
 }
 # Codex scans ~/.agents/skills natively; Claude sees only skills linked here.
 CLAUDE_SKIP_SKILLS = {'orchestration'}
@@ -187,6 +187,19 @@ def remove_stale_links(apply):
                 yield dest, 'removed stale link' if apply else 'would remove stale link'
 
 
+def remove_retired_read(apply):
+    """Remove the former Ω-read links (only if they point at its binary) and the binary file."""
+    for dest in [HOME / '.local/bin' / name for name in RETIRED_READ_LINKS] + [RETIRED_READ]:
+        if dest == RETIRED_READ:
+            ours = dest.is_file() and not dest.is_symlink()
+        else:
+            ours = dest.is_symlink() and Path(os.readlink(dest)) == RETIRED_READ
+        if ours:
+            if apply:
+                dest.unlink()
+            yield dest, 'removed retired Ω-read' if apply else 'would remove retired Ω-read'
+
+
 def install_binaries(apply, names=None):
     """Build the Rust crate and install each binary atomically as a 0700 real file."""
     binaries = BINARIES if names is None else {name: BINARIES[name] for name in names}
@@ -195,8 +208,6 @@ def install_binaries(apply, names=None):
         yield dest, 'CONFLICT (directory, left untouched)'
     if blocked:
         return
-    if 'local_read' in binaries and not os.environ.get('LOCAL_READ_PROJECT', '').startswith('/'):
-        yield binaries['local_read'], 'UNSET (LOCAL_READ_PROJECT: Ω-read will refuse every request)'
     if not apply:
         for dest in binaries.values():
             yield dest, 'would build and install'
@@ -474,6 +485,7 @@ def main():
         results += list(write_response_settings(args.apply))
     if not args.responses_only:
         results += list(remove_stale_links(args.apply))
+        results += list(remove_retired_read(args.apply))
         results += list(install_binaries(args.apply))
         results += list(write_context_settings(args.apply))
         results += list(write_codex_hooks(args.apply))
@@ -482,7 +494,7 @@ def main():
     for dest, status in results:
         if status != 'ok':
             print(f'{status:12s} {dest}')
-    problems = [s for _, s in results if s.startswith(('CONFLICT', 'STALE', 'UNSET'))]
+    problems = [s for _, s in results if s.startswith(('CONFLICT', 'STALE'))]
     print(f'{len(results)} targets, {len(problems)} need attention' + ('' if args.apply else ' (dry run)'))
     return 1 if problems else 0
 

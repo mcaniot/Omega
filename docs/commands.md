@@ -7,13 +7,12 @@ Reference for the native commands installed in `~/.local/bin`.
 | [`Ω-run`](#ω-run) | Run a command; keep the full output as evidence, return bounded JSON |
 | [`Ω-inspect`](#ω-inspect) | Read a slice of an evidence file |
 | [`Ω-prune`](#ω-prune) | Clean up old evidence |
-| [`Ω-read`](#ω-read) | Restricted source reads under one compiled-in project root |
 | [`Ω-resume`](#ω-resume) | Resume a task from its task file |
 | [`Ω-optimize`](optimize.md) | Audit recent sessions for context waste |
 | `omega --version` | Print the installed version |
 
 Each `Ω-*` command also exists under an ASCII name (`omega-run`, `omega-inspect`, `omega-prune`,
-`omega-read`, `omega-optimize`, `omega-resume`), `Ω-optimize` and `Ω-resume` also as `omega optimize`
+`omega-optimize`, `omega-resume`), `Ω-optimize` and `Ω-resume` also as `omega optimize`
 and `omega resume`; the original absolute paths remain supported. Write the `Ω-*`
 names quoted, as below, to match the shell guard's canonical `shlex.join` quoting. The guard
 checks command resolution on `PATH` and preserves native sandbox and approval checks.
@@ -57,18 +56,6 @@ Reads only the requested slice of an evidence file instead of the whole log.
 ```
 
 Targets evidence older than `--days` (default 14) that no active or completed task cites.
-
-## `Ω-read`
-
-```sh
-'Ω-read' text AGENTS.md 1 20
-```
-
-Restricted source reads (`status`, `files`, `text`, `find`) under the single project root compiled
-into it. There is no default: build or install with `LOCAL_READ_PROJECT=/absolute/path`; a binary
-built without it refuses every request. The root is fixed on purpose: following the current
-directory would let an agent read anywhere by changing directory. It is not advertised in `AGENTS.md` or the agents, which read files
-with their native Read tool. Capabilities and limits: [trusted reads](../tools/robot-exec/README.md).
 
 ## `Ω-resume`
 

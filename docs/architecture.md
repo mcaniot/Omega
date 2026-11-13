@@ -27,7 +27,7 @@ What each source is for:
 | `output-styles/final-only.md` | Final response only, preserving Claude's coding instructions |
 | `agents/*.md` | The three workers |
 | `skills/*/SKILL.md` | On-demand procedures; only the `Use when …` description is loaded until a task matches |
-| `rust/` | Cargo crate `omega-tools`: evidence executor, trusted reader, [hooks](hooks.md), `omega` CLI |
+| `rust/` | Cargo crate `omega-tools`: evidence executor, [hooks](hooks.md), `omega` CLI |
 | `systemd/` | Daily maintenance timers |
 | `tools/`, `hooks/` | Tests and golden fixtures for the binaries |
 | `docs/` | This documentation and measurement notes |
@@ -43,10 +43,9 @@ Where the installer puts it:
 - `agents/*.md` → `~/.claude/agents/` (links) and `~/.codex/agents/*.toml` (generated).
 - `skills/` → `~/.agents/skills/` (Codex scans it) and `~/.claude/skills/` (links).
 - `rust/` → real 0700 files: `~/.agents/tools/robot-exec/native/run`,
-  `~/.agents/tools/robot-exec/local-read`,
   `~/.agents/tools/{shell_guard,context_guard,context_budget,optimize}` and
   `~/.claude/hooks/session_name`.
-- Command links → `~/.local/bin/Ω-{run,read,inspect,prune,optimize}`, `~/.local/bin/omega`
+- Command links → `~/.local/bin/Ω-{run,inspect,prune,optimize}`, `~/.local/bin/omega`
   and the `omega-*` ASCII names.
 - `systemd/` → linked by hand ([installation](installation.md#schedule-maintenance)).
 

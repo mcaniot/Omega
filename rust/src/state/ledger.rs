@@ -1,4 +1,4 @@
-//! Per-session state under ~/.agents/state shared by the Claude hooks and Ω-read.
+//! Per-session state under ~/.agents/state shared by the Claude hooks.
 //! Every helper fails open: callers treat any error as "no state".
 #![allow(dead_code)]
 use serde::{Deserialize, Serialize};

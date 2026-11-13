@@ -15,7 +15,7 @@ Official references inspected:
 
 Bash is the canonical shell matcher, including Codex exec_command and nested code mode. Hook shell input is tool_input.command. Native PreToolUse denial is hookSpecificOutput with hookEventName=PreToolUse, permissionDecision=deny and permissionDecisionReason. Returning {} leaves normal execution permissions intact.
 
-Codex rewrite requires allow plus updatedInput; Claude allow can bypass normal approval. The implemented guard never rewrites; it returns allow only with `--allow-clean` (Claude hook only) for a fully checked call matching no deny/ask policy. It requires a canonical shlex.join command invoking the exact ~/.agents/tools/robot-exec/native/run path with run, inspect or prune, or the fixed local-read forms. Outer shell operators/substitution are rejected; quoted --shell contents are captured inside the wrapper.
+Codex rewrite requires allow plus updatedInput; Claude allow can bypass normal approval. The implemented guard never rewrites; it returns allow only with `--allow-clean` (Claude hook only) for a fully checked call matching no deny/ask policy. It requires a canonical shlex.join command invoking the exact ~/.agents/tools/robot-exec/native/run path with run, inspect or prune. Outer shell operators/substitution are rejected; quoted --shell contents are captured inside the wrapper.
 
 New Codex hooks require native /hooks trust; no CLI trust subcommand was found. Do not forge trusted_hash or use global trust bypass. Hooks can fail open on operational errors and specialized execution paths can bypass them. This is a guard for supported shell calls, not a universal security boundary. Native runtime activation is separate from unit-test success.
 

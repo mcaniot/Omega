@@ -27,13 +27,14 @@ class OmegaCommandsTest(unittest.TestCase):
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
         installer.HOME = self.home
+        self.installer = installer
         installer.COMMANDS = {
             name: self.home / '.agents/tools' / target.relative_to(installer.AGENTS / 'tools')
             for name, target in installer.COMMANDS.items()
         }
         for target in set(installer.COMMANDS.values()):
             target.parent.mkdir(parents=True, exist_ok=True)
-            binary = 'run' if target.name == 'run' else ('optimize' if target.name == 'optimize' else 'local_read')
+            binary = target.name
             target.symlink_to(RUN.parent / binary)
         self.assertTrue(all(status == 'linked' for _, status in installer.install_commands(True)))
         self.env = dict(os.environ, HOME=str(self.home), PATH=f'{self.bin}:/usr/bin:/bin')
@@ -66,9 +67,7 @@ class OmegaCommandsTest(unittest.TestCase):
             (['omega-inspect', '/tmp/evidence'], None),
             (['omega-prune'], None),
             (['omega-prune', '--apply'], 'ask'),
-            (['omega-read', 'status'], None),
-            (['omega-read', 'text', 'AGENTS.md'], None),
-            (['omega-read', 'unknown'], 'deny'),
+            (['omega-read', 'status'], 'deny'),
             (['omega-optimize', '--sessions', '2'], None),
             (['omega', 'optimize'], None),
             (['omega-resume'], None),
@@ -113,6 +112,20 @@ class OmegaCommandsTest(unittest.TestCase):
         self.assertEqual(self.decision('omega-run', '--', 'true'), 'deny')
         self.env['PATH'] = '/usr/bin:/bin'
         self.assertEqual(self.decision('omega-run', '--', 'true'), 'deny')
+
+    def test_retired_read_links_and_binary_are_removed_only_when_ours(self):
+        old = self.home / '.agents/tools/robot-exec/local-read'
+        old.parent.mkdir(parents=True, exist_ok=True)
+        old.write_text('binary')
+        self.installer.RETIRED_READ = old
+        ours, foreign = self.bin / 'omega-read', self.bin / 'Ω-read'
+        ours.symlink_to(old)
+        foreign.symlink_to('/bin/echo')
+        self.assertEqual(len(list(self.installer.remove_retired_read(False))), 2)
+        self.assertTrue(ours.is_symlink() and old.exists())
+        self.assertEqual({dest for dest, _ in self.installer.remove_retired_read(True)}, {ours, old})
+        self.assertFalse(ours.is_symlink() or old.exists())
+        self.assertTrue(foreign.is_symlink())
 
     def test_outer_shell_execution_is_denied(self):
         payload = {'tool_name': 'Bash', 'tool_input': {'command': 'omega-run -- true; echo leak'}}

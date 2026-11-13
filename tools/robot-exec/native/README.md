@@ -3,7 +3,7 @@ Native evidence executor
 
 `run` is a Rust binary (`rust/src/bin/run/`, crate `omega-tools`) installed as
 `~/.agents/tools/robot-exec/native/run`. It has no Python or other fallback.
-The installer exposes `Ω-run`, `Ω-inspect`, `Ω-prune` and `Ω-read`
+The installer exposes `Ω-run`, `Ω-inspect`, and `Ω-prune`
 as links in `~/.local/bin` (keep this directory on PATH). `Ω-run` selects the
 run operation directly; the original absolute commands remain supported.
 
@@ -54,8 +54,7 @@ output requiring the full JSON encoder are finalized in-process.
 
 `run --native-only ...` (flag first) returns exit 2 on inputs the native path does not
 support (abbreviations, `--opt=value`, usage/help, unusual filesystem encoding, invalid
-working directories). Narrow trusted capability launchers such as `local-read` must use it
-with fixed HOME/PATH/cwd.
+working directories). Narrow trusted capability launchers must use it with fixed HOME/PATH/cwd.
 
 This executor is not an authorization boundary and confers no permissions. Never approve it
 as a broad executable prefix: it intentionally accepts arbitrary argv and shell payloads.

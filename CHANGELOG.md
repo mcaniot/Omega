@@ -17,12 +17,11 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 - `Ω-run` writes back stdout, stderr and the final record first, then flushes all three
   concurrently so they share one ext4 journal commit: small output about 21 → 13 ms per call.
   `result.json` is only replaced once every flush succeeded; the `DATA_LOSS` guarantee is unchanged.
-- `Ω-read` has no built-in project root: build with `LOCAL_READ_PROJECT=/absolute/path`, otherwise
-  it refuses every request and `install.py` reports `UNSET`.
 
 ### Removed
 
 - The `scripted-robot-scenes` skill, which was specific to one project.
+- `Ω-read` / `omega-read` and the `local_read` binary; the installer removes the deployed copies.
 
 ## [1.0.0] - 2026-11-12
 

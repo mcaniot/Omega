@@ -21,7 +21,6 @@ BINARY = os.environ.get('OMEGA_SHELL_GUARD_BINARY', str(Path.home() / '.agents/t
 GOLDEN = Path(__file__).with_name('fixtures') / 'shell_guard_golden.json.gz'
 HOME = '/home/tester'
 NATIVE = f'{HOME}/.agents/tools/robot-exec/native/run'
-LOCAL_READ = f'{HOME}/.agents/tools/robot-exec/local-read'
 
 
 def guard(stdin, home=HOME, args=()):
@@ -201,7 +200,6 @@ class GuardTest(unittest.TestCase):
             ([NATIVE, 'run', '--shell', 'make -j8 && pytest -q'], 'allow'),
             ([NATIVE, 'inspect', '/tmp/evidence'], 'allow'),
             ([NATIVE, 'prune'], 'allow'),
-            ([LOCAL_READ, 'status'], 'allow'),
             ([NATIVE, 'prune', '--apply'], 'ask'),
             ([NATIVE, 'run', '--', 'git', 'push'], 'ask'),
             ([NATIVE, 'run', '--', 'rm', '-r', 'build'], 'deny'),
@@ -212,7 +210,8 @@ class GuardTest(unittest.TestCase):
             ([NATIVE, 'run', '--shell', 'ros2 topic pub /cmd x'], 'ask'),
             ([NATIVE, 'run', '--', 'git', 'push', '--force'], 'deny'),
             ([NATIVE, 'run', '--', 'echo', '=ls'], 'deny'),
-            ([LOCAL_READ, 'bogus'], 'deny'),
+            ([f'{HOME}/.agents/tools/robot-exec/local-read', 'status'], 'deny'),
+            (['Ω-read', 'status'], 'deny'),
         ]
         for argv, expected in cases:
             self.assertEqual(decision(shlex.join(argv)), expected, argv)
@@ -250,13 +249,6 @@ class GuardTest(unittest.TestCase):
 
     def test_zsh_equals_argument_denied(self):
         self.assertDenied(self.call(shlex.join([NATIVE, 'run', '--', 'echo', '=ls'])))
-
-    def test_local_read_forms(self):
-        for argv in [[LOCAL_READ, 'status'], [LOCAL_READ, 'files'], [LOCAL_READ, 'text', 'a', 'b'],
-                     [LOCAL_READ, 'find', 'a', 'b']]:
-            self.assertEqual(self.call(shlex.join(argv)), {})
-        for argv in [[LOCAL_READ], [LOCAL_READ, 'bogus'], [LOCAL_READ, 'status', 'x'], [LOCAL_READ, 'find', 'a', 'b', 'c']]:
-            self.assertDenied(self.call(shlex.join(argv)))
 
     def test_internal_failure_fails_closed(self):
         # Nesting beyond the JSON parser's depth limit must deny, never pass through.
@@ -306,7 +298,7 @@ class GoldenTest(unittest.TestCase):
                       'remote host access', 'network upload', 'possible robot actuation',
                       'possible secret exposure', 'Invalid hook JSON.', 'Invalid hook input.',
                       'Missing shell command.', 'Malformed shell quoting.', 'Unwrapped or noncanonical shell command.',
-                      'Unsupported read capability or arguments.', 'Argument starting with "=" is expanded by zsh.',
+                      'Argument starting with "=" is expanded by zsh.',
                       'Deleting old evidence requires explicit user approval.',
                       'Guard internal error (RecursionError).']:
             self.assertTrue(any(label in reason for _, reason in outcomes), label)

@@ -49,9 +49,7 @@ omega --version               # → omega 1.0.0
 ```
 
 Keep `~/.local/bin` on `PATH`, then restart Claude Code and start a new Codex conversation.
-Anything the installer does not own is reported as `CONFLICT` and left untouched. The trusted
-reader `Ω-read` is limited to one project fixed at build time: install with
-`LOCAL_READ_PROJECT=/absolute/path/to/project python3 install.py --apply` to enable it. Details:
+Anything the installer does not own is reported as `CONFLICT` and left untouched. Details:
 [Installation](docs/installation.md).
 
 ## What gets installed
@@ -61,7 +59,7 @@ reader `Ω-read` is limited to one project fixed at build time: install with
 | `AGENTS.md` | Global instructions shared by Claude Code and Codex |
 | `agents/` | The three workers: `scout`, `coder`, `architect` |
 | `skills/` | Procedures loaded on demand (robotics, debugging, C++, retro, …) |
-| `rust/` | Native binaries: `Ω-run`, `Ω-inspect`, `Ω-read`, guards, `omega` CLI |
+| `rust/` | Native binaries: `Ω-run`, `Ω-inspect`, guards, `omega` CLI |
 | `prompts/`, `output-styles/` | Compact response prompts for Codex and Claude Code |
 | `systemd/` | Optional daily maintenance timers |
 

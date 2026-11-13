@@ -34,7 +34,6 @@ overrides at `rust/target/release/<name>`:
 | `tools/test_context_budget.py` | `rust/target/release/context_budget` (`OMEGA_CONTEXT_BUDGET_BINARY`) |
 | `tools/test_optimize.py`, `tools/test_version.py` | `rust/target/release/optimize` (`OMEGA_OPTIMIZE_BINARY`) |
 | `tools/test_omega_commands.py` | release `run` and `shell_guard`: command prefixes, installer links, dispatch, guard policy |
-| `tools/robot-exec/test_local_read.py` | builds its own binary with throwaway roots |
 | `tools/test_response_settings.py` | installer only: response settings, conflicts, idempotence, config symlinks |
 
 ## Release

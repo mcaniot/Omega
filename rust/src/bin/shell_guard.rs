@@ -3,7 +3,7 @@
 //! With `--allow-clean` (Claude only), a wrapper call that passes every check and matches no
 //! deny/ask policy returns `allow` instead of deferring to native permission prompts.
 //!
-//! Only the native `run` executor (run/inspect/prune) and `local-read` pass; every other
+//! Only the native `run` executor (run/inspect/prune) passes; every other
 //! shell command is denied. Stdout is the compact JSON of Python's
 //! `json.dumps(result, separators=(',', ':'))`. The JSON reader, `shlex` and `str.strip`
 //! follow CPython 3.12 so that fail-closed reasons stay stable
@@ -612,7 +612,6 @@ impl Decision {
 
 struct Guard {
     native: String,
-    local_read: String,
     optimize: String,
     guidance: String,
     allow_clean: bool,
@@ -655,10 +654,9 @@ impl Guard {
 
     fn new(allow_clean: bool) -> Self {
         let native = expanduser("/.agents/tools/robot-exec/native/run");
-        let local_read = expanduser("/.agents/tools/robot-exec/local-read");
         let optimize = expanduser("/.agents/tools/optimize");
         let guidance = GUIDANCE_TAIL.replace("{NATIVE}", &native);
-        Guard { native, local_read, optimize, guidance, allow_clean }
+        Guard { native, optimize, guidance, allow_clean }
     }
 
     /// Outcome of a fully checked, policy-clean wrapper call.
@@ -790,31 +788,14 @@ impl Guard {
             "omega-run" | "Ω-run" => Some("run"),
             "omega-inspect" | "Ω-inspect" => Some("inspect"),
             "omega-prune" | "Ω-prune" => Some("prune"),
-            "omega-read" | "Ω-read" => Some("read"),
             _ => None,
         };
         if let Some(subcommand) = alias {
-            let target = if subcommand == "read" { &self.local_read } else { &self.native };
-            if !Self::trusted_alias(&argv[0], target) {
+            if !Self::trusted_alias(&argv[0], &self.native) {
                 return self.denied("Untrusted omega command on PATH.");
             }
-            argv[0] = target.clone();
-            if subcommand != "read" {
-                argv.insert(1, subcommand.to_string());
-            }
-        }
-        if argv[0] == self.local_read {
-            let allowed: &[usize] = match argv.get(1).map(String::as_str) {
-                Some("status" | "files") => &[2],
-                Some("text") => &[3, 4, 5],
-                Some("find") => &[4],
-                _ => &[],
-            };
-            if !allowed.contains(&argv.len()) {
-                return self.denied("Unsupported read capability or arguments.");
-            }
-            // The compiled launcher validates roots, sensitive paths and numeric ranges.
-            return self.clean();
+            argv[0] = self.native.clone();
+            argv.insert(1, subcommand.to_string());
         }
         // Canonical quoting makes metacharacters literal arguments to the wrapper.
         // Without --allow-clean, native sandbox and approval checks still apply.
