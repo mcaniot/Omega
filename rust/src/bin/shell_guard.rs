@@ -20,6 +20,9 @@ redirection or cd (use --cwd).";
 /// Longest suggested rewrite; keeps hook output bounded.
 const MAX_REWRITE_BYTES: usize = 300;
 
+/// Longest command run through the wrapper on the model's behalf (heredoc scripts included).
+const MAX_AUTO_WRAP_BYTES: usize = 16 * 1024;
+
 /// CPython's recursion headroom for the C JSON scanner (see `Parser::fail`).
 const MAX_OPEN_CONTAINERS: usize = 9997;
 /// Python refuses `int()` of more decimal digits than this.
@@ -233,7 +236,8 @@ fn shlex_quote(arg: &str) -> String {
 
 /// Split commands whose quoting is inert in POSIX shells and zsh, even if not canonical:
 /// space/tab-separated words built from `shlex.quote`-safe or alphabetic characters,
-/// single-quoted text and double-quoted text without `$`, backquote, backslash or `!`.
+/// single-quoted text and double-quoted text without `$`, backquote or `!`, where a backslash
+/// may only precede itself or a character it does not escape (`"a\(b"`, regex escapes).
 /// Adjacent single-quoted runs (`'a''b'`) are refused because zsh RC_QUOTES reads them
 /// differently. Anything else (newlines, globs, `~`, expansions) returns `None`.
 fn inert_split(text: &str) -> Option<Vec<String>> {
@@ -261,7 +265,13 @@ fn inert_split(text: &str) -> Option<Vec<String>> {
                 loop {
                     match chars.next()? {
                         '"' => break,
-                        '$' | '`' | '\\' | '!' => return None,
+                        '$' | '`' | '!' => return None,
+                        // Shells and shlex agree on `\\` and on a backslash kept before an ordinary character.
+                        '\\' => match chars.next()? {
+                            '\\' => word.push('\\'),
+                            '$' | '`' | '!' | '"' | '\n' => return None,
+                            c => word.extend(['\\', c]),
+                        },
                         c => word.push(c),
                     }
                 }
@@ -671,13 +681,16 @@ impl Guard {
 
     /// Deny an unwrapped command, appending the exact wrapped command when one is safe to offer.
     fn denied_unwrapped(&self, reason: &str, command: &str, argv: &[String]) -> Option<Decision> {
-        let rewrite = Self::rewrite(command, argv).filter(|h| h.len() <= MAX_REWRITE_BYTES);
-        let hint = rewrite.as_ref().map(|h| format!(" Ready-to-run: {h}")).unwrap_or_default();
-        let mut decision = Decision::new("deny", format!("{reason}{hint} {}", self.guidance));
         // A miswritten wrapper call is not re-wrapped: nesting would hide the mistake.
-        let wrapper = argv.first().is_none_or(|a| a.contains('\u{3a9}') || a.starts_with("omega") || a.contains("/.agents/tools/"));
-        if !wrapper {
-            decision.rewrite = rewrite;
+        let head = argv.first().map(String::as_str).or_else(|| command.split(py_isspace).next()).unwrap_or_default();
+        let head = head.trim_start_matches(['\'', '"']);
+        let wrapper = head.contains('\u{3a9}') || head.starts_with("omega") || head.contains("/.agents/tools/");
+        let rewrite = if wrapper { None } else { Self::rewrite(command, argv) };
+        let hint = rewrite.as_ref().filter(|h| h.len() <= MAX_REWRITE_BYTES).map(|h| format!(" Ready-to-run: {h}")).unwrap_or_default();
+        let mut decision = Decision::new("deny", format!("{reason}{hint} {}", self.guidance));
+        // Unparsed quoting (empty argv) is never run on the model's behalf.
+        if !argv.is_empty() {
+            decision.rewrite = rewrite.filter(|h| h.len() <= MAX_AUTO_WRAP_BYTES);
         }
         Some(decision)
     }

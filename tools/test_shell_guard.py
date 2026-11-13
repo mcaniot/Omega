@@ -99,6 +99,10 @@ class GuardTest(unittest.TestCase):
         self.assertNotIn('Ready-to-run', self.reason('rm -rf /tmp/x'))
         self.assertNotIn('Ready-to-run', self.reason('echo ' + 'a' * 400))
 
+    def test_no_nested_rewrite_for_miswritten_wrapper_calls(self):
+        for command in ['Ω-run -- echo "$HOME"', f'{NATIVE} run -- ls | head', "'Ω-run' --shell 'echo \"unterminated"]:
+            self.assertNotIn('Ready-to-run', self.reason(command), command)
+
     def test_evidence_reads_suggest_bounded_inspect(self):
         directory = f'{HOME}/.agents/tasks/evidence/20260101T000000-native-abcdef'
         expected = {
@@ -128,6 +132,7 @@ class GuardTest(unittest.TestCase):
     def test_inert_noncanonical_quoting_is_accepted(self):
         for command in [f"{NATIVE} run -- sed -i '47,106d' f.py",
                         f'{NATIVE} run -- rg -n "a|b(c)" src',
+                        f'{NATIVE} run -- rg -n "\\.request\\(|a\\\\b" src --glob "*.py"',
                         f'{NATIVE}  run\t-- echo "it\'s" \'"q"\' x\'y\'"z" \'\'',
                         f"{NATIVE} run --shell \"cd repo; ls | head\"",
                         f'"{NATIVE}" inspect /tmp/e --search "Traceback"']:
@@ -136,7 +141,9 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(self.call(f'{NATIVE} run --shell "git push origin HEAD"')['hookSpecificOutput']
                          ['permissionDecision'], 'ask')
         for command in [f'{NATIVE} run -- echo "$HOME"', f'{NATIVE} run -- echo "`date`"',
-                        f'{NATIVE} run -- echo "a\\"b"', f'{NATIVE} run -- echo "hi!"',
+                        f'{NATIVE} run -- echo "a\\"b"', f'{NATIVE} run -- echo "a\\$b"', f'{NATIVE} run -- echo "a\\`b"',
+                        f'{NATIVE} run -- echo "a\\!b"', f'{NATIVE} run -- echo "a\\\nb"', f'{NATIVE} run -- echo "a\\',
+                        f'{NATIVE} run -- echo "hi!"',
                         f"{NATIVE} run -- echo 'a''b'", f'{NATIVE} run -- echo ~/x', f'{NATIVE} run -- ls *.py',
                         f'{NATIVE} run -- echo {{a,b}}', f'{NATIVE} run -- echo "a\nb"\necho leak',
                         f'{NATIVE} run -- echo a\\ b']:
@@ -239,8 +246,10 @@ class GuardTest(unittest.TestCase):
             self.assertEqual(wrapped['updatedInput'], {'command': shlex.join(['Ω-run', '--shell', "cd x && make 'a b'"]),
                                                        'timeout': 5000, 'description': 'd'})
             self.assertIn('Ω-run --shell', wrapped['additionalContext'])
+            heredoc = "python3 - <<'EOF'\n" + 'print("x")\n' * 60 + 'EOF'
+            self.assertEqual(output(heredoc)['updatedInput'], {'command': shlex.join(['Ω-run', '--shell', heredoc])})
             for command in ('git push', 'rm -r build', 'ros2 topic pub /cmd x', 'echo "unterminated',
-                            'Ω-run --shell "echo $HOME"', 'omega-run -- "ls"', 'echo ' + 'a' * 400):
+                            'Ω-run --shell "echo $HOME"', 'omega-run -- "ls"', 'echo ' + 'a' * 17000):
                 denied = output(command)
                 self.assertEqual(denied['permissionDecision'], 'deny', command)
                 self.assertNotIn('updatedInput', denied, command)

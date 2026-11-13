@@ -174,7 +174,8 @@ fn evaluate(payload: &Value) -> Value {
         let evidence = evidence.canonicalize().unwrap_or(evidence);
         if real.starts_with(evidence) {
             return deny(
-                "Large evidence file: use Ω-inspect ARTIFACT with --search or --offset/--lines; do not Read the full log.",
+                "Large evidence file: do not Read the log. Through Bash run 'Ω-inspect' EVIDENCE_DIR [--stream stderr] \
+                 with --search TEXT or --offset BYTES --lines N (at most 40 lines and 7000 bytes per call; continue at next_offset).",
             );
         }
     }

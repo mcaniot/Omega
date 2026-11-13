@@ -33,12 +33,20 @@ const EXIT_DATA_LOSS: i32 = 74;
 const EXIT_BLOCKED_DISK: i32 = 75;
 
 /// Final pipeline of a shell script: whether it is the whole script, whether it
-/// contains a pipe, and the words of its last command. Conservative lexer:
+/// contains a pipe, the words of its last command, and the words of its first
+/// command when every later stage is a plain filter. Conservative lexer:
 /// grouping, substitution and backticks yield `None` (no leniency applies).
 struct Tail {
     whole: bool,
     pipe: bool,
     words: Vec<Vec<u8>>,
+    filtered: Option<Vec<Vec<u8>>>,
+}
+
+/// Stages that only pass lines on and report their own errors on stderr.
+fn is_filter(words: &[Vec<u8>]) -> bool {
+    let name = words.first().map(|w| w.rsplit(|&b| b == b'/').next().unwrap_or_default());
+    matches!(name, Some(b"head" | b"tail" | b"cut" | b"sort" | b"uniq" | b"cat" | b"tr" | b"nl" | b"column"))
 }
 
 fn flush(words: &mut Vec<Vec<u8>>, word: &mut Vec<u8>) {
@@ -49,6 +57,7 @@ fn flush(words: &mut Vec<Vec<u8>>, word: &mut Vec<u8>) {
 
 fn tail(script: &[u8]) -> Option<Tail> {
     let (mut whole, mut pipe) = (true, false);
+    let mut filtered: Option<Vec<Vec<u8>>> = None;
     let (mut words, mut word): (Vec<Vec<u8>>, Vec<u8>) = (Vec::new(), Vec::new());
     let mut quote = 0u8;
     let mut i = 0;
@@ -82,6 +91,7 @@ fn tail(script: &[u8]) -> Option<Tail> {
             }
             b'|' if next != Some(b'|') => {
                 flush(&mut words, &mut word);
+                filtered = if pipe { filtered.filter(|_| is_filter(&words)) } else { Some(std::mem::take(&mut words)) };
                 pipe = true;
                 words.clear();
             }
@@ -95,6 +105,7 @@ fn tail(script: &[u8]) -> Option<Tail> {
                     whole = false;
                 }
                 pipe = false;
+                filtered = None;
                 words.clear();
             }
             _ => word.push(c),
@@ -106,7 +117,8 @@ fn tail(script: &[u8]) -> Option<Tail> {
     if !word.is_empty() {
         words.push(word);
     }
-    Some(Tail { whole, pipe, words })
+    let filtered = filtered.filter(|_| is_filter(&words));
+    Some(Tail { whole, pipe, words, filtered })
 }
 
 fn is_search(words: &[Vec<u8>]) -> bool {
@@ -119,11 +131,12 @@ fn is_search(words: &[Vec<u8>]) -> bool {
     }
 }
 
-/// Outside validation: `grep`/`rg`/`git grep` as the whole command exiting 1
-/// with no output is "no match", not a failure.
+/// Outside validation: `grep`/`rg`/`git grep` as the whole command, alone, last in
+/// its pipeline or feeding only plain filters (`rg x | head`), exiting 1 with no
+/// output is "no match", not a failure.
 fn is_no_match(cfg: &Config) -> bool {
     match &cfg.script {
-        Some(script) => tail(script).is_some_and(|t| t.whole && is_search(&t.words)),
+        Some(script) => tail(script).is_some_and(|t| t.whole && (is_search(&t.words) || t.filtered.is_some_and(|first| is_search(&first)))),
         None => is_search(&cfg.command),
     }
 }
