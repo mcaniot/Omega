@@ -18,19 +18,37 @@ How omega is organized and the rules that keep it small.
 
 ## Layout
 
-| Path | Deployed to | Role |
-| --- | --- | --- |
-| `AGENTS.md` | `~/.agents/AGENTS.md` (`~/.claude/CLAUDE.md` imports it, `~/.codex/AGENTS.md` links to it) | Global instructions, loaded in every session |
-| `prompts/codex.md` | `~/.codex/instructions.md` (link), selected by `model_instructions_file` | Compact replacement for Codex's stock base prompt; final response only |
-| `output-styles/final-only.md` | `~/.claude/output-styles/final-only.md` (link), selected by `outputStyle` | Final response only, preserving Claude's coding instructions |
-| `agents/*.md` | `~/.claude/agents/` (link), `~/.codex/agents/*.toml` (generated) | The three workers |
-| `skills/*/SKILL.md` | `~/.agents/skills/` (Codex scans it), `~/.claude/skills/` | On-demand procedures; only the `Use when …` description is loaded until a task matches |
-| `rust/` | `~/.agents/tools/robot-exec/native/run`, `~/.agents/tools/robot-exec/local-read`, `~/.agents/tools/{shell_guard,context_guard,context_budget,optimize}`, `~/.claude/hooks/session_name` | Cargo crate `omega-tools`: evidence executor, trusted reader, [hooks](hooks.md), `omega` CLI. Installed as real 0700 files |
-| Command links | `~/.local/bin/Ω-{run,read,inspect,prune,optimize}`, `~/.local/bin/omega`, `omega-*` | Short names for the binaries |
-| `systemd/` | linked by hand ([installation](installation.md#schedule-maintenance)) | Daily maintenance timers |
-| `tools/`, `hooks/` | — | Tests and golden fixtures for the binaries |
-| `docs/` | — | This documentation and measurement notes |
-| `.github/workflows/` | — | `Tests` on every push, `Release` on every `v*` tag |
+What each source is for:
+
+| Source | Role |
+| --- | --- |
+| `AGENTS.md` | Global instructions, loaded in every session |
+| `prompts/codex.md` | Compact replacement for Codex's stock base prompt; final response only |
+| `output-styles/final-only.md` | Final response only, preserving Claude's coding instructions |
+| `agents/*.md` | The three workers |
+| `skills/*/SKILL.md` | On-demand procedures; only the `Use when …` description is loaded until a task matches |
+| `rust/` | Cargo crate `omega-tools`: evidence executor, trusted reader, [hooks](hooks.md), `omega` CLI |
+| `systemd/` | Daily maintenance timers |
+| `tools/`, `hooks/` | Tests and golden fixtures for the binaries |
+| `docs/` | This documentation and measurement notes |
+| `.github/workflows/` | `Tests` on every push, `Release` on every `v*` tag |
+
+Where the installer puts it:
+
+- `AGENTS.md` → `~/.agents/AGENTS.md`; `~/.claude/CLAUDE.md` imports it and
+  `~/.codex/AGENTS.md` links to it.
+- `prompts/codex.md` → `~/.codex/instructions.md` (link), selected by `model_instructions_file`.
+- `output-styles/final-only.md` → `~/.claude/output-styles/final-only.md` (link), selected by
+  `outputStyle`.
+- `agents/*.md` → `~/.claude/agents/` (links) and `~/.codex/agents/*.toml` (generated).
+- `skills/` → `~/.agents/skills/` (Codex scans it) and `~/.claude/skills/` (links).
+- `rust/` → real 0700 files: `~/.agents/tools/robot-exec/native/run`,
+  `~/.agents/tools/robot-exec/local-read`,
+  `~/.agents/tools/{shell_guard,context_guard,context_budget,optimize}` and
+  `~/.claude/hooks/session_name`.
+- Command links → `~/.local/bin/Ω-{run,read,inspect,prune,optimize}`, `~/.local/bin/omega`
+  and the `omega-*` ASCII names.
+- `systemd/` → linked by hand ([installation](installation.md#schedule-maintenance)).
 
 Runtime state stays outside the repository: `~/.agents/tasks/` (`active/`, `completed/`,
 `evidence/`, `reports/`, `state/`) and `~/.agents/state/`.

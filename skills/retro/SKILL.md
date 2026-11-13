@@ -31,7 +31,7 @@ Goal: the same mistake never costs tokens twice, and the always-loaded context d
 | Latency, jitter, throughput, profiling | `skills/robotics-performance/references/lessons.md` |
 | Choice or sufficiency of checks | `skills/robotics-validation/references/lessons.md` |
 | Root-cause method, flaky or solver failures | `skills/systematic-debugging/references/lessons.md` |
-| Scripted scenes, poses, camera, export | `~/.agents/private-skills/scripted-robot-scenes/references/lessons.md` |
+| A private skill installed outside this repository | that skill's `references/lessons.md` |
 | One repository (paths, build, launch, contracts) | that repository's `AGENTS.md`, after user approval |
 | Most sessions, whatever the task | Omega `AGENTS.md`, after user approval, staying under 4400 bytes |
 

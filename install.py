@@ -195,6 +195,8 @@ def install_binaries(apply, names=None):
         yield dest, 'CONFLICT (directory, left untouched)'
     if blocked:
         return
+    if 'local_read' in binaries and not os.environ.get('LOCAL_READ_PROJECT', '').startswith('/'):
+        yield binaries['local_read'], 'UNSET (LOCAL_READ_PROJECT: Ω-read will refuse every request)'
     if not apply:
         for dest in binaries.values():
             yield dest, 'would build and install'
@@ -480,7 +482,7 @@ def main():
     for dest, status in results:
         if status != 'ok':
             print(f'{status:12s} {dest}')
-    problems = [s for _, s in results if s.startswith(('CONFLICT', 'STALE'))]
+    problems = [s for _, s in results if s.startswith(('CONFLICT', 'STALE', 'UNSET'))]
     print(f'{len(results)} targets, {len(problems)} need attention' + ('' if args.apply else ' (dry run)'))
     return 1 if problems else 0
 

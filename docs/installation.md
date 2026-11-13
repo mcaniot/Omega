@@ -10,6 +10,10 @@ python3 install.py            # dry run: lists what would change
 python3 install.py --apply    # create links, regenerate the Codex agents, build and install the Rust binaries
 ```
 
+`Ω-read` reads only one project, chosen at build time: run the installer as
+`LOCAL_READ_PROJECT=/absolute/path/to/project python3 install.py --apply`. Without it the
+installer reports `UNSET` and `Ω-read` refuses every request; everything else works.
+
 Then:
 
 1. Keep `~/.local/bin` on `PATH`.

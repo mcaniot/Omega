@@ -187,6 +187,19 @@ class LocalReadTest(unittest.TestCase):
         for leaked in ('GIT_DIR', 'FOO', 'PYTHONPATH', 'LD_PRELOAD'):
             self.assertNotIn(leaked, text)
 
+    def test_build_without_project_refuses(self):
+        target = self.base / 'target-no-project'
+        env = {key: value for key, value in os.environ.items() if key != 'LOCAL_READ_PROJECT'}
+        subprocess.run(['cargo', 'build', '--release', '--offline', '--bin', 'local_read'], cwd=RUST_DIR,
+                       env={**env, 'LOCAL_READ_TOOLS': str(self.fixture.tools), 'CARGO_TARGET_DIR': str(target)},
+                       check=True, capture_output=True)
+        lone = self.directory / 'no-project'
+        shutil.copy(target / 'release' / 'local_read', lone)
+        for argv in (['status'], ['--internal-text', 'a.txt']):
+            done = subprocess.run([str(lone), *argv], capture_output=True, env={'PATH': '/usr/bin:/bin'})
+            self.assertEqual(done.returncode, 64)
+            self.assertIn(b'built without an absolute LOCAL_READ_PROJECT', done.stderr)
+
     def test_launcher_without_runner(self):
         lone = self.base / 'lone'
         shutil.copy(self.directory / 'local-read', lone)

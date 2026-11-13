@@ -65,7 +65,9 @@ Targets evidence older than `--days` (default 14) that no active or completed ta
 ```
 
 Restricted source reads (`status`, `files`, `text`, `find`) under the single project root compiled
-into it (`LOCAL_READ_PROJECT`). It is not advertised in `AGENTS.md` or the agents, which read files
+into it. There is no default: build or install with `LOCAL_READ_PROJECT=/absolute/path`; a binary
+built without it refuses every request. The root is fixed on purpose: following the current
+directory would let an agent read anywhere by changing directory. It is not advertised in `AGENTS.md` or the agents, which read files
 with their native Read tool. Capabilities and limits: [trusted reads](../tools/robot-exec/README.md).
 
 ## `Ω-resume`

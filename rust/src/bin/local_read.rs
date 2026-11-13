@@ -1,7 +1,8 @@
 //! Narrow read capability launcher: fixed read operations, never arbitrary commands or options.
 //! Trusted read launcher (see `tools/robot-exec/test_local_read.py` for the contract).
 //!
-//! Approved roots can be overridden at build time with LOCAL_READ_PROJECT and LOCAL_READ_TOOLS.
+//! The project root must be set at build time with LOCAL_READ_PROJECT (absolute path); a binary
+//! built without it refuses every request. LOCAL_READ_TOOLS overrides the tools root.
 
 use std::ffi::{CStr, CString};
 use std::io::{BufRead, BufReader, Write};
@@ -14,7 +15,8 @@ mod ledger;
 
 const PROJECT: &str = match option_env!("LOCAL_READ_PROJECT") {
     Some(root) => root,
-    None => "/home/mcaniot/Documents/project",
+    // No default: an empty root would match every absolute path, so main() refuses to run.
+    None => "",
 };
 const TOOLS: &str = match option_env!("LOCAL_READ_TOOLS") {
     Some(root) => root,
@@ -265,6 +267,9 @@ fn main() {
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     if let Ok(session) = std::env::var("CLAUDE_CODE_SESSION_ID") {
         let _ = SESSION.set(session);
+    }
+    if !PROJECT.starts_with('/') || PROJECT.len() < 2 {
+        reject("built without an absolute LOCAL_READ_PROJECT; rebuild with LOCAL_READ_PROJECT=/path/to/project");
     }
     trusted_environment();
     let args: Vec<Vec<u8>> = std::env::args_os().map(OsStringExt::into_vec).collect();

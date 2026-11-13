@@ -49,8 +49,24 @@ omega --version               # → omega 1.0.0
 ```
 
 Keep `~/.local/bin` on `PATH`, then restart Claude Code and start a new Codex conversation.
-Anything the installer does not own is reported as `CONFLICT` and left untouched. Details:
+Anything the installer does not own is reported as `CONFLICT` and left untouched. The trusted
+reader `Ω-read` is limited to one project fixed at build time: install with
+`LOCAL_READ_PROJECT=/absolute/path/to/project python3 install.py --apply` to enable it. Details:
 [Installation](docs/installation.md).
+
+## What gets installed
+
+| Source | Role |
+| --- | --- |
+| `AGENTS.md` | Global instructions shared by Claude Code and Codex |
+| `agents/` | The three workers: `scout`, `coder`, `architect` |
+| `skills/` | Procedures loaded on demand (robotics, debugging, C++, retro, …) |
+| `rust/` | Native binaries: `Ω-run`, `Ω-inspect`, `Ω-read`, guards, `omega` CLI |
+| `prompts/`, `output-styles/` | Compact response prompts for Codex and Claude Code |
+| `systemd/` | Optional daily maintenance timers |
+
+Where each piece lands under `~/.agents`, `~/.claude` and `~/.codex`:
+[Architecture](docs/architecture.md#layout).
 
 ## Everyday use
 
@@ -80,8 +96,6 @@ Agents call these themselves; the guards rewrite plain shell commands to `Ω-run
 
 omega follows [Semantic Versioning](https://semver.org/). Changes are listed in
 [CHANGELOG.md](CHANGELOG.md); each release is a `vX.Y.Z` tag with a GitHub Release.
-
-The previous Omega project (memory, code graph, dashboard) is archived under the `omega-legacy` tag.
 
 ## License
 
