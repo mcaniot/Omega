@@ -18,8 +18,8 @@ jobs:
       OMEGA_SHELL_GUARD_BINARY: ${{ github.workspace }}/rust/target/release/shell_guard
       OMEGA_SESSION_NAME_BINARY: ${{ github.workspace }}/rust/target/release/session_name
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Install Rust
