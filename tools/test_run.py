@@ -450,7 +450,8 @@ class ReliabilityTests(unittest.TestCase):
     def test_search_without_match_is_not_a_failure(self):
         here = str(Path(__file__).parent)
         needle = 'qq' + 'needle'
-        for script in ('grep zzz /dev/null', 'cat /dev/null | rg zzz', f'git grep {needle} -- .'):
+        for script in ('grep zzz /dev/null', 'cat /dev/null | rg zzz', f'git grep {needle} -- .',
+                       'grep zzz /dev/null | cat', 'rg -n zzz /dev/null 2>/dev/null | cut -c1-80 | head -5'):
             code, result = run_shell(script, '--cwd', here)
             self.assertEqual((code, result['status'], result['exit_code']), (0, 'NO_MATCH', 0), script)
         code, result = run_with('run', '--', 'grep', 'zzz', '/dev/null')
@@ -458,7 +459,8 @@ class ReliabilityTests(unittest.TestCase):
         for arguments in (('--validation', '--', 'grep', 'zzz', '/dev/null'), ('--', 'false')):
             code, result = run_with('run', *arguments)
             self.assertEqual((code, result['status']), (1, 'FAIL'), arguments)
-        for script, expected in (('grep zzz /dev/null | cat', 1), ('grep zzz /dev/null; echo done', 1), ('grep zzz /nonexistent-file', 2)):
+        for script, expected in (('grep zzz /dev/null | false', 1), ('grep zzz /dev/null | cat | false', 1), ('true | false | cat', 1),
+                                 ('grep zzz /dev/null; echo done', 1), ('grep zzz /nonexistent-file', 2)):
             code, result = run_shell(script)
             self.assertEqual((code, result['status']), (expected, 'FAIL'), script)
 

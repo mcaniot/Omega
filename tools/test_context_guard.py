@@ -56,7 +56,7 @@ class ContextGuardTest(unittest.TestCase):
         alias.symlink_to(path)
         for file in (path, alias):
             result = self.evaluate(file, limit=20)
-            self.assertIn('Ω-inspect', result['hookSpecificOutput']['permissionDecisionReason'])
+            self.assertIn("'Ω-inspect' EVIDENCE_DIR", result['hookSpecificOutput']['permissionDecisionReason'])
 
     def test_small_missing_and_media_files_keep_native_behavior(self):
         small = self.home / 'small.py'

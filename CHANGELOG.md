@@ -17,6 +17,14 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 - `Ω-run` writes back stdout, stderr and the final record first, then flushes all three
   concurrently so they share one ext4 journal commit: small output about 21 → 13 ms per call.
   `result.json` is only replaced once every flush succeeded; the `DATA_LOSS` guarantee is unchanged.
+- `shell_guard` accepts a backslash inside a double-quoted wrapper argument when shells and
+  `shlex` read it alike (`rg "a\.b\("`); `\$`, `` \` ``, `\!`, `\"` and backslash-newline stay denied.
+- `shell_guard` auto-wraps unwrapped commands up to 16 KiB (heredoc scripts included) instead of
+  300 bytes, and no longer suggests a nested `Ω-run --shell 'Ω-run …'` for a miswritten wrapper call.
+- `Ω-run` reports `NO_MATCH` when a search that is the whole script feeds only plain filters
+  (`rg x | cut -c1-80 | head`), not only when it runs alone or last in its pipeline.
+- The `context_guard` denial for large evidence files spells out the `Ω-inspect` call and its
+  40-line / 7000-byte limits.
 
 ### Removed
 
