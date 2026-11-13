@@ -98,7 +98,9 @@ class SessionNameTest(unittest.TestCase):
 
     def observe(self, side, raw, now, env_extra=None, cwd=None):
         """Exit code, stdout and registry text after one event."""
-        code, out = side.run(raw, now, env_extra, cwd)
+        # Events without a usable cwd resolve "." from the process cwd: pin it to the fixture repo
+        # on main so results do not depend on the branch of the checkout running the tests.
+        code, out = side.run(raw, now, env_extra, cwd if cwd is not None else self.plain)
         return [code, out.decode('utf-8', 'surrogateescape'), side.registry_text()]
 
     def check(self, side, raw, now, env_extra=None, cwd=None):
