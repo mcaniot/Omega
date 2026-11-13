@@ -149,10 +149,7 @@ fn audit(
     let mut sorted_calls: Vec<_> = calls.iter().collect();
     sorted_calls.sort_by_key(|(id, _)| (call_order.get(*id).copied().unwrap_or(0), *id));
     for (id, call) in sorted_calls {
-        let signature = format!(
-            "{:x}",
-            Sha256::digest(format!("{}:{}", call["name"], call["input"]).as_bytes())
-        );
+        let signature = hex(&Sha256::digest(format!("{}:{}", call["name"], call["input"]).as_bytes()));
         if !carried.contains(id) && !signatures.insert(signature) {
             repeated += 1;
         }
@@ -282,7 +279,12 @@ fn prefix_digest(path: &Path, length: u64) -> Result<String, String> {
         }
         digest.update(&buffer[..size]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex(&digest.finalize()))
+}
+
+/// Lowercase hex of a digest (sha2 0.11 digests no longer implement `LowerHex`).
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn timestamp() -> Result<u64, String> {

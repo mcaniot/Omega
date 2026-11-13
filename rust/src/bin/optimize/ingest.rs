@@ -68,7 +68,7 @@ pub fn read_fingerprints(call: &Value, result: &Value) -> HashSet<String> {
                     .map_or(line, |(_, s)| s)
             } else { line };
             if line.len() >= 32 {
-                found.insert(format!("{:x}", Sha256::digest(line.as_bytes())));
+                found.insert(super::hex(&Sha256::digest(line.as_bytes())));
             }
         }
     }
