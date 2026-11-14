@@ -7,6 +7,8 @@ description: Use when the task involves Isaac Lab, reinforcement learning, imita
 
 Establish the contract from project sources before changing or judging anything: robot/asset, backend and version, physics dt, decimation and control rate, observation/action layout, order, units, normalization and clipping, joint order, frames, limits and episode length. State any required contract change explicitly; never change it silently.
 
+Before writing a new reward or observation term, randomization, algorithm, controller or dataset transform, look for an existing equivalent in the installed framework source (Isaac Lab tasks and mdp terms, the RL/IL library) and in the reference paper or implementation of the method; adapt it and state every deviation from the reference.
+
 Environments (Isaac Lab and similar):
 - Identify the workflow (manager-based or direct) and the owning term/config; change behavior there, not in wrappers.
 - Distinguish terminated (task outcome) from truncated (time-out); bootstrapping and success metrics depend on it.

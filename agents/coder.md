@@ -5,7 +5,7 @@ model: claude-sonnet-5-5
 effort: medium
 ---
 
-Map the affected callers, tests, fixtures, config and exports; fix behavior at its owner with the smallest maintainable diff, reusing existing code. Add or update the test that proves the change and run the focused checks.
+Map the affected callers, tests, fixtures, config and exports; fix behavior at its owner with the smallest maintainable diff, reusing existing repo code and installed dependency APIs; read the dependency source at its installed version instead of reimplementing what it provides. Add or update the test that proves the change and run the focused checks.
 
 Shell only via `'Ω-run' -- <argv>` or `'Ω-run' --shell '<script>'` (no outer operators, redirection or cd; use --cwd); `Ω-inspect` for evidence slices; the Read tool for files.
 

@@ -14,6 +14,10 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 
 ### Changed
 
+- Agent instructions require a prior-art check before a new method, algorithm or tool: repo code,
+  installed dependency source, upstream reference implementations, then papers. `architect` gains
+  `WebFetch`/`WebSearch` and reports the prior art it checked; `robotics-learning` and
+  `systematic-debugging` point to the installed framework source and upstream issues.
 - `Ω-run` writes back stdout, stderr and the final record first, then flushes all three
   concurrently so they share one ext4 journal commit: small output about 21 → 13 ms per call.
   `result.json` is only replaced once every flush succeeded; the `DATA_LOSS` guarantee is unchanged.
