@@ -40,15 +40,19 @@ fn deny_patterns() -> Vec<String> {
         // Any rm invocation (also /bin/rm, xargs rm, -- rm); not --rm flags. `git rm` is masked in `policy`.
         r"(?:^|[^\w.\-])rm(?:\s|$)".to_string(),
         format!(r"\bmkfs(?:\.\w+)?\b|\bdd\s+{ARGS}of=/dev/"),
+        // `pkill -f PATTERN` with nothing (`[x]`, `^`) keeping the pattern from matching its own command line.
+        // Command position only (script or line start, after `;`, `&`, `|`, `(`), so prose naming it passes.
+        format!(r"(?:^|[;&|(])\s*pkill\s+{ARGS}(?:-[a-zA-Z0-9]*f[a-zA-Z0-9]*|--full)\s+[^;&|\[\^\n]*(?:[;&|]|$)"),
     ]
 }
 
-const DENY_LABELS: [&str; 4] = ["privilege escalation", "git force push", "rm", "raw device write"];
-const DENY_HINTS: [&str; 4] = [
+const DENY_LABELS: [&str; 5] = ["privilege escalation", "git force push", "rm", "raw device write", "pkill -f self-match"];
+const DENY_HINTS: [&str; 5] = [
     "Ask the user to run it themselves.",
     "Ask the user to run it themselves.",
     "Delete with trash-put PATH... (recoverable via trash-restore); never rm.",
     "Ask the user to run it themselves.",
+    "The pattern also matches the calling shell and the wrapper, which die with it. Kill the PIDs listed by pgrep, or bracket one letter: pkill -f '[n]ame'.",
 ];
 
 fn ask_patterns() -> Vec<String> {
@@ -688,7 +692,8 @@ impl Guard {
         let rewrite = if wrapper { None } else { Self::rewrite(command, argv) };
         let hint = rewrite.as_ref().filter(|h| h.len() <= MAX_REWRITE_BYTES).map(|h| format!(" Ready-to-run: {h}")).unwrap_or_default();
         // A ready-to-run form already is the fix.
-        let correction = if hint.is_empty() { Self::correction(command, wrapper, head.ends_with("inspect"), !argv.is_empty()) } else { "" };
+        let inspect = head.ends_with("inspect") || argv.get(1).is_some_and(|a| a == "inspect");
+        let correction = if hint.is_empty() { Self::correction(command, wrapper, inspect, !argv.is_empty()) } else { "" };
         let mut decision = Decision::new("deny", format!("{reason}{hint}{correction} {}", self.guidance));
         // Unparsed quoting (empty argv) is never run on the model's behalf.
         if !argv.is_empty() {

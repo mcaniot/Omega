@@ -14,6 +14,8 @@ What each omega hook does, when it runs and what happens if it fails.
 - A plain command that the policy would allow once wrapped is **rewritten** to `Ω-run --shell`
   instead of being denied (Claude only).
 - File removal commands are denied, with a hint to use `trash-put`.
+- `pkill -f PATTERN` is denied unless the pattern cannot match its own command line (`[n]ame`,
+  `^anchor`): it would kill the calling shell and the wrapper, leaving no result.
 - It carries `onFailure: block`: a crash or timeout blocks the command instead of letting it
   through, because it is a safety control.
 

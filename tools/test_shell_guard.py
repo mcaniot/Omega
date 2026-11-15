@@ -109,6 +109,7 @@ class GuardTest(unittest.TestCase):
             f"'Ω-inspect' {evidence} 2>&1 | head -200": 'Ω-inspect is already bounded',
             f"'Ω-inspect' {evidence} --offset 0; 'Ω-inspect' {evidence} --offset 2900": 'Ω-inspect is already bounded',
             f'{NATIVE} run -- ls | head': 'Nothing may precede or follow the wrapper',
+            f'{NATIVE} inspect {evidence} | head -5': 'Ω-inspect is already bounded',
             '\'Ω-run\' -- python3 -c "print(1 != 2, \'||\')"': 'Double quotes keep $, backquote and ! live',
             "'Ω-run' --shell 'python3 - <<\"EOF\"\nprint(\"it's\")\nEOF'": 'Heredoc: create the file',
             "cat > /tmp/s.py <<'EOF'\n# don't\n" + 'x = 1\n' * 60 + 'EOF': 'Heredoc: create the file',
@@ -130,6 +131,16 @@ class GuardTest(unittest.TestCase):
             reason = self.reason(command)
             for fix in expected.values():
                 self.assertNotIn(fix, reason, command)
+
+    def test_pkill_full_pattern_must_not_match_its_own_command_line(self):
+        for argv in (['pkill', '-f', 'datagen.collect'], ['pkill', '-9', '-f', 'x'], ['pkill', '--full', 'train.py']):
+            self.assertIn('pkill -f self-match', self.reason(shlex.join([NATIVE, 'run', '--', *argv])))
+        script = 'pkill -f "a b" || true; sleep 1'
+        self.assertIn('pkill -f self-match', self.reason(shlex.join([NATIVE, 'run', '--shell', script])))
+        for argv in (['pkill', '-f', '[d]atagen.collect'], ['pkill', '-f', '^python3 -m datagen'],
+                     ['pkill', '-x', 'python3'], ['pgrep', '-af', 'datagen'],
+                     ['echo', 'the guard denies pkill -f name in prose']):
+            self.assertEqual(self.call(shlex.join([NATIVE, 'run', '--', *argv])), {})
 
     def test_evidence_reads_suggest_bounded_inspect(self):
         directory = f'{HOME}/.agents/tasks/evidence/20260101T000000-native-abcdef'
@@ -331,6 +342,8 @@ class GoldenTest(unittest.TestCase):
         kinds = {kind for kind, _ in outcomes}
         self.assertEqual(kinds, {'deny', 'ask', 'pass'})
         for label in ['privilege escalation', 'git force push', 'rm. Delete with trash-put', 'raw device write',
+                      'pkill -f self-match', 'Ω-inspect is already bounded', 'Double quotes keep $, backquote and ! live',
+                      'Heredoc: create the file', 'Nothing may precede or follow the wrapper',
                       'sensitive credential access', 'git history or remote change', 'git destructive change',
                       'remote host access', 'network upload', 'possible robot actuation',
                       'possible secret exposure', 'Invalid hook JSON.', 'Invalid hook input.',

@@ -461,7 +461,10 @@ class ReliabilityTests(unittest.TestCase):
             code, result = run_with('run', *arguments)
             self.assertEqual((code, result['status']), (1, 'FAIL'), arguments)
         for script, expected in (('grep zzz /dev/null | false', 1), ('grep zzz /dev/null | cat | false', 1), ('true | false | cat', 1),
-                                 ('grep zzz /dev/null; echo done', 1), ('grep zzz /nonexistent-file', 2)):
+                                 ('grep zzz /dev/null; echo done', 1), ('grep zzz /nonexistent-file', 2),
+                                 # A discarded stderr would hide the failed first stage behind the later search.
+                                 ('rg zzz /nonexistent-file 2>/dev/null | grep -v yyy | cut -c1-80', 1),
+                                 ('cat /nonexistent-file 2>/dev/null | rg zzz', 1)):
             code, result = run_shell(script)
             self.assertEqual((code, result['status']), (expected, 'FAIL'), script)
 

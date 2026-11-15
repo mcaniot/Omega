@@ -35,6 +35,13 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
   ready-to-run form is offered. The policy is unchanged; the golden fixture is re-recorded for
   the 53 cases whose only change is the added sentence.
 - `omega optimize` classifies timed-out runs as `timeout` in `error_classes`, apart from `real`.
+- `Ω-run` keeps a pipeline a failure when a search after the first stage exits 1 while stderr is
+  discarded (`rg x missing 2>/dev/null | grep -v y`): the first stage's error would be hidden.
+- A `TIMEOUT` result carries a note against rerunning the command unchanged in the foreground.
+- `shell_guard` denies `pkill -f PATTERN` unless the pattern cannot match its own command line
+  (`[n]ame`, `^anchor`): it kills the calling shell and the wrapper, leaving no result. The golden
+  fixture gains 17 recorded cases covering this rule and every denial fix; one existing case
+  (`run inspect … &`) now gets the `Ω-inspect` sentence.
 - The `context_guard` denial for large evidence files spells out the `Ω-inspect` call and its
   40-line / 7000-byte limits.
 
