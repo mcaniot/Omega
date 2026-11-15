@@ -26,7 +26,15 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 - `shell_guard` auto-wraps unwrapped commands up to 16 KiB (heredoc scripts included) instead of
   300 bytes, and no longer suggests a nested `Ω-run --shell 'Ω-run …'` for a miswritten wrapper call.
 - `Ω-run` reports `NO_MATCH` when a search that is the whole script feeds only plain filters
-  (`rg x | cut -c1-80 | head`), not only when it runs alone or last in its pipeline.
+  (`rg x | cut -c1-80 | head`), not only when it runs alone or last in its pipeline. `pgrep`
+  counts as a search, and so does a search stage after the first one
+  (`pgrep -af x | grep -v y | cut -c1-80`).
+- A `shell_guard` denial of a miswritten wrapper call names its fix: `Ω-inspect` followed by a
+  pipe, redirection or second call; operators outside `Ω-run`; `$`, backquote or `!` left live in
+  double quotes; a heredoc that does not parse. The check is quote-aware and stays silent when a
+  ready-to-run form is offered. The policy is unchanged; the golden fixture is re-recorded for
+  the 53 cases whose only change is the added sentence.
+- `omega optimize` classifies timed-out runs as `timeout` in `error_classes`, apart from `real`.
 - The `context_guard` denial for large evidence files spells out the `Ω-inspect` call and its
   40-line / 7000-byte limits.
 

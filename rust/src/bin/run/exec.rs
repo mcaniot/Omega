@@ -91,7 +91,7 @@ fn tail(script: &[u8]) -> Option<Tail> {
             }
             b'|' if next != Some(b'|') => {
                 flush(&mut words, &mut word);
-                filtered = if pipe { filtered.filter(|_| is_filter(&words)) } else { Some(std::mem::take(&mut words)) };
+                filtered = if pipe { filtered.filter(|_| is_filter(&words) || is_search(&words)) } else { Some(std::mem::take(&mut words)) };
                 pipe = true;
                 words.clear();
             }
@@ -125,14 +125,15 @@ fn is_search(words: &[Vec<u8>]) -> bool {
     let mut words = words.iter().skip_while(|w| w.contains(&b'='));
     let Some(first) = words.next() else { return false };
     match first.rsplit(|&b| b == b'/').next().unwrap_or_default() {
-        b"grep" | b"egrep" | b"fgrep" | b"rg" => true,
+        b"grep" | b"egrep" | b"fgrep" | b"rg" | b"pgrep" => true,
         b"git" => words.next().is_some_and(|w| w == b"grep"),
         _ => false,
     }
 }
 
-/// Outside validation: `grep`/`rg`/`git grep` as the whole command, alone, last in
-/// its pipeline or feeding only plain filters (`rg x | head`), exiting 1 with no
+/// Outside validation: `grep`/`rg`/`git grep`/`pgrep` as the whole command, alone, last in
+/// its pipeline or feeding only plain filters and further searches
+/// (`rg x | head`, `pgrep -af x | grep -v y | cut -c1-80`), exiting 1 with no
 /// output is "no match", not a failure.
 fn is_no_match(cfg: &Config) -> bool {
     match &cfg.script {

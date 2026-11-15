@@ -451,7 +451,8 @@ class ReliabilityTests(unittest.TestCase):
         here = str(Path(__file__).parent)
         needle = 'qq' + 'needle'
         for script in ('grep zzz /dev/null', 'cat /dev/null | rg zzz', f'git grep {needle} -- .',
-                       'grep zzz /dev/null | cat', 'rg -n zzz /dev/null 2>/dev/null | cut -c1-80 | head -5'):
+                       'grep zzz /dev/null | cat', 'rg -n zzz /dev/null 2>/dev/null | cut -c1-80 | head -5',
+                       'pgrep -x zzqqzz', 'grep zzz /dev/null | grep -v yyy | cut -c1-80'):
             code, result = run_shell(script, '--cwd', here)
             self.assertEqual((code, result['status'], result['exit_code']), (0, 'NO_MATCH', 0), script)
         code, result = run_with('run', '--', 'grep', 'zzz', '/dev/null')

@@ -687,12 +687,52 @@ impl Guard {
         let wrapper = head.contains('\u{3a9}') || head.starts_with("omega") || head.contains("/.agents/tools/");
         let rewrite = if wrapper { None } else { Self::rewrite(command, argv) };
         let hint = rewrite.as_ref().filter(|h| h.len() <= MAX_REWRITE_BYTES).map(|h| format!(" Ready-to-run: {h}")).unwrap_or_default();
-        let mut decision = Decision::new("deny", format!("{reason}{hint} {}", self.guidance));
+        // A ready-to-run form already is the fix.
+        let correction = if hint.is_empty() { Self::correction(command, wrapper, head.ends_with("inspect"), !argv.is_empty()) } else { "" };
+        let mut decision = Decision::new("deny", format!("{reason}{hint}{correction} {}", self.guidance));
         // Unparsed quoting (empty argv) is never run on the model's behalf.
         if !argv.is_empty() {
             decision.rewrite = rewrite.filter(|h| h.len() <= MAX_AUTO_WRAP_BYTES);
         }
         Some(decision)
+    }
+
+    /// The one fix for a command that is never run on the model's behalf: a heredoc that did not
+    /// parse, or a miswritten wrapper call. Empty when the generic guidance is all there is to say.
+    fn correction(command: &str, wrapper: bool, inspect: bool, parsed: bool) -> &'static str {
+        // Quote-aware: an operator inside an argument is not an outer one.
+        let (mut quote, mut outer, mut live) = (None::<char>, false, false);
+        let mut chars = command.chars();
+        while let Some(c) = chars.next() {
+            match (quote, c) {
+                (None, '\'' | '"') => quote = Some(c),
+                (None, '\\') => _ = chars.next(),
+                (None, '|' | ';' | '&' | '<' | '>' | '\n') => outer = true,
+                (Some(q), _) if c == q => quote = None,
+                (Some('"'), '\\') => live |= matches!(chars.next(), Some('$' | '`' | '!' | '"' | '\n')),
+                (Some('"'), '$' | '`' | '!') => live = true,
+                _ => {}
+            }
+        }
+        // `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`, `<<\EOF`; not a quoted "<<" or a spaced shift.
+        let heredoc = command.match_indices("<<").any(|(at, _)| {
+            let rest = command[at + 2..].trim_start_matches('-');
+            let rest = rest.strip_prefix(['\'', '"', '\\']).unwrap_or(rest);
+            rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        });
+        if heredoc && (wrapper || !parsed) {
+            " Heredoc: create the file with the file-writing tool, then run it as argv."
+        } else if !wrapper {
+            ""
+        } else if outer && inspect {
+            " \u{3a9}-inspect is already bounded: drop the outer pipe, redirection or chaining and select with --search, --offset, --lines, --max-bytes; one call per slice."
+        } else if outer {
+            " Nothing may precede or follow the wrapper: drop the outer pipe, redirection or chaining; one wrapper per call, independent calls in parallel."
+        } else if live {
+            " Double quotes keep $, backquote and ! live: single-quote that argument, or write the script to a file and run it as argv."
+        } else {
+            ""
+        }
     }
 
     /// Claude only: run the wrapped form of an unwrapped command instead of denying it, when that
