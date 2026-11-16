@@ -240,8 +240,14 @@ def frontmatter(path):
     return fields, body.strip()
 
 
+# Codex's shell_guard denies unwrapped commands (no auto-wrap), so only Codex agents get the rule.
+CODEX_SHELL_RULE = ("Shell only via `'Ω-run' -- <argv>` or `'Ω-run' --shell '<script>'` (no outer operators, "
+                    "redirection or cd; use --cwd).")
+
+
 def codex_agent(path):
     fields, body = frontmatter(path)
+    body = body.rstrip('\n') + '\n\n' + CODEX_SHELL_RULE + '\n'
     model, effort = CODEX_AGENTS[path.stem]
     lines = [f'name = "{path.stem}"',
              f'description = {json.dumps(fields["description"], ensure_ascii=False)}',

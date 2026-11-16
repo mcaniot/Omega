@@ -92,7 +92,8 @@ def replay(run, optimize, home, count_tokens):
 
     begin = len(calls)
     strict = optimize.name != 'before-optimize'
-    result = command([run, 'run', '--shell', 'printf stage1; false; printf masked'],
+    # Strict shell is opt-in (`--fail-fast`) since validation runs were split from keep-going scripts.
+    result = command([run, 'run', *(['--fail-fast'] if strict else []), '--shell', 'printf stage1; false; printf masked'],
                      expected=1 if strict else 0)
     validation = metrics(begin)
     validation['masked_failure'] = result['exit_code'] == 0

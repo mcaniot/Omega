@@ -342,6 +342,16 @@ class GuardTest(unittest.TestCase):
                 self.assertNotIn('--cwd a', output(command).get('updatedInput', {}).get('command', ''), command)
             heredoc = "python3 - <<'EOF'\n" + 'print("x")\n' * 60 + 'EOF'
             self.assertEqual(output(heredoc)['updatedInput'], {'command': shlex.join(['Ω-run', '--shell', heredoc])})
+            # Recorded: 39 calls of the retired Ω-read since 2026-11-09, each a failed round trip.
+            # Plain file arguments now run as a bounded head instead.
+            for command, files in [("'Ω-read' /x/README.md", ['/x/README.md']), ('Ω-read a.py b.py', ['a.py', 'b.py'])]:
+                self.assertEqual(output(command)['updatedInput'],
+                                 {'command': shlex.join(['Ω-run', '--shell', shlex.join(['head', '-n', '200', '--', *files])])},
+                                 command)
+            # `~` and globs would stay literal once quoted; a newline or comment is not a file list.
+            for command in ("'Ω-read' --help", "'Ω-read' a.py 2>&1", "'Ω-read'", 'Ω-read ~/notes.md', 'Ω-read *.py',
+                            'Ω-read a.py\ntouch x', 'Ω-read a.py # c'):
+                self.assertNotIn('updatedInput', output(command), command)
             # Recorded: 130 heredocs denied as malformed quoting because the body held an apostrophe,
             # each costing a round trip to write a file instead. The body is data: auto-wrapped now.
             for heredoc in ("python3 - <<'EOF'\ns = \"dataset's range\"\nprint(s)\nEOF",

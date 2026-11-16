@@ -14,6 +14,32 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 
 ### Changed
 
+- End-to-end A/B of the current version against plain Claude Code (advisor off, 3 repetitions,
+  27/27 both): −24 % cost, −49 % turns, −33 % wall time; README and benchmark page updated.
+  `tools/benchmark_context.py` passes `--fail-fast` for the strict-shell scenario (it failed on
+  every version since strict shell became opt-in).
+- The benchmark page separates tool-output savings (−86 %, synthetic, no model call) from
+  end-to-end results (headless A/B and recorded sessions); the README no longer presents the
+  tool-output figure alone.
+- AGENTS.md no longer tells Claude to run every command through `Ω-run`: `shell_guard
+  --allow-clean` already wraps clean commands, and its notice no longer asks for the wrapper. On a
+  9-task headless A/B (3 reps each, all 27/27) the session cost dropped from 0.293 to 0.265 USD
+  and wall time from 56 to 38 s. Codex, whose guard denies unwrapped commands, keeps the rule in
+  `prompts/codex.md`. The coder/architect/scout agents follow: the rule is appended only to their
+  Codex TOML.
+- Cold resume names the session's task (`'Ω-resume' <task>`, newest existing active task file
+  mentioned in the transcript) and does not block a session without one.
+- Cold resume no longer echoes the prompt (Claude Code appends it under `Original prompt:`) and
+  stays silent outside the interactive CLI (`CLAUDE_CODE_ENTRYPOINT` other than `cli`), where a
+  block would end a `claude -p --resume` or SDK run unanswered. The `Ω-read` rewrite leaves `~`
+  paths, globs, comments and multi-line commands to the deny guidance.
+- `shell_guard` runs a call of the retired `Ω-read FILE…` (39 failed calls recorded since
+  2026-11-09) as `'Ω-run' --shell 'head -n 200 -- FILE…'` when every argument is a plain path.
+- `context_budget` blocks, once per idle period, the first prompt after more than 1 h idle with at
+  least 60k tokens of context: the prompt cache has expired and the prompt would rewrite the whole
+  context at the cache-write price. The notice echoes the prompt and suggests `/clear` then
+  `'Ω-resume'`; resending continues. Cost-weighted replay of 69 recorded Opus sessions: −13 to
+  −15 %. A hard context cap was not adopted (−7 to −16 %, but 131–193 restarts).
 - Delegation follows Anthropic's subagent guidance (code.claude.com/docs/en/sub-agents, costs page,
   multi-agent research system): only self-contained work whose raw output the main session will not
   reuse is delegated; coupled plan/implement/test stays in the main session. `coder` is for

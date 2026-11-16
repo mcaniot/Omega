@@ -614,7 +614,7 @@ fn json_string(text: &str, out: &mut String) {
 
 // ---------------------------------------------------------------- guard
 
-const AUTO_WRAP_NOTE: &str = "Omega guard ran this command through \u{3a9}-run --shell (bounded result). Write the wrapper yourself next time.";
+const AUTO_WRAP_NOTE: &str = "Omega guard ran this command through \u{3a9}-run --shell (bounded result).";
 
 struct Decision {
     kind: &'static str,
@@ -713,8 +713,24 @@ impl Guard {
         let head = head.trim_start_matches(['\'', '"']);
         let wrapper = head.contains('\u{3a9}') || head.starts_with("omega") || head.contains("/.agents/tools/");
         let literal = if wrapper { Self::literal_script(command) } else { None };
+        // Retired `Ω-read FILE…` (still called in recorded sessions): bounded `head` of the files
+        // instead of a failed round trip.
+        let files = argv.get(1..).filter(|files| {
+            matches!(head, "\u{3a9}-read" | "omega-read")
+                && !files.is_empty()
+                && !command.contains(['\n', '#'])
+                // `~` and globs would stay literal once quoted: leave them to the deny guidance.
+                && files.iter().all(|f| {
+                    !f.starts_with(['-', '~']) && !f.contains(['|', '>', '<', ';', '&', '`', '$', '*', '?', '['])
+                })
+        });
+        let retired = files.map(|files| {
+            let argv: Vec<String> = ["head", "-n", "200", "--"].iter().map(|s| (*s).to_string()).chain(files.iter().cloned()).collect();
+            (shlex_join(&argv), argv)
+        });
         let rewrite = match Self::cd_wrapper(command) {
             Some(moved) => Some(moved),
+            None if retired.is_some() => retired.as_ref().and_then(|(command, argv)| Self::rewrite(command, argv)),
             None if wrapper => {
                 literal.clone().or_else(|| Self::outer_wrapper(command)).or_else(|| self.requote(command)).or_else(|| Self::heredoc_argv(command))
             }

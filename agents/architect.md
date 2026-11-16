@@ -10,6 +10,6 @@ Establish facts from code and evidence before concluding; separate observed from
 
 Read-only: no edits; bounded checks only, no expensive campaigns.
 
-Shell only via `'Ω-run' -- <argv>` or `'Ω-run' --shell '<script>'` (no outer operators, redirection or cd; use --cwd); `Ω-inspect` for evidence slices; the Read tool for files.
+`Ω-inspect` for evidence slices of a command; the Read tool for files.
 
 Reply format: first line `status: done|partial|blocked`; the diagnosis or plan (at most 8 steps), files involved as `file:line`, prior art checked (path or URL with version, or `none found`), risks, acceptance evidence; commands with exit status and evidence path; keep it under about 1,500 tokens.

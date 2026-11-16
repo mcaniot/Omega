@@ -6,7 +6,7 @@ What each omega hook does, when it runs and what happens if it fails.
 | --- | --- | --- | --- |
 | [`shell_guard`](#shell_guard) | Bash calls (Claude, Codex) | Wraps or denies shell commands | The command is **blocked** |
 | [`context_guard`](#context_guard) | Read, Edit/Write, session start, compaction (Claude) | Bounds large reads, refuses re-reads | The call goes through |
-| [`context_budget`](#context_budget) | Every tool call, prompt, compaction (Claude) | Checkpoint reminder, compaction instructions | The call goes through |
+| [`context_budget`](#context_budget) | Every tool call, prompt, compaction (Claude) | Checkpoint reminder, compaction instructions, cold-resume notice | The call goes through |
 | `session_name` | Session start, prompt (Claude) | Names the session | The call goes through |
 
 ## `shell_guard`
@@ -44,6 +44,17 @@ What each omega hook does, when it runs and what happens if it fails.
 - The same hook prints the compaction instructions (task file and next action, verified decisions,
   uncommitted files, evidence paths, failed approaches), except when you pass your own to `/compact`.
 - After a compaction, `SessionStart` tells the session to resume from the task file.
+- **Cold resume.** The first prompt after more than 1 h idle (`OMEGA_CONTEXT_COLD_SECONDS`) with at
+  least 60k tokens of context (`OMEGA_CONTEXT_COLD_TOKENS`) is blocked once: the 1 h prompt cache
+  has expired, so the prompt would rewrite the whole context at the cache-write price. It only
+  blocks when the session named an existing `~/.agents/tasks/active/<task>.md` (newest mention in
+  the last 8 MB of the transcript); the notice then gives the exact `/clear` then
+  `'Ω-resume' <task>` to run (Claude Code appends the blocked prompt under
+  `Original prompt:`); sending the prompt again continues in the same session. Replayed on 69
+  recorded Opus sessions, restarting at those points cut the cost by 13–15 %. The 1 h threshold
+  assumes the subscription TTL; on usage credits or an API key the main conversation uses 5 min.
+  Claude Code's built-in `idleCompaction` is the automatic alternative (from 100k tokens, compacts
+  just before expiry); after any compaction the hook stays silent until a new usage is recorded.
 
 ## Registration
 
