@@ -227,6 +227,29 @@ fn shlex_split(text: &str) -> Option<Vec<String>> {
 }
 
 /// `shlex.quote`: safe set is `[A-Za-z0-9_@%+=:,./-]`.
+/// The command without its heredoc bodies and their delimiter lines; `None` without a heredoc or
+/// when a body is not terminated. `<<EOF`, `<<-EOF` (leading tabs), `<<'EOF'`, `<<"EOF"`, `<<\EOF`.
+fn strip_heredoc_bodies(command: &str) -> Option<String> {
+    let operator = regex::Regex::new(r#"<<(-?)\s*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)"|\\?([A-Za-z_]\w*))"#).ok()?;
+    let (mut out, mut pending, mut found) = (String::new(), std::collections::VecDeque::new(), false);
+    for line in command.split('\n') {
+        if let Some((tabs, delimiter)) = pending.front() {
+            if (if *tabs { line.trim_start_matches('\t') } else { line }) == delimiter {
+                pending.pop_front();
+            }
+            continue;
+        }
+        for c in operator.captures_iter(line) {
+            let name = c.get(2).or(c.get(3)).or(c.get(4))?.as_str().to_string();
+            pending.push_back((&c[1] == "-", name));
+            found = true;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    (found && pending.is_empty()).then_some(out)
+}
+
 fn shlex_quote(arg: &str) -> String {
     if arg.is_empty() {
         return "''".to_string();
@@ -591,7 +614,7 @@ fn json_string(text: &str, out: &mut String) {
 
 // ---------------------------------------------------------------- guard
 
-const AUTO_WRAP_NOTE: &str = "Omega guard ran this command through \u{3a9}-run --shell (fail-fast, bounded JSON result). Write the wrapper yourself next time.";
+const AUTO_WRAP_NOTE: &str = "Omega guard ran this command through \u{3a9}-run --shell (bounded result). Write the wrapper yourself next time.";
 
 struct Decision {
     kind: &'static str,
@@ -689,14 +712,22 @@ impl Guard {
         let head = argv.first().map(String::as_str).or_else(|| command.split(py_isspace).next()).unwrap_or_default();
         let head = head.trim_start_matches(['\'', '"']);
         let wrapper = head.contains('\u{3a9}') || head.starts_with("omega") || head.contains("/.agents/tools/");
-        let rewrite = if wrapper { None } else { Self::rewrite(command, argv) };
+        let literal = if wrapper { Self::literal_script(command) } else { None };
+        let rewrite = match Self::cd_wrapper(command) {
+            Some(moved) => Some(moved),
+            None if wrapper => {
+                literal.clone().or_else(|| Self::outer_wrapper(command)).or_else(|| self.requote(command)).or_else(|| Self::heredoc_argv(command))
+            }
+            None => Self::rewrite(command, argv),
+        };
         let hint = rewrite.as_ref().filter(|h| h.len() <= MAX_REWRITE_BYTES).map(|h| format!(" Ready-to-run: {h}")).unwrap_or_default();
         // A ready-to-run form already is the fix.
         let inspect = head.ends_with("inspect") || argv.get(1).is_some_and(|a| a == "inspect");
-        let correction = if hint.is_empty() { Self::correction(command, wrapper, inspect, !argv.is_empty()) } else { "" };
+        let correction = if hint.is_empty() { Self::correction(command, wrapper, inspect) } else { "" };
         let mut decision = Decision::new("deny", format!("{reason}{hint}{correction} {}", self.guidance));
-        // Unparsed quoting (empty argv) is never run on the model's behalf.
-        if !argv.is_empty() {
+        // Unparsed quoting (empty argv) is never run on the model's behalf, except a wrapper script
+        // whose outer quotes are unambiguous.
+        if !argv.is_empty() || literal.is_some() {
             decision.rewrite = rewrite.filter(|h| h.len() <= MAX_AUTO_WRAP_BYTES);
         }
         Some(decision)
@@ -704,7 +735,7 @@ impl Guard {
 
     /// The one fix for a command that is never run on the model's behalf: a heredoc that did not
     /// parse, or a miswritten wrapper call. Empty when the generic guidance is all there is to say.
-    fn correction(command: &str, wrapper: bool, inspect: bool, parsed: bool) -> &'static str {
+    fn correction(command: &str, wrapper: bool, inspect: bool) -> &'static str {
         // Quote-aware: an operator inside an argument is not an outer one.
         let (mut quote, mut outer, mut live) = (None::<char>, false, false);
         let mut chars = command.chars();
@@ -725,7 +756,7 @@ impl Guard {
             let rest = rest.strip_prefix(['\'', '"', '\\']).unwrap_or(rest);
             rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
         });
-        if heredoc && (wrapper || !parsed) {
+        if heredoc {
             " Heredoc: create the file with the file-writing tool, then run it as argv."
         } else if !wrapper {
             ""
@@ -793,6 +824,304 @@ impl Guard {
         Some(shlex_join(&["\u{3a9}-run".to_string(), "--shell".to_string(), command.to_string()]))
     }
 
+    /// `'Ω-run' [OPTIONS] --shell 'SCRIPT'` whose SCRIPT holds apostrophes (`s.replace('a', 'b')` in
+    /// a heredoc): the shell would cut it into pieces, but the text between the first quote after
+    /// `--shell` and the final quote is the script meant. Returns it canonically quoted. Recorded:
+    /// 107 such calls denied, each followed by a rewrite into a file.
+    fn literal_script(command: &str) -> Option<String> {
+        let call = regex::Regex::new(
+            r"(?s)^((?:'\x{3a9}-run'|\x{3a9}-run|omega-run|\S*/\.agents/tools/robot-exec/native/run\s+run)(?:\s+[^\s']+)*?)\s+--shell\s+'(.*)'((?:\s+--(?:cwd|timeout|inline-bytes)(?:\s+|=)[^\s']+)*)$",
+        )
+        .ok()?;
+        let parts = call.captures(command)?;
+        let script = &parts[2];
+        // Options written after the script (`--shell '…' --cwd DIR`) move before it.
+        let mut argv = inert_split(&format!("{} {}", &parts[1], &parts[3]))?;
+        // `--shell-executable PATH` is an option; a second `--shell` is not.
+        if !script.contains('\'') || argv.iter().any(|a| a == "--shell" || a.starts_with("--shell=")) {
+            return None;
+        }
+        // Escaped apostrophes (`'"'"'`, `'\''`) mean the quoting is deliberate: a raw one is then
+        // a slip only inside a heredoc body (`<<'"'"'EOF'"'"'` then `episode's`), which is data.
+        if script.contains("'\"'\"'") || script.contains("'\\''") {
+            let opener = regex::Regex::new(r#"<<-?[ \t]*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?"#).ok()?;
+            let (mut raw, mut body_end, mut decoded) = (false, None::<String>, Vec::new());
+            for line in script.split('\n') {
+                let plain = line.replace("'\"'\"'", "'").replace("'\\''", "'");
+                let slip = line.replace("'\"'\"'", "").replace("'\\''", "").contains('\'');
+                match &body_end {
+                    Some(end) if plain.trim_start_matches('\t') == end => body_end = None,
+                    Some(_) => raw |= slip,
+                    None if slip => return None,
+                    None => body_end = opener.captures(&plain).map(|c| c[1].to_string()),
+                }
+                decoded.push(plain);
+            }
+            // Without a slip the quoting already is what was meant.
+            if body_end.is_some() || !raw {
+                return None;
+            }
+            let script = decoded.join("\n");
+            if ["\u{3a9}-run", "omega-run", "/.agents/tools/"].iter().any(|w| script.contains(w)) {
+                return None;
+            }
+            argv.extend(["--shell".to_string(), script]);
+            return Some(shlex_join(&argv));
+        }
+        // Text the shell reads unquoted holds words of the script (`a`, `, `, `b`), not only the
+        // space between separate arguments (`'a' 'b'`); a second wrapper call means a chain.
+        let outside: String = script.split('\'').skip(1).step_by(2).collect();
+        let chained = ["\u{3a9}-run", "omega-run", "/.agents/tools/"].iter().any(|w| script.contains(w));
+        if !outside.chars().any(|c| !c.is_whitespace()) || chained {
+            return None;
+        }
+        argv.extend(["--shell".to_string(), script.to_string()]);
+        Some(shlex_join(&argv))
+    }
+
+    /// A wrapper call written as argv whose quoting the shell would not take as written, but whose
+    /// meaning is unambiguous: `!` or `\"` inside double quotes (`rg "(?!x)"`), `(`, `)`, `^` or a
+    /// backslash escape outside quotes (`rg -F -e self.reset()`). Returns `shlex.join(argv)`. Not
+    /// when a shell would expand or join something shlex keeps (`$`, backquote, `~`, `{`, `#`,
+    /// `\$`, backslash-newline, a glob except as a `-g`/`--glob`/`--include` pattern) or an
+    /// operator splits the command. Recorded: 39 such calls denied without a ready-to-run form.
+    fn requote(&self, command: &str) -> Option<String> {
+        // Split the trimmed text itself: the caller's argv may keep edge characters it dropped.
+        let argv = shlex_split(command)?;
+        let head = argv.first()?.as_str();
+        let wrapper = matches!(head, "\u{3a9}-run" | "omega-run" | "\u{3a9}-inspect" | "omega-inspect") || head == self.native;
+        if !wrapper {
+            return None;
+        }
+        // A glob after a glob option is the option's pattern (`rg -g !*.md`), never meant for the shell.
+        let glob_value = |word_start: usize| {
+            let word = &command[word_start..];
+            let flag = command[..word_start].trim_end_matches([' ', '\t']).rsplit([' ', '\t']).next().unwrap_or_default();
+            matches!(flag, "-g" | "--glob" | "--iglob" | "--include" | "--exclude")
+                || ["--glob=", "--iglob=", "--include=", "--exclude="].iter().any(|p| word.starts_with(p))
+        };
+        let (mut quote, mut word_start, mut chars) = (None::<char>, 0, command.char_indices().peekable());
+        while let Some((at, c)) = chars.next() {
+            match (quote, c) {
+                (None, ' ' | '\t') => word_start = at + 1,
+                (None, '\'' | '"') => quote = Some(c),
+                (None, '\\') => {
+                    if matches!(chars.next(), None | Some((_, '\n'))) {
+                        return None;
+                    }
+                }
+                (None, c) if c.is_alphanumeric() || "_@%+=:,./-()^!".contains(c) => {}
+                (None, '*' | '?' | '[' | ']') if glob_value(word_start) => {}
+                (None, _) => return None,
+                (Some('\''), '\'') => {
+                    quote = None;
+                    // zsh RC_QUOTES reads `''` inside single quotes as an apostrophe.
+                    if chars.peek().map(|&(_, c)| c) == Some('\'') {
+                        return None;
+                    }
+                }
+                (Some('"'), '"') => quote = None,
+                (Some('"'), '$' | '`') => return None,
+                (Some('"'), '\\') => {
+                    if matches!(chars.next(), None | Some((_, '$' | '`' | '\n'))) {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let joined = shlex_join(&argv);
+        (quote.is_none() && joined != command).then_some(joined)
+    }
+
+    /// `'Ω-run' [OPTIONS] -- python3 - <<'EOF'` + body + `EOF`: the heredoc feeds the outer shell's
+    /// wrapper call, which passes no stdin on. Moved into `--shell` with the command, it feeds the
+    /// command meant. Recorded: 9 such calls denied, each rewritten into a file.
+    fn heredoc_argv(command: &str) -> Option<String> {
+        let at = command.find("<<")?;
+        let mut argv = inert_split(command[..at].trim_end_matches([' ', '\t']))?;
+        let dashes = argv.iter().position(|a| a == "--")?;
+        if !matches!(argv[0].as_str(), "\u{3a9}-run" | "omega-run") || dashes + 1 == argv.len() || argv.iter().any(|a| a == "--shell") {
+            return None;
+        }
+        let heredoc = &command[at..];
+        let op = regex::Regex::new(r#"^<<-?[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)(['"]?)[ \t]*\n"#).ok()?;
+        let parts = op.captures(heredoc)?;
+        let body = &heredoc[parts[0].len()..];
+        // Exactly one body, closed by its delimiter on the last line: nothing runs after it.
+        let body = body.trim_end_matches(py_isspace);
+        let (inner, last) = body.rsplit_once('\n').unwrap_or(("", body));
+        let early = inner.lines().any(|line| line.trim_start_matches('\t') == &parts[2]);
+        if parts[1] != parts[3] || last.trim_start_matches('\t') != &parts[2] || early {
+            return None;
+        }
+        let script = format!("{} {}", shlex_join(&argv[dashes + 1..]), heredoc.trim_end_matches(py_isspace));
+        argv.truncate(dashes);
+        argv.extend(["--shell".to_string(), script]);
+        Some(shlex_join(&argv))
+    }
+
+    /// A wrapper call with something outside it: `CALL > FILE`, `CALL 2>&1 | head -5`, `CALL; true`,
+    /// `CALL; sed -n 1,80p f`. The outer redirection or filter moves into the script, a trailing
+    /// `true` is dropped and a plain command after the call gets its own wrapper call. Recorded:
+    /// about 30 such calls denied, each resent by hand. None when the first command is not a
+    /// wrapper call or a plain command could change the state later calls rely on (`cd`, `X=`).
+    fn outer_wrapper(command: &str) -> Option<String> {
+        let run = |head: &str| matches!(head, "\u{3a9}-run" | "omega-run");
+        // Split at unquoted `;`, `&&`, `||` and newlines, keeping each separator.
+        let (mut quote, mut parts, mut start) = (None::<char>, Vec::new(), 0);
+        let mut chars = command.char_indices().peekable();
+        while let Some((at, c)) = chars.next() {
+            let next = chars.peek().map(|&(_, c)| c);
+            match (quote, c) {
+                (None, '\'' | '"') => quote = Some(c),
+                (None, '\\' | '`' | '$' | '(' | ')' | '<') => return None,
+                (None, ';' | '\n') => {
+                    parts.push((&command[start..at], &command[at..at + 1]));
+                    start = at + 1;
+                }
+                (None, '&' | '|') if next == Some(c) => {
+                    chars.next();
+                    parts.push((&command[start..at], &command[at..at + 2]));
+                    start = at + 2;
+                }
+                (None, '&') if !matches!(command[..at].chars().last(), Some('>')) && next != Some('>') => return None,
+                (Some(q), _) if c == q => quote = None,
+                _ => {}
+            }
+        }
+        if quote.is_some() {
+            return None;
+        }
+        parts.push((&command[start..], ""));
+        let mut out = String::new();
+        let mut changed = false;
+        let last = parts.len() - 1;
+        for (index, (segment, separator)) in parts.into_iter().enumerate() {
+            let segment = segment.trim_matches(py_isspace);
+            let head = segment.split(py_isspace).next().unwrap_or_default().trim_matches(['\'', '"']);
+            let call = if matches!(segment, "true" | "echo") && index == last && index > 0 {
+                // `CALL; true`, `CALL || true`, `CALL; echo`: the wrapper already reports the exit status.
+                changed = true;
+                out.truncate(out.trim_end_matches([';', '&', '|', ' ', '\n']).len());
+                break;
+            } else if matches!(head, "\u{3a9}-inspect" | "omega-inspect") {
+                // Checked alone by the chain rule (`Ω-inspect … | head` included).
+                segment.to_string()
+            } else if run(head) && index == 0 && index != last && {
+                // `'Ω-run' --shell-keep-going 2>/dev/null; CALL`: options and no command, a call that
+                // only fails (recorded 8 times as if it set a mode for the next call).
+                let bare = segment.split(['>', '|']).next().unwrap_or_default().trim_end().trim_end_matches(['1', '2']);
+                inert_split(bare).is_some_and(|a| a[1..].iter().all(|o| o.starts_with("--") && o != "--shell" && o != "--"))
+            } {
+                changed = true;
+                continue;
+            } else if run(head) {
+                // First unquoted `|` or `>` (with its fd digit) ends the call.
+                let (mut quote, mut cut) = (None::<char>, None);
+                for (at, c) in segment.char_indices() {
+                    match (quote, c) {
+                        (None, '\'' | '"') => quote = Some(c),
+                        (None, '|' | '>') => {
+                            let fd = segment[..at].ends_with(['1', '2'])
+                                && segment[..at - 1].ends_with(py_isspace);
+                            cut = Some(if fd { at - 1 } else { at });
+                            break;
+                        }
+                        (Some(q), _) if c == q => quote = None,
+                        _ => {}
+                    }
+                }
+                match cut {
+                    None => segment.to_string(),
+                    Some(cut) => {
+                        let tail = segment[cut..].trim_matches(py_isspace);
+                        let mut argv = inert_split(&segment[..cut])?;
+                        let script = match argv.iter().position(|a| a == "--shell" || a == "--") {
+                            Some(at) if argv[at] == "--shell" && at + 2 == argv.len() => argv.pop()?,
+                            Some(at) if argv[at] == "--" && at + 1 < argv.len() => {
+                                let script = shlex_join(&argv[at + 1..]);
+                                argv.truncate(at);
+                                argv.push("--shell".to_string());
+                                script
+                            }
+                            _ => return None,
+                        };
+                        let script = if script.contains([';', '&', '|', '\n']) {
+                            format!("{{ {script}\n}} {tail}")
+                        } else {
+                            format!("{script} {tail}")
+                        };
+                        argv.push(script);
+                        changed = true;
+                        shlex_join(&argv)
+                    }
+                }
+            } else {
+                // A state change would not reach later calls once wrapped apart.
+                let word = segment.split(py_isspace).next().unwrap_or_default();
+                let stateful = matches!(word, "cd" | "pushd" | "popd" | "export" | "unset" | "source" | "." | "set" | "alias")
+                    || word.contains('=');
+                if index == 0 || segment.is_empty() || (stateful && index != last) || segment.contains("/.agents/tools/") {
+                    return None;
+                }
+                changed = true;
+                shlex_join(&["\u{3a9}-run".to_string(), "--shell".to_string(), segment.to_string()])
+            };
+            out.push_str(&call);
+            if !separator.is_empty() {
+                out.push_str(if separator == "\n" { ";" } else { separator });
+                out.push(' ');
+            }
+        }
+        changed.then(|| out.trim_end_matches(py_isspace).to_string())
+    }
+
+    /// `cd DIR && 'Ω-run' ARGS` written with inert quoting becomes `'Ω-run' --cwd DIR ARGS`:
+    /// wrapping it whole would nest one result JSON, escaped, inside another.
+    fn cd_wrapper(command: &str) -> Option<String> {
+        let (left, right) = command.split_once("&&")?;
+        let [cd, dir] = &inert_split(left)?[..] else { return None };
+        let mut rest = inert_split(right)?;
+        let run = matches!(rest.first().map(String::as_str), Some("\u{3a9}-run" | "omega-run"));
+        if cd != "cd" || !run || rest.iter().any(|a| a == "--cwd" || a.starts_with("--cwd=")) {
+            return None;
+        }
+        rest.splice(1..1, ["--cwd".to_string(), dir.clone()]);
+        Some(shlex_join(&rest))
+    }
+
+    /// `CALL; CALL && CALL` where every call is a wrapper call: the calls, split at the unquoted
+    /// `;` and `&&`. Each is then checked as if written alone.
+    fn wrapper_chain(command: &str) -> Option<Vec<String>> {
+        let (mut quote, mut calls, mut start) = (None::<char>, Vec::new(), 0);
+        let mut chars = command.char_indices().peekable();
+        while let Some((at, c)) = chars.next() {
+            match (quote, c) {
+                (None, '\'' | '"') => quote = Some(c),
+                (None, '\\') => _ = chars.next(),
+                (None, ';') => {
+                    calls.push(&command[start..at]);
+                    start = at + 1;
+                }
+                (None, '&') if chars.peek().map(|&(_, c)| c) == Some('&') => {
+                    chars.next();
+                    calls.push(&command[start..at]);
+                    start = at + 2;
+                }
+                (Some(q), _) if c == q => quote = None,
+                _ => {}
+            }
+        }
+        calls.push(&command[start..]);
+        let wrapper = |call: &str| {
+            let head = call.split(py_isspace).next().unwrap_or_default().trim_matches(['\'', '"']);
+            matches!(head, "\u{3a9}-run" | "\u{3a9}-inspect" | "omega-run" | "omega-inspect") || head.contains("/.agents/tools/")
+        };
+        let calls: Vec<String> = calls.iter().map(|c| c.trim_matches(py_isspace).to_string()).collect();
+        (quote.is_none() && calls.len() > 1 && calls.iter().all(|c| wrapper(c))).then_some(calls)
+    }
+
     /// The command the wrapper will execute, as text for policy matching.
     fn inner_text(argv: &[String]) -> String {
         if argv[1] != "run" {
@@ -807,6 +1136,60 @@ impl Guard {
             Some(index) => shlex_join(&argv[index + 1..]),
             None => shlex_join(&argv[2..]),
         }
+    }
+
+    /// `Ω-inspect ARGS [2>&1] | head|tail|grep|rg|wc ARGS` written in canonical quoting: returns the
+    /// `Ω-inspect` call alone. Anything else (other consumers, chains, redirections) stays denied.
+    fn inspect_pipe(command: &str, argv: &[String]) -> Option<String> {
+        let stages: Vec<&[String]> = argv.split(|a| a == "|").collect();
+        let (left, filters) = stages.split_first()?;
+        let (left, redirect) = match left.split_last() {
+            Some((last, rest)) if last == "2>&1" || last == "2>/dev/null" => (rest, last.as_str()),
+            _ => (*left, ""),
+        };
+        // Bounded readers: `Ω-inspect`, and the fixed `Ω-resume` / `Ω-optimize` reports.
+        let inspect = matches!(
+            left.first().map(String::as_str),
+            Some("\u{3a9}-inspect" | "omega-inspect" | "\u{3a9}-resume" | "omega-resume" | "\u{3a9}-optimize" | "omega-optimize")
+        );
+        // Read-only filters; `cut -c1-200` is the most common recorded one.
+        let filter = |stage: &&[String]| {
+            matches!(stage.first().map(String::as_str), Some("head" | "tail" | "grep" | "rg" | "wc" | "cut"))
+                && !stage.iter().any(|a| a.starts_with("--pre"))
+        };
+        if !inspect || filters.is_empty() || !filters.iter().all(filter) {
+            return None;
+        }
+        let joined = shlex_join(left);
+        let mut canonical = joined.clone();
+        if !redirect.is_empty() {
+            canonical = format!("{canonical} {redirect}");
+        }
+        for stage in filters {
+            canonical = format!("{canonical} | {}", shlex_join(stage));
+        }
+        if command == canonical {
+            return Some(joined);
+        }
+        // Inert quoting the model writes by habit (`--search 'error'`): each stage between the
+        // unquoted pipes must split, with nothing live, into exactly the words parsed above.
+        let (mut quote, mut bars) = (None::<char>, vec![0]);
+        for (at, c) in command.char_indices() {
+            match (quote, c) {
+                (None, '\'' | '"') => quote = Some(c),
+                (None, '|') => bars.push(at + 1),
+                (Some(q), _) if c == q => quote = None,
+                _ => {}
+            }
+        }
+        if bars.len() != stages.len() {
+            return None;
+        }
+        bars.push(command.len() + 1);
+        let texts: Vec<&str> = bars.windows(2).map(|w| command[w[0]..w[1] - 1].trim_matches(' ')).collect();
+        let head = if redirect.is_empty() { texts[0] } else { texts[0].strip_suffix(redirect)?.trim_end_matches(' ') };
+        let same = |text: &str, words: &[String]| inert_split(text).is_some_and(|split| split == words);
+        (same(head, left) && texts[1..].iter().zip(filters).all(|(text, words)| same(text, words))).then_some(joined)
     }
 
     fn evaluate(&self, payload: &Json) -> Option<Decision> {
@@ -826,9 +1209,41 @@ impl Guard {
             _ => return self.denied("Missing shell command."),
         };
         let Some(mut argv) = shlex_split(command) else {
-            return self.denied_unwrapped("Malformed shell quoting.", command.trim_matches(py_isspace), &[]);
+            let command = command.trim_matches(py_isspace);
+            // A heredoc body is data to the shell (`dataset's` in a Python script): only the lines
+            // around it must parse. The policy still reads the whole text, body included.
+            return match strip_heredoc_bodies(command).as_deref().and_then(shlex_split).filter(|a| !a.is_empty()) {
+                Some(outside) => self.denied_unwrapped("Unwrapped or noncanonical shell command.", command, &outside),
+                None => self.denied_unwrapped("Malformed shell quoting.", command, &[]),
+            };
         };
         let command = command.trim_matches(py_isspace);
+        if Self::literal_script(command).is_some() {
+            // Its apostrophes would silently drop quotes or cut the script: run it as written.
+            return self.denied_unwrapped("Unwrapped or noncanonical shell command.", command, &argv);
+        }
+        if let Some(inspect) = Self::inspect_pipe(command, &argv) {
+            // Same policy as the bare call; the read-only filter after it adds nothing to check.
+            let probe = Json::Object(vec![
+                ("tool_name".to_string(), Json::Str("Bash".to_string())),
+                ("tool_input".to_string(), Json::Object(vec![("command".to_string(), Json::Str(inspect))])),
+            ]);
+            return self.evaluate(&probe);
+        }
+        if let Some(calls) = Self::wrapper_chain(command) {
+            // Batched wrapper calls: each is checked alone and keeps its own bounded result.
+            let clean = self.clean().map(|d| d.kind);
+            let all_clean = calls.into_iter().all(|call| {
+                let probe = Json::Object(vec![
+                    ("tool_name".to_string(), Json::Str("Bash".to_string())),
+                    ("tool_input".to_string(), Json::Object(vec![("command".to_string(), Json::Str(call))])),
+                ]);
+                self.evaluate(&probe).map(|d| d.kind) == clean
+            });
+            if all_clean {
+                return self.clean();
+            }
+        }
         if argv.is_empty() || (command != shlex_join(&argv) && inert_split(command).as_ref() != Some(&argv)) {
             return self.denied_unwrapped("Unwrapped or noncanonical shell command.", command, &argv);
         }
@@ -860,8 +1275,21 @@ impl Guard {
         if argv.len() < 2 || argv[0] != self.native || !matches!(argv[1].as_str(), "run" | "inspect" | "prune") {
             return self.denied_unwrapped("Unwrapped or noncanonical shell command.", command, &argv);
         }
-        if argv.iter().any(|arg| arg.starts_with('=')) {
-            // zsh EQUALS expansion rewrites an unquoted "=cmd" into a path.
+        // zsh EQUALS expansion rewrites an unquoted "=cmd" into a path; a quoted one stays text.
+        let unquoted_equals = {
+            let (mut quote, mut start, mut found) = (None::<char>, true, false);
+            for c in command.chars() {
+                match (quote, c) {
+                    (None, '=') if start => found = true,
+                    (None, '\'' | '"') => quote = Some(c),
+                    (Some(q), _) if c == q => quote = None,
+                    _ => {}
+                }
+                start = quote.is_none() && matches!(c, ' ' | '\t');
+            }
+            found
+        };
+        if unquoted_equals && argv.iter().any(|arg| arg.starts_with('=')) {
             return self.denied("Argument starting with \"=\" is expanded by zsh.");
         }
         if argv[1] == "prune" && argv.iter().any(|a| a == "--apply") {

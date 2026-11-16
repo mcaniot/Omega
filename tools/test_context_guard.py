@@ -44,9 +44,21 @@ class ContextGuardTest(unittest.TestCase):
                 self.assertEqual(hook['permissionDecision'], 'allow')
                 self.assertEqual(hook['updatedInput'], {'file_path': str(path), 'pages': 'keep', 'limit': 200})
                 self.assertIn(f'lines 1-200 of 2000 of {path}', hook['additionalContext'])
-        hook = self.evaluate(path, offset=1901, limit=500)['hookSpecificOutput']
-        self.assertEqual(hook['updatedInput'], {'file_path': str(path), 'offset': 1901, 'limit': 200})
-        self.assertIn('lines 1901-2000 of 2000', hook['additionalContext'])
+        hook = self.evaluate(path, offset=1601, limit=500)['hookSpecificOutput']
+        self.assertEqual(hook['updatedInput'], {'file_path': str(path), 'offset': 1601, 'limit': 200})
+        self.assertIn('lines 1601-1800 of 2000', hook['additionalContext'])
+
+    def test_read_reaching_the_end_within_300_lines_and_30000_bytes_runs_as_written(self):
+        # Bounding lines 1-200 of 230 would cost a second round trip for 30 lines.
+        path = self.large_file()
+        self.assertEqual(self.evaluate(path, offset=1701), {})
+        self.assertEqual(self.evaluate(path, offset=1901, limit=500), {})
+        self.assertEqual(self.evaluate(path, offset=1700)['hookSpecificOutput']['updatedInput']['limit'], 200)
+        short = self.home / 'short.py'
+        short.write_text('x = 1  # filler to pass 8 KiB\n' * 299)
+        self.assertEqual(self.evaluate(short), {})
+        short.write_text('x' * 110 + '\n' * 1 + ('y' * 110 + '\n') * 298)
+        self.assertEqual(self.evaluate(short)['hookSpecificOutput']['updatedInput']['limit'], 200)  # over 30000 bytes
         for limit in (1, 200):
             self.assertEqual(self.evaluate(path, limit=limit, offset=10), {})
 
@@ -99,6 +111,17 @@ class ReadLedgerTest(unittest.TestCase):
             tool_input['limit'] = limit
         return self.run_hook(tool_name='Read', tool_input=tool_input, **extra)
 
+    def seen(self, offset=None, limit=None, **extra):
+        """A Read that succeeded: PreToolUse, then PostToolUse with the input that actually ran."""
+        result = self.read(offset, limit, **extra)
+        tool_input = result.get('hookSpecificOutput', {}).get('updatedInput')
+        if tool_input is None:
+            tool_input = {'file_path': str(self.path), **({'offset': offset} if offset else {}),
+                          **({'limit': limit} if limit else {})}
+        if result == {} or result['hookSpecificOutput']['permissionDecision'] == 'allow':
+            self.run_hook('PostToolUse', tool_name='Read', tool_input=tool_input, **extra)
+        return result
+
     def reason(self, result):
         output = result['hookSpecificOutput']
         self.assertEqual(output['permissionDecision'], 'deny')
@@ -109,33 +132,39 @@ class ReadLedgerTest(unittest.TestCase):
         return self.home / '.agents/state/read-ledger/s1.json'
 
     def test_full_cover_denies_and_ledger_is_private(self):
-        self.assertEqual(self.read(1, 100), {})
+        self.assertEqual(self.seen(1, 100), {})
         self.assertEqual(self.reason(self.read(10, 50)),
                          f'already in context: lines 10-59 of {self.path} (unchanged since read)')
         self.assertEqual(self.ledger.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.ledger.parent.stat().st_mode & 0o777, 0o700)
 
-    def test_denied_read_is_not_recorded(self):
+    def test_range_is_recorded_only_after_the_read_succeeded(self):
         self.assertEqual(self.read(1, 100), {})
-        self.assertIn('offset=101 limit=50', self.reason(self.read(51, 100)))
-        self.assertEqual(self.read(101, 150), {})  # still unread: the denial recorded nothing
+        self.assertEqual(self.read(1, 100), {})  # no PostToolUse: the first Read may have failed
+        self.assertFalse(self.ledger.exists())
+        self.seen(1, 100)
+        self.assertIn('already in context', self.reason(self.read(1, 100)))
 
-    def test_partial_cover_suggests_first_gap(self):
-        self.assertEqual(self.read(50, 51), {})
-        self.assertIn('offset=1 limit=49', self.reason(self.read(1, 150)))
-        self.assertIn('offset=101 limit=50', self.reason(self.read(50, 101)))
+    def test_partial_overlap_is_allowed_and_then_recorded(self):
+        self.assertEqual(self.seen(1, 200), {})
+        self.assertEqual(self.seen(200, 94), {})
+        self.assertIn('lines 150-249', self.reason(self.read(150, 100)))
 
     def test_bounded_read_is_recorded_and_checked_as_its_real_range(self):
-        hook = self.read()['hookSpecificOutput']  # 1500 lines, no limit: runs as lines 1-200
+        hook = self.seen()['hookSpecificOutput']  # 1500 lines, no limit: runs as lines 1-200
         self.assertEqual(hook['updatedInput']['limit'], 200)
         self.assertEqual(self.reason(self.read()), f'already in context: lines 1-200 of {self.path} (unchanged since read)')
-        self.assertIn('offset=201 limit=149', self.reason(self.read(150)))
+        self.assertEqual(self.read(150)['hookSpecificOutput']['updatedInput']['offset'], 150)
         self.assertEqual(self.read(201, 500)['hookSpecificOutput']['updatedInput']['offset'], 201)
 
     def test_changed_file_drops_ranges(self):
-        self.assertEqual(self.read(1, 100), {})
+        self.assertEqual(self.seen(1, 100), {})
         self.path.write_text(self.path.read_text() + 'more\n')
         self.assertEqual(self.read(1, 100), {})
+
+    def test_read_post_hook_does_not_trigger_cpp_hint(self):
+        self.assertEqual(self.run_hook('PostToolUse', tool_name='Read', tool_input={'file_path': '/w/loop.cpp'}), {})
+        self.assertEqual(self.run_hook('PostToolUse', tool_name='Read', tool_input={'file_path': '/w/missing.py'}), {})
 
     def test_first_cpp_edit_hints_cpp_quality_once_per_session_or_subagent(self):
         def edit(name, **extra):
@@ -153,7 +182,7 @@ class ReadLedgerTest(unittest.TestCase):
 
     def test_edit_and_write_drop_ranges(self):
         for tool in ('Edit', 'Write', 'MultiEdit'):
-            self.assertEqual(self.read(1, 100), {})
+            self.assertEqual(self.seen(1, 100), {})
             before = self.path.stat()
             os.utime(self.path, ns=(before.st_atime_ns, before.st_mtime_ns))  # same stamp: only the hook can drop
             self.assertEqual(self.run_hook('PostToolUse', tool_name=tool,
@@ -164,19 +193,20 @@ class ReadLedgerTest(unittest.TestCase):
     def test_compact_clear_and_post_compact_reset(self):
         for event, extra in (('SessionStart', {'source': 'compact'}), ('SessionStart', {'source': 'clear'}),
                              ('PostCompact', {})):
-            self.assertEqual(self.read(1, 100), {})
+            self.assertEqual(self.seen(1, 100), {})
             self.assertTrue(self.ledger.exists())
             self.assertEqual(self.run_hook(event, **extra), {})
             self.assertFalse(self.ledger.exists())
-        self.assertEqual(self.read(1, 100), {})
+        self.assertEqual(self.seen(1, 100), {})
         self.run_hook('SessionStart', source='startup')
         self.assertTrue(self.ledger.exists())
 
     def test_small_file_whole_read_and_subagent_and_sessions(self):
         self.path.write_text('a\nb\nc\n')
-        self.assertEqual(self.read(), {})
+        self.assertEqual(self.seen(), {})
         self.assertIn('lines 1-3 of', self.reason(self.read()))
-        self.assertEqual(self.read(agent_id='a1'), {})  # subagent context is separate
+        self.assertEqual(self.seen(agent_id='a1'), {})  # subagent context is separate
+        self.assertEqual(self.read(agent_id='a1'), {})
         self.assertEqual(self.read(session_id='other'), {})
 
     def test_corrupt_or_unsafe_ledger_fails_open(self):
@@ -184,6 +214,7 @@ class ReadLedgerTest(unittest.TestCase):
         for garbage in (b'\xff{not json', b'[1,2]', b'x' * (2 << 20)):
             self.ledger.write_bytes(garbage)
             self.assertEqual(self.read(1, 100), {})
+            self.seen(1, 100)
             self.assertIn('already in context', self.reason(self.read(1, 100)))
         self.assertEqual(self.read(1, 100, session_id='../escape'), {})
         self.assertEqual(self.run_hook('SessionStart', raw='{', source='clear')['hookSpecificOutput']
@@ -220,7 +251,7 @@ class ContextSettingsTest(unittest.TestCase):
         hooks = actual['hooks']
         guard = [{'matcher': 'Read', 'hooks': [{'type': 'command', 'command': self.command}]}]
         self.assertEqual(hooks['PreToolUse'][1], guard[0])
-        self.assertEqual(hooks['PostToolUse'][0]['matcher'], 'Edit|Write|MultiEdit')
+        self.assertEqual(hooks['PostToolUse'][0]['matcher'], 'Read|Edit|Write|MultiEdit')
         budget = str(self.installer.BINARIES['context_budget'])
         retired = {'matcher': '*', 'hooks': [{'type': 'command', 'command': budget}]}
         self.assertEqual(hooks['PostToolUse'][-1], retired)
@@ -231,7 +262,7 @@ class ContextSettingsTest(unittest.TestCase):
             self.assertEqual(hooks[event][0], {'hooks': [{'type': 'command', 'command': self.command}]})
         for key, value in self.installer.CONTEXT_ENV.items():
             self.assertEqual(actual['env'][key], value)
-        self.assertEqual(actual['permissions'], self.original['permissions'])
+        self.assertEqual(actual['permissions'], {'deny': ['keep', *self.installer.DENIED_AGENTS]})
         self.assertEqual(hooks['Stop'], self.original['hooks']['Stop'])
         self.assertEqual(hooks['PreToolUse'][0], self.original['hooks']['PreToolUse'][0])
         self.assertEqual(target.stat().st_mode & 0o777, 0o600)
@@ -248,6 +279,22 @@ class ContextSettingsTest(unittest.TestCase):
         self.assertEqual(cleaned['hooks']['PreToolUse'], [self.original['hooks']['PreToolUse'][0], guard[0], shell])
         self.assertNotIn('OMEGA_CONTEXT_HARD', cleaned['env'])
         self.assertEqual(list(self.installer.write_context_settings(True)), [])
+
+    def test_older_matcher_is_retargeted_not_duplicated(self):
+        ours = {'type': 'command', 'command': self.command}
+        other = {'type': 'command', 'command': 'third-party'}
+        current = {'matcher': 'Read|Edit|Write|MultiEdit', 'hooks': [ours]}
+        for older, extra, kept in (([ours], [], []), ([ours], [current], []), ([ours], [current, current], []),
+                                   ([other, ours], [], [{'matcher': 'Edit|Write|MultiEdit', 'hooks': [other]}])):
+            with self.subTest(older=older, extra=extra):
+                self.settings.write_text(json.dumps({'hooks': {
+                    'PostToolUse': [{'matcher': 'Edit|Write|MultiEdit', 'hooks': older}, *extra]}}))
+                list(self.installer.write_context_settings(True))
+                groups = json.loads(self.settings.read_text())['hooks']['PostToolUse']
+                guards = [g for g in groups if ours in g['hooks']]
+                self.assertEqual(guards, [{'matcher': 'Read|Edit|Write|MultiEdit', 'hooks': [ours]}])
+                self.assertEqual([g for g in groups if other in g['hooks']], kept)
+                self.assertEqual(list(self.installer.write_context_settings(True)), [])
 
     def test_hand_registered_omega_hooks_are_normalised_in_place(self):
         binaries = self.installer.BINARIES

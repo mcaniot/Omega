@@ -24,11 +24,14 @@ What each omega hook does, when it runs and what happens if it fails.
 - **Large evidence files** (over 8 KiB) are redirected to `Ω-inspect`.
 - **Large text files** (over 8 KiB) read without a limit of 1..200 are not denied: the Read runs
   as 200 lines from the requested offset (`updatedInput`) and says which range was returned. That
-  rewrite is its only `allow`; Claude Code still applies deny and ask rules after it. This is a
+  rewrite is its only `allow`; Claude Code still applies deny and ask rules after it. A Read that
+  reaches the end of the file within 300 lines, in a file of at most 30000 bytes, runs as written
+  (bounding it would cost a second round trip for a short tail). This is a
   line bound, not a byte or token guarantee. Images, PDFs and notebooks keep their native behavior.
 - **Re-reads**: in the main session (not subagents), a Read of lines already read and unchanged
-  since is denied (`already in context`); a partly covered range is narrowed to the missing lines.
-  Editing or writing the file, compaction and `/clear` reset this.
+  since is denied (`already in context`) only when every requested line is covered; a partly covered
+  range is allowed. A range is recorded when the Read succeeded (`PostToolUse`), never before it
+  runs. Editing or writing the file, compaction and `/clear` reset this.
 - **C/C++**: the first C/C++ edit of a session gets a one-time pointer to the `cpp-quality` skill.
 
 ## `context_budget`

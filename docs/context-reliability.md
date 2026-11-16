@@ -10,8 +10,8 @@
   `diagnostics`, full evidence, status codes, privacy and process cleanup remain.
   Preview plus diagnostics fit the existing 4000-byte JSON budget. Small inline
   output is unchanged; `--inline-bytes 0` keeps successful execution silent.
-- `--shell` defaults to errexit/pipefail; bash also inherits errexit in command
-  substitutions. `--shell-keep-going` explicitly restores legacy semantics,
+- `--shell` runs every command with pipefail; `--fail-fast` adds errexit (bash also
+  inherits it in command substitutions). `--shell-keep-going` explicitly restores legacy semantics,
   including POSIX sh, and requires `--shell`. Conditionals, `||`, `!`, background
   jobs and explicit shell-option changes can consume failures: required checks
   must remain standalone argv or unconditional top-level commands. PASS certifies

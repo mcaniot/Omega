@@ -24,11 +24,11 @@ Deterministic: one run is enough.
 | --- | ---: | ---: | ---: |
 | Read a 3000-line file without a limit | 42,952 | 4,174 | −90 % |
 | Read the same small file twice | 5,016 | 2,552 | −49 % |
-| Read lines 1–200, then 101–300 | 8,108 | 6,160 | −24 % |
+| Read lines 1–200, then 101–300 | 8,108 | 8,108 | 0 % |
 | Read, edit, read again (must not be refused) | 5,027 | 5,027 | 0 % |
 | 4000-line build log with one failure, then find it ¹ | 13,689 | 341 | −98 % |
 | Read a large saved log to find the failure ¹ | 68,656 | 152 | −100 % |
-| **Total** | **143,448** | **18,406** | **−87 %** |
+| **Total** | **143,448** | **20,354** | **−86 %** |
 
 omega's counts vary by a few tokens between runs: they include evidence paths and timestamps.
 
@@ -97,7 +97,7 @@ the run instead of counting as a win:
 | --- | --- |
 | Large Read | The Read is bounded to lines 1–200 of 3000 and says so |
 | Same file twice | The second Read is refused as `already in context` |
-| Overlapping Reads | The second Read is narrowed to the missing lines 201–300, which are then allowed |
+| Overlapping Reads | The second Read is allowed and recorded: only a fully covered Read is refused |
 | Read after edit | The Read after an edit is **not** refused and contains the new line |
 | Build log | The complete log is kept on disk; `Ω-inspect` finds the failure |
 | Saved log | A Read of an evidence file is redirected to `Ω-inspect` |

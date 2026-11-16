@@ -165,6 +165,8 @@ def lines_file(home):
     return str(directory)
 
 
+# Intentional: the search, default-paging and bound cases were re-recorded with the regex search, whole-line
+# matches and the 200-line / 30000-byte paging caps (C3).
 INSPECT = [
     ('inspect_default', lambda h: ['inspect', lines_file(h)]),
     ('inspect_stdout_all', lambda h: ['inspect', lines_file(h), '--stream', 'stdout', '--lines', '40', '--max-bytes', '7000']),
@@ -220,6 +222,23 @@ def short_escapes(value):
     """Map JSON `\\u000a`-style escapes to `\\n`: the recorded C encoder used the long
     form, the executor now emits the equivalent short one to save model context."""
     return LONG_ESCAPE.sub(lambda m: m.group(1) + '\\' + SHORT_ESCAPES[m.group(2)], value)
+
+
+def flat_fragments(text):
+    """An inspect envelope with each `fragments` list reduced to its first offset and joined text."""
+    def flat(value):
+        if isinstance(value, dict):
+            value = {key: flat(item) for key, item in value.items()}
+            if isinstance(value.get("fragments"), list):
+                parts = value["fragments"]
+                value["fragments"] = [parts[0]["offset"] if parts else None, "".join(part["text"] for part in parts)]
+        elif isinstance(value, list):
+            value = [flat(item) for item in value]
+        return value
+    try:
+        return flat(json.loads(text))
+    except ValueError:
+        return text
 
 
 def comparable(observed):
@@ -300,9 +319,14 @@ class GoldenTests(unittest.TestCase):
                     expected['stdout'] = expected['stdout'].replace(
                         '  --shell SHELL\n',
                         '  --shell SHELL\n'
-                        '                        Fail fast with errexit and pipefail (bash/zsh)\n'
+                        '                        Run every command with pipefail (bash/zsh)\n'
+                        '  --fail-fast           With --shell: also stop at the first failure\n'
                         '  --shell-keep-going\n'
                         '                        Explicit legacy shell semantics; not for validations\n')
+                for key in ('stdout', 'stderr'):
+                    # Intentional: --search is a regex now (C3).
+                    expected[key] = expected[key].replace('Literal substring filter; use short distinctive terms',
+                                                          'Regex line filter (smart case, literal if invalid)')
                 if name in SUBCOMMAND_EXTRAS:
                     # Intentional: subcommand extras report the subcommand usage.
                     sub = SUBCOMMAND_EXTRAS[name]
@@ -313,9 +337,9 @@ class GoldenTests(unittest.TestCase):
                     expected['stderr'] = expected['stderr'].replace(
                         'could match --shell, --shell-executable',
                         'could match --shell, --shell-keep-going, --shell-executable')
-                # These recorded outputs exceeded the old inline/JSON budgets. Derive
+                # These recorded outputs exceeded the old (8 KiB) inline/JSON budgets. Derive
                 # only their new summary from the frozen logs; retain all other evidence.
-                if name in {'large_success', 'weak_words', 'passed_lines',
+                if name in {'large_success', 'weak_words', 'passed_lines', 'large_traceback',
                             'unicode_failure_large', 'json_inflation'}:
                     actual = dict(actual)
                     actual_summary = json.loads(actual.pop('stdout'))
@@ -330,6 +354,10 @@ class GoldenTests(unittest.TestCase):
                     if out or err:
                         expected_summary.pop('bytes', None)
                     self.assertEqual(actual_summary, expected_summary)
+                if name in {n for n, _ in INSPECT}:
+                    # Intentional: consecutive lines share one fragment; compare the text and its start.
+                    actual, expected = dict(actual), dict(expected)
+                    actual["stdout"], expected["stdout"] = flat_fragments(actual["stdout"]), flat_fragments(expected["stdout"])
                 self.assertEqual(actual, expected)
 
     def test_log_limit(self):

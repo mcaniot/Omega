@@ -26,18 +26,20 @@ SIGKILL, noninteractive stdin, bounded inline output and a 25 ms output-limit/ti
 monitoring interval. SIGCHLD wakes the monitor immediately when a command exits.
 Children are gated until the sentinel exists.
 
-Combined stdout/stderr up to 8 KiB is returned inline by default (`--inline-bytes N`,
-0 disables), within a 12 KiB JSON budget. Large JSON expansions fall back to the
+Combined stdout/stderr up to 30000 bytes is returned inline by default (`--inline-bytes N`,
+0 disables), within a 40 KiB JSON budget. Large JSON expansions fall back to the
 summary with a smart `preview`: bounded beginning/end fragments and prioritized
 errors, with stream, line and byte locations. Existing failure diagnostics and the
 additive preview share a 4,000-byte JSON budget. Complete logs
 are always preserved. Reuse inline output; expand larger logs with targeted `inspect`
 slices rather than reading a log over 8 KiB in full.
 
-`--shell` uses errexit and pipefail by default (bash/zsh); bash additionally inherits
-errexit in substitutions. Unsupported shells fail instead of silently weakening
-validation. `--shell-keep-going` restores the previous shell argv/semantics, including
-POSIX sh compatibility. It requires `--shell` and is not for required validation.
+`--shell` runs every command, like a plain shell, with pipefail (bash/zsh): a failed
+step does not stop an exploration batch, and the status is the last pipeline's.
+`--fail-fast` adds errexit (bash also inherits it in substitutions) for scripts whose
+steps are all required. Unsupported shells fail instead of silently weakening it.
+`--shell-keep-going` restores the previous shell argv/semantics without pipefail, including
+POSIX sh compatibility. Both require `--shell`; keep-going is not for required validation.
 Shells can explicitly handle failures in conditionals, `||`, `!`, or background jobs;
 required checks must be separate argv commands or unconditional top-level steps.
 PASS means the child exited zero, not that arbitrary output or every branch was valid.

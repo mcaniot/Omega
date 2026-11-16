@@ -29,7 +29,7 @@ def invoke(code, *options, shell=False):
     arguments = ['--shell', shlex.join(command)] if shell else ['--', *command]
     process = subprocess.run([*RUNNER, 'run', *options, *arguments], capture_output=True)
     assert not process.stderr, process.stderr
-    assert len(process.stdout) <= 12 * 1024 + 1, len(process.stdout)
+    assert len(process.stdout) <= 40 * 1024 + 1, len(process.stdout)
     result = json.loads(process.stdout)
     if 'stdout' not in result and 'stderr' not in result:
         assert len(process.stdout) <= 4001, len(process.stdout)
@@ -65,11 +65,20 @@ class CaptureTests(unittest.TestCase):
                        'x=$(false; echo masked); echo masked', '(false; echo masked); echo masked',
                        'check() { false; echo masked; }; check; echo masked'):
             with self.subTest(script=script):
-                process = subprocess.run([*RUNNER, 'run', '--shell', script], capture_output=True)
+                process = subprocess.run([*RUNNER, 'run', '--fail-fast', '--shell', script], capture_output=True)
                 result = json.loads(process.stdout)
                 self.assertNotEqual(process.returncode, 0)
                 self.assertEqual(result['status'], 'FAIL')
                 self.assertNotIn('masked', (Path(result['evidence']) / 'stdout.log').read_text())
+
+    def test_shell_runs_every_command_by_default_with_pipefail(self):
+        process = subprocess.run([*RUNNER, 'run', '--shell', 'false; echo after'], capture_output=True)
+        result = json.loads(process.stdout)
+        self.assertEqual((process.returncode, result['status'], result['stdout']), (0, 'PASS', 'after\n'))
+        process = subprocess.run([*RUNNER, 'run', '--shell', 'echo a; false | cat'], capture_output=True)
+        self.assertEqual(json.loads(process.stdout)['status'], 'FAIL')  # pipefail keeps it visible
+        process = subprocess.run([*RUNNER, 'run', '--fail-fast', '--', 'true'], capture_output=True)
+        self.assertNotEqual(process.returncode, 0)
 
     def test_validation_rejects_consumed_shell_failures_before_execution(self):
         for script in ('false || echo recovered',
@@ -97,7 +106,7 @@ class CaptureTests(unittest.TestCase):
     def test_zsh_fail_fast_when_available(self):
         if not Path('/bin/zsh').exists():
             self.skipTest('zsh unavailable')
-        process = subprocess.run([*RUNNER, 'run', '--shell-executable', '/bin/zsh',
+        process = subprocess.run([*RUNNER, 'run', '--shell-executable', '/bin/zsh', '--fail-fast',
                                   '--shell', 'false | cat; echo masked'], capture_output=True)
         self.assertNotEqual(process.returncode, 0)
         self.assertEqual(json.loads(process.stdout)['status'], 'FAIL')
@@ -163,20 +172,85 @@ class CaptureTests(unittest.TestCase):
 
     def test_first_and_last_strong_matches_kept(self):
         code = ("print('ValueError: first cause')\n"
-                "for i in range(50): print(f'KeyError: repeat {i}')\n"
+                "for i in range(26): print(f'KeyError: repeat {chr(97 + i)}')\n"
                 "print('weak error word only')\n"
                 "raise SystemExit(2)")
         _, result, _ = invoke(code, '--inline-bytes', '0')
         texts = [item['text'] for item in result['diagnostics']]
         self.assertEqual(texts[0], 'ValueError: first cause')
-        self.assertIn('KeyError: repeat 49', texts)
+        self.assertIn('KeyError: repeat z', texts)
         self.assertLessEqual(len(texts), 8)
         self.assertNotIn('weak error word only', texts)
 
     def test_weak_word_fallback(self):
-        _, result, _ = invoke("print('loss_error=0.1\\n'*1000+'build failed for target x\\n'+'done\\n'*10);raise SystemExit(1)")
+        _, result, _ = invoke("print('loss_error=0.1\\n'*3000+'build failed for target x\\n'+'done\\n'*10);raise SystemExit(1)")
         texts = [item['text'] for item in result['diagnostics']]
         self.assertEqual(texts, ['build failed for target x'])
+
+    def test_failures_that_used_to_stay_hidden_surface_in_diagnostics(self):
+        retries = "for i in range(40): print(f'ERROR: retry {i} connecting to broker 10.0.0.{i}')"
+        cases = {
+            'ValueError: shape mismatch': (f"{retries}\nprint('ValueError: shape mismatch')", True),
+            "/usr/bin/ld: foo.o: undefined reference to `bar_init'": ("print(\"/usr/bin/ld: foo.o: undefined reference to `bar_init'\")", False),
+            'step 1200: loss=nan grad_norm=inf': ("print('step 1200: loss=nan grad_norm=inf')", False),
+            'error[E0308]: mismatched types': ("print('error[E0308]: mismatched types')", False),
+            'sh: 1: foo: not found': ("print('sh: 1: foo: not found')", False),
+        }
+        for line, (code, retried) in cases.items():
+            with self.subTest(line=line):
+                noise = "for i in range(2100): print(f'step {i} ok')"
+                after = "for i in range(1900): print(f'step {i} ok' if %r != 'step 1200: loss=nan grad_norm=inf' else f'step {i}: loss=nan grad_norm=inf')" % line
+                _, result, _ = invoke(f"{noise}\n{code}\n{after}\nraise SystemExit(1)", '--inline-bytes', '0')
+                texts = [item['text'] for item in result['diagnostics']]
+                self.assertIn(line, texts)
+                if retried:
+                    self.assertEqual(sum('retry' in t for t in texts), 1)
+
+    def test_warning_fills_only_the_slots_errors_leave_free(self):
+        cause = 'WARNING: joint limit exceeded on arm_left_j4 (2.31 > 2.09 rad), clamping'
+        noise = "for i in range(2000): print(f'step {i} ok')"
+        retries = "for i in range(40): print(f'ERROR: retry {i} connecting to broker 10.0.0.{i}')"
+        for before in ('', retries, "print('suite: 12 passed, 0 failed, 0 warnings')"):
+            with self.subTest(before=before):
+                _, result, _ = invoke(f"{noise}\n{before}\nprint({cause!r})\n{noise}\nraise SystemExit(1)", '--inline-bytes', '0')
+                texts = [item['text'] for item in result['diagnostics']]
+                self.assertIn(cause, texts)
+                self.assertNotIn('suite: 12 passed, 0 failed, 0 warnings', texts)
+        errors = "for c in 'abcdefghij': print(f'ValueError: cause {c}')"
+        _, result, _ = invoke(f"{errors}\nprint({cause!r})\nraise SystemExit(1)", '--inline-bytes', '0')
+        texts = [item['text'] for item in result['diagnostics']]
+        self.assertEqual((len(texts), cause in texts), (8, False))
+
+    def test_test_runner_cause_names_and_verdict_outrank_traceback_frames(self):
+        # sympy bin/test (SWE-bench run): a warning raised as an error, failure headers, a summary count.
+        block = ("for t in range(30):\n"
+                 "    print(f'_______ pkg/tests/test_m.py:test_{chr(97 + t // 26)}{chr(97 + t % 26)} _______')\n"
+                 "    print('  File \"/x/pkg/tests/test_m.py\", line 35, in test_case')\n"
+                 "    print('    raises(TypeError, lambda: a*{})')\n"
+                 "    print('DeprecationWarning: Using or importing the ABCs from collections')\n"
+                 "for i in range(2000): print(f'filler {i}')\n"
+                 "print(' tests finished: 183 passed, 3 skipped, 30 exceptions, ')\n"
+                 "raise SystemExit(1)")
+        _, result, _ = invoke(block, '--inline-bytes', '0')
+        texts = [item['text'] for item in result['diagnostics']]
+        self.assertIn('DeprecationWarning: Using or importing the ABCs from collections', texts)
+        self.assertIn('_______ pkg/tests/test_m.py:test_aa _______', texts)
+        self.assertIn('tests finished: 183 passed, 3 skipped, 30 exceptions,', texts)
+        self.assertFalse(any(t.startswith('File ') for t in texts))
+
+    def test_diagnostics_total_tells_whether_the_list_is_exhaustive(self):
+        _, result, _ = invoke("print('ValueError: a');print('ok');print('error: could not compile');raise SystemExit(1)",
+                              '--inline-bytes', '0')
+        self.assertEqual((len(result['diagnostics']), result['diagnostics_total']), (2, 2))
+        _, result, _ = invoke("for c in 'abcdefghijkl': print(f'ValueError: cause {c}')\nraise SystemExit(1)", '--inline-bytes', '0')
+        self.assertEqual((len(result['diagnostics']), result['diagnostics_total']), (8, 12))
+        _, result, _ = invoke("print('nothing to flag');raise SystemExit(1)", '--inline-bytes', '0')
+        self.assertNotIn('diagnostics_total', result)  # tail fallback, not a match count
+
+    def test_zero_counts_are_not_failures(self):
+        _, result, _ = invoke("print('12 passed, 0 failed, 0 errors');print('errors=0');print('tail')\nraise SystemExit(1)",
+                              '--inline-bytes', '0')
+        self.assertEqual([item['text'] for item in result['diagnostics']], ['12 passed, 0 failed, 0 errors', 'errors=0', 'tail'])
 
     def test_nonzero_and_shell(self):
         status, _, _ = invoke('raise SystemExit(37)')
@@ -269,7 +343,7 @@ class CaptureTests(unittest.TestCase):
         _, _, path = invoke("import sys;sys.stdout.buffer.write(b'\\x00'*200000+b'END\\n')")
         args = [*RUNNER, 'inspect', str(path), '--stream', 'stdout', '--lines', '40', '--max-bytes', '7000']
         process = subprocess.run(args, capture_output=True)
-        self.assertLess(len(process.stdout), 8192)
+        self.assertLessEqual(len(process.stdout), 36001)  # inspect line cap
         result = json.loads(process.stdout)
         self.assertGreater(result['next_offset'], 0)
         self.assertLess(result['next_offset'], 200004)
@@ -284,14 +358,27 @@ class CaptureTests(unittest.TestCase):
         process = subprocess.run([*RUNNER, 'inspect', str(path), '--stream', 'stdout', '--search', 'fatal marker'], capture_output=True)
         result = json.loads(process.stdout)
         self.assertEqual(len(result['fragments']), 1)
-        self.assertIn('fatal marker', result['fragments'][0]['text'])
-        clamped = subprocess.run([*RUNNER, 'inspect', str(path), '--lines', '100', '--max-bytes', '99999'], capture_output=True)
+        self.assertEqual(result['fragments'][0]['text'], 'fatal marker\n')  # the whole line
+        clamped = subprocess.run([*RUNNER, 'inspect', str(path), '--lines', '1000', '--max-bytes', '99999'], capture_output=True)
         self.assertEqual(clamped.returncode, 0)
         result = json.loads(clamped.stdout)
-        self.assertLessEqual(len(result['fragments']), 40)
-        self.assertLess(len(clamped.stdout), 8192)
-        self.assertIn('--lines 100 clamped to 40', result['note'])
-        self.assertIn('--max-bytes 99999 clamped to 7000', result['note'])
+        self.assertLessEqual(len(result['fragments']), 200)
+        self.assertLessEqual(len(clamped.stdout), 36001)
+        self.assertIn('--lines 1000 clamped to 200', result['note'])
+        self.assertIn('--max-bytes 99999 clamped to 30000', result['note'])
+
+    def test_inspect_search_is_a_smart_case_regex_with_literal_fallback(self):
+        _, _, path = invoke("print('ok\\nValueError: shape mismatch\\n  --> src/a.rs:1\\nwarn a[b here\\nend')")
+
+        def found(pattern):
+            process = subprocess.run([*RUNNER, 'inspect', str(path), '--stream', 'stdout', '--search', pattern], capture_output=True)
+            return [f['text'] for f in json.loads(process.stdout)['fragments']]
+        self.assertEqual(found('valueerror'), ['ValueError: shape mismatch\n'])  # lower case: any case
+        self.assertEqual(found('valueError'), [])  # an uppercase letter makes it case-sensitive
+        self.assertEqual(found('ValueError'), ['ValueError: shape mismatch\n'])
+        self.assertEqual(found('error|-->'), ['ValueError: shape mismatch\n  --> src/a.rs:1\n'])  # consecutive: one fragment
+        self.assertEqual(found('ok|-->'), ['ok\n', '  --> src/a.rs:1\n'])
+        self.assertEqual(found('a[b'), ['warn a[b here\n'])  # invalid regex: literal
 
     def test_search_across_chunk_boundary(self):
         _, _, path = invoke("print('x'*1020+'fatal boundary marker'+'y'*5000)")
@@ -305,7 +392,9 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual((result['stdout'], result['stderr']), ('short\n', 'warn\n'))
         self.assertEqual((path/'stdout.log').read_text(), 'short\n')
-        _, result, _ = invoke("print('x'*8192)")
+        _, result, _ = invoke("print('x'*29999)")  # 30000 bytes with the newline: inlined
+        self.assertEqual(result['stdout'], 'x' * 29999 + '\n')
+        _, result, _ = invoke("print('x'*30000)")
         self.assertNotIn('stdout', result)
         _, result, _ = invoke("print('short')", '--inline-bytes', '0')
         self.assertNotIn('stdout', result)
@@ -315,7 +404,7 @@ class CaptureTests(unittest.TestCase):
     def test_inline_thresholds_and_overrides(self):
         # --shell forces the full parser/encoder path; argv exercises the native fast path.
         for shell in (False, True):
-            for size in (8191, 8192, 8193):
+            for size in (29999, 30000, 30001):
                 with self.subTest(shell=shell, size=size):
                     out = 'x' * (size // 2)
                     err = 'y' * (size - len(out))
@@ -324,7 +413,7 @@ class CaptureTests(unittest.TestCase):
                     self.assertEqual(status, 0)
                     self.assertEqual((path/'stdout.log').read_text(), out)
                     self.assertEqual((path/'stderr.log').read_text(), err)
-                    if size <= 8192:
+                    if size <= 30000:
                         self.assertEqual((result['stdout'], result['stderr']), (out, err))
                     else:
                         self.assertNotIn('stdout', result)
@@ -410,8 +499,10 @@ class InspectAliasTests(unittest.TestCase):
         self.assertLessEqual(len(result['fragments']), 1)
         self.assertIn('clamped to 1', result['note'])
         big = self.inspect(str(path), '--lines', '1000')
-        self.assertLessEqual(len(big['fragments']), 40)
-        self.assertLess(len(json.dumps(big)), 8192)
+        self.assertEqual(len(big['fragments']), 1)  # consecutive lines share one fragment
+        self.assertLessEqual(big['fragments'][0]['text'].count('\n'), 200)
+        self.assertLess(len(json.dumps(big)), 36000)
+        self.assertEqual(self.inspect(str(path))['fragments'][0]['text'].count('\n'), 100)  # default lines
 
 
 class ReliabilityTests(unittest.TestCase):
@@ -440,12 +531,21 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual((code, result['status']), (0, 'PASS'))
         self.assertEqual(result['note'], 'SIGPIPE from early pipe close ignored')
         # errexit skips later commands, so a non-final pipeline must stay a failure.
-        code, result = run_shell('yes | head -n 1; echo after')
+        code, result = run_with('run', '--fail-fast', '--shell', 'yes | head -n 1; echo after')
         self.assertEqual((code, result['status'], result['exit_code']), (141, 'FAIL', 141))
         code, result = run_shell('exit 141')
         self.assertEqual((code, result['status']), (141, 'FAIL'))
         code, result = run_with('run', '--validation', '--', 'sh', '-c', 'exit 141')
         self.assertEqual((code, result['status']), (141, 'FAIL'))
+
+    def test_fail_fast_sequence_says_later_commands_did_not_run(self):
+        code, result = run_with('run', '--fail-fast', '--shell', 'echo a; false; echo b')
+        self.assertEqual((code, result['status']), (1, 'FAIL'))
+        self.assertIn('did not run', result['note'])
+        for script in ('false', 'echo a | false'):
+            self.assertNotIn('note', run_with('run', '--fail-fast', '--shell', script)[1], script)
+        code, result = run_shell('false; false')
+        self.assertNotIn('note', result)
 
     def test_search_without_match_is_not_a_failure(self):
         here = str(Path(__file__).parent)
@@ -461,12 +561,47 @@ class ReliabilityTests(unittest.TestCase):
             code, result = run_with('run', *arguments)
             self.assertEqual((code, result['status']), (1, 'FAIL'), arguments)
         for script, expected in (('grep zzz /dev/null | false', 1), ('grep zzz /dev/null | cat | false', 1), ('true | false | cat', 1),
-                                 ('grep zzz /dev/null; echo done', 1), ('grep zzz /nonexistent-file', 2),
+                                 ('grep zzz /nonexistent-file', 2),
                                  # A discarded stderr would hide the failed first stage behind the later search.
                                  ('rg zzz /nonexistent-file 2>/dev/null | grep -v yyy | cut -c1-80', 1),
                                  ('cat /nonexistent-file 2>/dev/null | rg zzz', 1)):
             code, result = run_shell(script)
             self.assertEqual((code, result['status']), (expected, 'FAIL'), script)
+        code, result = run_shell('grep zzz /dev/null; echo done', '--fail-fast')
+        self.assertEqual((code, result['status']), (1, 'FAIL'))
+
+
+class PlainPassTests(unittest.TestCase):
+    """A clean PASS that fits inline prints its output as is; anything else keeps the JSON."""
+
+    def run_plain(self, *arguments):
+        env = {k: v for k, v in os.environ.items() if k != 'OMEGA_RUN_JSON'}
+        return subprocess.run([*RUNNER, 'run', *arguments], capture_output=True, env=env)
+
+    def test_clean_pass_prints_stdout_then_stderr(self):
+        process = self.run_plain('--shell', "printf 'é out'; echo err >&2")
+        self.assertEqual((process.returncode, process.stdout, process.stderr), (0, 'é out\nerr\n'.encode(), b''))
+        self.assertEqual(self.run_plain('--', 'true').stdout, b'')
+        # Gain: the envelope a small result used to carry (recorded mean about 190 bytes).
+        script = 'printf "a \\"b\\"\\nc\\n"'
+        plain = self.run_plain('--shell', script).stdout
+        forced = subprocess.run([*RUNNER, 'run', '--shell', script], capture_output=True,
+                                env={**os.environ, 'OMEGA_RUN_JSON': '1'}).stdout
+        self.assertEqual(plain, b'a "b"\nc\n')
+        self.assertGreaterEqual(len(forced) - len(plain), 100)
+
+    def test_other_outcomes_keep_the_json(self):
+        cases = {('--', 'false'): 'FAIL',
+                 ('--', sys.executable, '-c', 'print("x" * 40000)'): 'PASS',  # over the inline limit
+                 ('--', sys.executable, '-c', 'import sys; sys.stdout.buffer.write(b"\\xff")'): 'PASS',
+                 ('--shell', 'yes | head -1'): 'PASS',  # SIGPIPE note
+                 ('--shell', 'rg zzzqqq /dev/null'): 'NO_MATCH'}
+        for arguments, status in cases.items():
+            with self.subTest(arguments=arguments):
+                self.assertEqual(json.loads(self.run_plain(*arguments).stdout)['status'], status)
+        forced = subprocess.run([*RUNNER, 'run', '--', 'echo', 'hi'], capture_output=True,
+                                env={**os.environ, 'OMEGA_RUN_JSON': '1'})
+        self.assertEqual(json.loads(forced.stdout)['stdout'], 'hi\n')
 
 
 if __name__ == '__main__':

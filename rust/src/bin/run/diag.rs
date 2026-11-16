@@ -9,8 +9,9 @@ use std::io::BufRead;
 const EDGE: usize = 4;
 const LIMIT: usize = 8;
 const BUDGET: usize = 4000;
-// Allow 8 KiB of output plus metadata and JSON escaping; large expansions fall back to diagnostics.
-pub const INLINE_BUDGET: usize = 12 * 1024;
+// Allow the default inline output (30000 bytes) plus metadata and JSON escaping; large expansions fall back to diagnostics.
+pub const DEFAULT_INLINE_BYTES: i64 = 30000;
+pub const INLINE_BUDGET: usize = 40 * 1024;
 
 #[derive(Clone)]
 pub struct Item {
@@ -31,6 +32,8 @@ pub struct Summary {
     pub stdout: Option<String>,
     pub stderr: Option<String>,
     pub diagnostics: Vec<Item>,
+    /// Distinct error-like lines in the whole log (0 when `diagnostics` is only the tail).
+    pub matched: u64,
     pub preview: Vec<Item>,
 }
 
@@ -84,6 +87,10 @@ impl Summary {
             b.push(b'}');
         }
         b.push(b']');
+        // Says whether the list is exhaustive: an equal count spares a confirming search.
+        if key == "diagnostics" && self.matched > 0 {
+            b.extend_from_slice(format!(",\"diagnostics_total\":{}", self.matched).as_bytes());
+        }
         }
         b.push(b'}');
         b
@@ -91,8 +98,9 @@ impl Summary {
 }
 
 struct Patterns {
-    tiers: [Regex; 3],
+    tiers: [Regex; 5],
     passed: Regex,
+    zero: Regex,
     ansi: Regex,
     unprintable: Regex,
 }
@@ -101,13 +109,23 @@ fn patterns() -> Patterns {
     let compile = |p: &str| Regex::new(p).expect("static pattern");
     Patterns {
         tiers: [
+            // The cause and the verdict: a raised exception at line start (also a warning raised as an
+            // error), the `___ test_name ___` header naming a failed test (pytest, sympy) and a nonzero
+            // test-summary count. Echoed source such as `raises(TypeError, …)` ranks below.
             compile(
-                r#"Traceback|\b[A-Z]\w*(?:Error|Exception)\b|^E\s|^(?:FAILED|ERROR|FATAL)\b|(?i:\[(?:error|fatal)\])|\berror:|[Ss]egmentation fault|core dumped|\bpanicked\b|terminate called|\bwhat\(\):|Assertion .* failed|\bAborted\b"#,
+                r"^(?:[\w.]+\.)?[A-Z]\w*(?:Error|Exception|Warning)(?::|$)|^_{3,} \S.* _{3,}$|\b[1-9]\d*\s+(?:failed|errors?|exceptions)\b|(?i:\btests? finished:.*\b[1-9]\d*\s+(?:failed|errors?|exceptions))",
             ),
-            compile(r"(?i)\b(?:errors?|exception|fatal|failed|failure|abort(?:ed)?)\b"),
+            compile(
+                r#"Traceback|\b[A-Z]\w*(?:Error|Exception)\b|^E\s|^(?:FAILED|ERROR|FATAL)\b|(?i:\[(?:error|fatal)\])|\berror:|[Ss]egmentation fault|core dumped|\bpanicked\b|terminate called|\bwhat\(\):|Assertion .* failed|\bAborted\b|undefined reference|ld returned|cannot find -l|\bKilled\b|(?i:out of memory)|(?i:\b(?:nan|inf)\b)|(?i:timed out)|\bTimeout\b|Permission denied|No such file or directory|command not found|: not found|CONFLICT \(|\berror\[E\d+\]"#,
+            ),
+            compile(r"(?i)\b(?:errors?|exceptions?|fatal|failed|failure|abort(?:ed)?)\b"),
+            // Below every error: a warning is shown only in the slots errors leave free.
+            compile(r"(?i)\bwarn(?:ing)?\b|\[warn(?:ing)?\]"),
             compile(r#"\b[^\s:]+\.(?:py|c|cc|cpp|cu|h|hpp):\d+|File ".+", line \d+"#),
         ],
         passed: compile(r"\s(?:PASSED|SKIPPED|XFAIL)\b|\[\s*OK\s*\]"),
+        // Zero counts such as `0 failed` or `errors=0` report success.
+        zero: compile(r"(?i)\b0\s+(?:errors?|failed|failures?|exceptions?|warnings?)\b|\b(?:errors?|failed|failures?|warnings?)\s*[=:]\s*0\b"),
         ansi: compile(r"\x1b\[[0-?]*[ -/]*[@-~]"),
         unprintable: compile(r"[\p{C}\p{Z}--[ ]]"),
     }
@@ -119,18 +137,32 @@ pub fn strip_ansi(bytes: &[u8]) -> String {
     p.ansi.replace_all(&String::from_utf8_lossy(bytes), "").into_owned()
 }
 
+/// Dedup key: digit runs collapsed to one `0`.
+fn collapse(text: &str) -> String {
+    let mut key = String::with_capacity(text.len());
+    for c in text.chars() {
+        if !(c.is_ascii_digit() && key.ends_with('0')) {
+            key.push(if c.is_ascii_digit() { '0' } else { c });
+        }
+    }
+    key
+}
+
 #[derive(Default)]
 struct Edges {
     first: Vec<Item>,
     last: VecDeque<Item>,
     seen: HashSet<String>,
+    count: u64,
 }
 
 impl Edges {
-    fn add(&mut self, item: &Item) {
-        if !self.seen.insert(item.text.clone()) {
+    /// `key` is the text with digit runs collapsed: near-identical lines share one slot.
+    fn add(&mut self, item: &Item, key: String) {
+        if !self.seen.insert(key) {
             return;
         }
+        self.count += 1;
         if self.first.len() < EDGE {
             self.first.push(item.clone());
         } else {
@@ -140,7 +172,7 @@ impl Edges {
             self.last.push_back(item.clone());
         }
         if self.seen.len() > 256 {
-            self.seen = self.first.iter().chain(self.last.iter()).map(|i| i.text.clone()).collect();
+            self.seen = self.first.iter().chain(self.last.iter()).map(|i| collapse(&i.text)).collect();
         }
     }
 
@@ -175,9 +207,9 @@ pub fn read_line(reader: &mut impl BufRead, buf: &mut Vec<u8>, limit: usize) -> 
 
 /// Diagnostics ordered by importance (callers drop from the end). Streams are
 /// read through pinned descriptors, never through mutable evidence names.
-fn excerpts(stdout_fd: i32, stderr_fd: i32, preview: bool) -> (Vec<Item>, Vec<Item>) {
+fn excerpts(stdout_fd: i32, stderr_fd: i32, preview: bool) -> (Vec<Item>, Vec<Item>, u64) {
     let p = patterns();
-    let mut tiers: [Edges; 3] = Default::default();
+    let mut tiers: [Edges; 5] = Default::default();
     let mut tail: VecDeque<Item> = VecDeque::new();
     let mut boundaries = Vec::new();
     let mut buf = Vec::new();
@@ -213,9 +245,10 @@ fn excerpts(stdout_fd: i32, stderr_fd: i32, preview: bool) -> (Vec<Item>, Vec<It
             if p.passed.is_match(&item.text) {
                 continue;
             }
+            let probe = p.zero.replace_all(&item.text, "");
             for (pattern, edges) in p.tiers.iter().zip(tiers.iter_mut()) {
-                if pattern.is_match(&item.text) {
-                    edges.add(&item);
+                if pattern.is_match(&probe) {
+                    edges.add(&item, collapse(&item.text));
                     break;
                 }
             }
@@ -237,7 +270,8 @@ fn excerpts(stdout_fd: i32, stderr_fd: i32, preview: bool) -> (Vec<Item>, Vec<It
             }
         }
     }
-    (if selected.is_empty() { tail.into_iter().collect() } else { selected }, snippets)
+    let matched = tiers.iter().map(|e| e.count).sum();
+    (if selected.is_empty() { tail.into_iter().collect() } else { selected }, snippets, matched)
 }
 
 pub fn read_fd(fd: i32) -> Vec<u8> {
@@ -273,10 +307,11 @@ pub fn finalize(mut s: Summary, inline_bytes: i64, stdout_fd: i32, stderr_fd: i3
         s.stdout = None;
         s.stderr = None;
         if s.exit_code != 0 || inline_bytes > 0 {
-            let (diagnostics, mut preview) = excerpts(stdout_fd, stderr_fd, inline_bytes > 0);
+            let (diagnostics, mut preview, matched) = excerpts(stdout_fd, stderr_fd, inline_bytes > 0);
             if s.exit_code != 0 {
                 preview.retain(|p| !diagnostics.iter().any(|d| d.stream == p.stream && d.offset == p.offset && d.text == p.text));
                 s.diagnostics = diagnostics;
+                s.matched = matched;
             }
             s.preview = preview;
         }

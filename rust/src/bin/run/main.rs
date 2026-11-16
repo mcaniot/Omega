@@ -79,20 +79,25 @@ fn home() -> Option<Arg> {
     Some(unsafe { std::ffi::CStr::from_ptr((*pw).pw_dir) }.to_bytes().to_vec())
 }
 
-/// Strict native grammar. `None` means the input needs the argparse path.
-fn shell_command(executable: Arg, script: Arg, keep_going: bool) -> Vec<Arg> {
+/// Every command runs, like a plain shell, with pipefail so a pipeline's failure stays visible;
+/// `--fail-fast` adds errexit, `--shell-keep-going` drops pipefail (legacy semantics).
+fn shell_command(executable: Arg, script: Arg, fail_fast: bool, keep_going: bool) -> Vec<Arg> {
     let mut command = vec![executable];
-    if !keep_going {
-        command.extend([b"-e".to_vec(), b"-o".to_vec(), b"pipefail".to_vec()]);
+    if fail_fast && !keep_going {
+        command.push(b"-e".to_vec());
         // Bash otherwise clears errexit inside command substitutions.
         if command[0] == b"bash" || command[0].ends_with(b"/bash") {
             command.extend([b"-O".to_vec(), b"inherit_errexit".to_vec()]);
         }
     }
+    if !keep_going {
+        command.extend([b"-o".to_vec(), b"pipefail".to_vec()]);
+    }
     command.extend([b"-c".to_vec(), script]);
     command
 }
 
+/// Strict native grammar. `None` means the input needs the argparse path.
 fn native_config(args: &[Arg]) -> Option<Config> {
     if args.iter().flatten().any(|&b| b >= 128) {
         return None;
@@ -100,8 +105,9 @@ fn native_config(args: &[Arg]) -> Option<Config> {
     let (mut cwd_arg, mut shell): (Option<&Arg>, Option<&Arg>) = (None, None);
     let mut shell_executable: Arg = b"/bin/bash".to_vec();
     let mut shell_keep_going = false;
+    let mut fail_fast = false;
     let mut validation = false;
-    let (mut timeout, mut grace, mut inline_bytes, mut max_log_bytes) = (0.0, 10.0, 8192i64, 2i64 << 30);
+    let (mut timeout, mut grace, mut inline_bytes, mut max_log_bytes) = (0.0, 10.0, diag::DEFAULT_INLINE_BYTES, 2i64 << 30);
     let mut pos = 0;
     while pos < args.len() {
         let arg = args[pos].as_slice();
@@ -114,6 +120,11 @@ fn native_config(args: &[Arg]) -> Option<Config> {
         }
         if arg == b"--shell-keep-going" {
             shell_keep_going = true;
+            pos += 1;
+            continue;
+        }
+        if arg == b"--fail-fast" {
+            fail_fast = true;
             pos += 1;
             continue;
         }
@@ -161,11 +172,11 @@ fn native_config(args: &[Arg]) -> Option<Config> {
             if pos < args.len() {
                 fail("Use either --shell or argv after --, not both");
             }
-            shell_command(shell_executable, script.clone(), shell_keep_going)
+            shell_command(shell_executable, script.clone(), fail_fast, shell_keep_going)
         }
         None => {
-            if shell_keep_going {
-                fail("--shell-keep-going requires --shell");
+            if shell_keep_going || fail_fast {
+                fail("--shell-keep-going and --fail-fast require --shell");
             }
             if pos >= args.len() {
                 fail("A command is required after --");
@@ -186,8 +197,8 @@ fn python_run(p: &argparse::Parsed) -> Config {
     if p.flag("validation") && p.string("shell").is_some() {
         fail("--validation requires an independent argv command, not --shell");
     }
-    if p.flag("shell_keep_going") && p.string("shell").is_none() {
-        fail("--shell-keep-going requires --shell");
+    if (p.flag("shell_keep_going") || p.flag("fail_fast")) && p.string("shell").is_none() {
+        fail("--shell-keep-going and --fail-fast require --shell");
     }
     let mut command = p.list("command");
     if command.first().map(Vec::as_slice) == Some(b"--") {
@@ -199,7 +210,7 @@ fn python_run(p: &argparse::Parsed) -> Config {
         }
         command = shell_command(
             p.string("shell_executable").unwrap_or_else(|| b"/bin/bash".to_vec()),
-            script, p.flag("shell_keep_going"),
+            script, p.flag("fail_fast"), p.flag("shell_keep_going"),
         );
     }
     if command.is_empty() {
@@ -221,7 +232,7 @@ fn python_run(p: &argparse::Parsed) -> Config {
         home,
         timeout: timeout.unwrap_or(0.0),
         grace,
-        inline_bytes: p.int("inline_bytes").unwrap_or(8192),
+        inline_bytes: p.int("inline_bytes").unwrap_or(diag::DEFAULT_INLINE_BYTES),
         max_log_bytes,
         python: true,
         validation: p.flag("validation"),

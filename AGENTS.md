@@ -18,12 +18,12 @@ Work silently. No preamble, progress, narration, unsolicited explanations or clo
 
 - Shell only via `'Ω-run' -- <argv>` or `'Ω-run' --shell '<command>'`; `'Ω-inspect' EVIDENCE` (search/offset slices) for evidence, `Ω-prune` dry-run (`--apply` needs approval). Load `tool-output` for statuses and inspection syntax.
 - Full output stays in evidence: read the bounded inline result once, then only needed slices.
-- Validation: standalone argv or fail-fast `--shell`; check each exit status; no `--shell-keep-going`.
+- Validation: standalone argv or `--fail-fast --shell`; check each exit status; no `--shell-keep-going`.
 - Locate with `rg`/symbols before reading text files over 8 KiB, then Read with offset and limit ≤200; diff stats before details. Batch independent calls in one turn; don't re-read content already in context. On a context-budget message, checkpoint the task file and continue.
 
 ## Delegation
 
-Do simple or known-location work directly. Unknown facts → `scout`; prior art or state of the art for a new method → `architect`; known implementation → `coder`; unresolved root cause or design tradeoff → `architect` (read-only, like `scout`). Load a skill when its description matches the task; a skill named in this file is mandatory at its trigger. Delegate only to save main context or parallelize; brief objective, facts/paths, constraints, acceptance criteria. Workers reply in their agent format; the main session verifies. Orca only when requested.
+Delegate only self-contained work whose raw output the main session will not reuse; work whose phases share context (plan, implement, test the same change) stays in the main session. Do single lookups and known-location edits directly. Exploring unseen code across files or triaging long output → `Explore` (parallel for independent questions); prior art or state of the art for a new method, an investigation reading much more than its conclusion, or a clean-context review of a finished diff → `Plan` (read-only, like `Explore`; otherwise design in the main session); self-contained implementation or verbose validation that returns a summary, or independent parallel changes → `coder`. In Codex, `Explore` is `scout` and `Plan` is `architect`. Load a skill when its description matches the task; a skill named in this file is mandatory at its trigger. Brief objective, facts/paths, constraints, acceptance criteria; do not redo a worker's search. Workers reply in their agent format; the main session verifies. Orca only when requested.
 
 ## State and validation
 

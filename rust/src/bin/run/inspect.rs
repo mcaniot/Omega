@@ -3,17 +3,25 @@
 use crate::argparse::Parsed;
 use crate::diag::read_line;
 use crate::py::{self, Style};
+use regex::bytes::{Regex, RegexBuilder};
 use std::io::{BufReader, Seek, SeekFrom};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-const DEFAULT_MAX_BYTES: i64 = 4096;
+const DEFAULT_LINES: i64 = 100;
+const MAX_LINES: i64 = 200;
+const DEFAULT_MAX_BYTES: i64 = 16000;
+const MAX_BYTES: i64 = 30000;
 /// Encoded-size cap of one result line (two labeled results share the budget).
-const LINE_CAP: usize = 7600;
+const LINE_CAP: usize = 36000;
+/// Longest line returned whole (6 bytes of JSON escaping each must fit half of LINE_CAP).
+const LINE_LIMIT: usize = 2048;
 
+/// A run of consecutive returned lines: `offset` locates its first byte, `end` follows its last.
 struct Fragment {
     offset: u64,
+    end: u64,
     text: String,
 }
 
@@ -40,7 +48,7 @@ fn encode(directory: &[u8], stream: &str, offset: i64, next: u64, fragments: &[F
 
 /// Reads one log of `directory`; `note` reports clamped inputs.
 #[allow(clippy::too_many_arguments)]
-fn read_stream(directory: &[u8], stream: &str, offset: i64, lines: i64, max_bytes: i64, needle: Option<&[u8]>, cap: usize, note: &str) -> Result<Vec<u8>, String> {
+fn read_stream(directory: &[u8], stream: &str, offset: i64, lines: i64, max_bytes: i64, needle: Option<&Regex>, cap: usize, note: &str) -> Result<Vec<u8>, String> {
     let mut path = directory.to_vec();
     path.extend_from_slice(format!("/{}.log", stream).as_bytes());
     let open_error = |e: std::io::Error| py::oserror(e.raw_os_error().unwrap_or(0), &path);
@@ -50,38 +58,37 @@ fn read_stream(directory: &[u8], stream: &str, offset: i64, lines: i64, max_byte
     let mut source = BufReader::new(file);
     let (mut pos, mut next) = (offset as u64, offset as u64);
     let mut fragments: Vec<Fragment> = Vec::new();
-    let (mut used, mut overlap) = (0i64, Vec::<u8>::new());
+    let mut used = 0i64;
     let mut raw = Vec::new();
-    while (fragments.len() as i64) < lines && used < max_bytes {
+    let mut count = 0i64;
+    while count < lines && used < max_bytes {
         let at = pos;
-        read_line(&mut source, &mut raw, 1024.min((max_bytes - used) as usize)).map_err(open_error)?;
+        read_line(&mut source, &mut raw, LINE_LIMIT.min((max_bytes - used) as usize)).map_err(open_error)?;
         if raw.is_empty() {
             break;
         }
         pos += raw.len() as u64;
-        let mut window = overlap.clone();
-        window.extend_from_slice(&raw);
-        let found = needle.and_then(|n| window.windows(n.len()).position(|w| w == n));
-        if needle.is_none() || found.is_some() {
-            let (fragment, fragment_offset) = match (needle, found) {
-                (Some(n), Some(m)) => {
-                    let begin = m.saturating_sub(100);
-                    (window[begin..(m + n.len() + 100).min(window.len())].to_vec(), at - overlap.len() as u64 + begin as u64)
-                }
-                _ => (raw.clone(), at),
-            };
-            fragments.push(Fragment { offset: fragment_offset, text: String::from_utf8_lossy(&fragment).into_owned() });
+        if needle.is_none_or(|n| n.is_match(&raw)) {
+            // Contiguous lines share one fragment: per-line framing cost a third more tokens than the text.
+            let text = String::from_utf8_lossy(&raw);
+            let joined = fragments.last().is_some_and(|last| last.end == at);
+            match fragments.last_mut() {
+                Some(last) if joined => last.text.push_str(&text),
+                _ => fragments.push(Fragment { offset: at, end: at, text: text.into_owned() }),
+            }
             if encode(directory, stream, offset, next, &fragments, false, note).len() > cap {
-                fragments.pop();
+                let last = fragments.last_mut().expect("just extended");
+                last.text.truncate(last.text.len() - String::from_utf8_lossy(&raw).len());
+                if !joined {
+                    fragments.pop();
+                }
                 pos = at;
                 break;
             }
-            used += fragment.len() as i64;
+            fragments.last_mut().expect("just extended").end = pos;
+            count += 1;
+            used += raw.len() as i64;
         }
-        overlap = match needle {
-            Some(n) if n.len() > 1 => window[window.len().saturating_sub(n.len() - 1)..].to_vec(),
-            _ => Vec::new(),
-        };
         next = pos;
     }
     Ok(encode(directory, stream, offset, next, &fragments, pos >= size, note))
@@ -110,6 +117,24 @@ fn locate(evidence: &[u8]) -> (Vec<u8>, Option<&'static str>) {
     (py::resolve(evidence), None)
 }
 
+/// Search pattern: a regex with smart case (case-insensitive unless the pattern has an
+/// uppercase letter); text that is not a valid regex is searched literally. A valid regex also
+/// matches its own literal text, so `error[E0308]` finds that rustc code.
+fn matcher(pattern: &[u8]) -> Regex {
+    let text = std::str::from_utf8(pattern).ok();
+    let (mut escaped, mut upper) = (false, false);
+    for c in text.unwrap_or_default().chars() {
+        upper |= !escaped && c.is_uppercase();
+        escaped = !escaped && c == '\\';
+    }
+    let build = |source: &str, fold: bool| RegexBuilder::new(source).case_insensitive(fold).build();
+    let regex = text.filter(|t| build(t, !upper).is_ok());
+    regex.and_then(|t| build(&format!("(?:{t})|{}", regex::escape(t)), !upper).ok()).unwrap_or_else(|| {
+        let literal: String = pattern.iter().map(|b| format!("\\x{b:02x}")).collect();
+        RegexBuilder::new(&literal).unicode(false).build().expect("escaped literal")
+    })
+}
+
 /// Returns the JSON line, or the error text for the failure result.
 /// Out-of-range `--lines`/`--max-bytes` are clamped (never exceeding the caps)
 /// and reported in `note`. Stream `auto` reads stdout when stderr is empty or
@@ -117,7 +142,7 @@ fn locate(evidence: &[u8]) -> (Vec<u8>, Option<&'static str>) {
 pub fn inspect(p: &Parsed) -> Result<Vec<u8>, String> {
     let offset = p.int("offset").unwrap_or(0);
     if offset < 0 {
-        return Err("Require offset >= 0, lines 1..40, max-bytes 1..7000".into());
+        return Err("Require offset >= 0, lines 1..200, max-bytes 1..30000".into());
     }
     let mut notes: Vec<String> = Vec::new();
     let mut clamp = |name: &str, value: Option<i64>, default: i64, max: i64| -> i64 {
@@ -128,8 +153,8 @@ pub fn inspect(p: &Parsed) -> Result<Vec<u8>, String> {
         }
         c
     };
-    let lines = clamp("--lines", p.int("lines"), 20, 40);
-    let max_bytes = clamp("--max-bytes", p.int("max_bytes"), DEFAULT_MAX_BYTES, 7000);
+    let lines = clamp("--lines", p.int("lines"), DEFAULT_LINES, MAX_LINES);
+    let max_bytes = clamp("--max-bytes", p.int("max_bytes"), DEFAULT_MAX_BYTES, MAX_BYTES);
     let needle = p.string("search");
     if let Some(n) = &needle {
         if !(1..=512).contains(&n.len()) {
@@ -145,7 +170,8 @@ pub fn inspect(p: &Parsed) -> Result<Vec<u8>, String> {
         _ => "auto",
     };
     let note = notes.join("; ");
-    let needle = needle.as_deref();
+    let needle = needle.as_deref().map(matcher);
+    let needle = needle.as_ref();
     if stream != "auto" {
         return read_stream(&directory, stream, offset, lines, max_bytes, needle, LINE_CAP, &note);
     }

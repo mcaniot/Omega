@@ -26,12 +26,16 @@ checks command resolution on `PATH` and preserves native sandbox and approval ch
 ```
 
 The full stdout/stderr goes to `~/.agents/tasks/evidence/`; the reply is bounded JSON with
-`status`, `exit_code` and the `evidence` path.
+`status`, `exit_code` and the `evidence` path. A clean `PASS` (exit 0, no note) whose output fits
+inline prints that output as is, stdout then stderr, like the plain Bash tool
+(`OMEGA_RUN_JSON=1` restores the JSON).
 
 - **Large output** includes a bounded `preview` (beginning/end and prioritized errors). Complete
   logs and failure `diagnostics` remain intact. `--inline-bytes 0` disables successful previews.
-- **`--shell` fails fast** (errexit/pipefail; Bash inherits errexit in substitutions).
-  `--shell-keep-going` restores the legacy last-command behavior, for exploration only.
+  Up to 30000 bytes of combined stdout/stderr are returned inline by default (`--inline-bytes N`).
+- **`--shell` runs every command** with pipefail, like a plain shell: one failed exploration step
+  does not stop the batch. `--fail-fast` adds errexit (Bash inherits it in substitutions) for
+  scripts whose steps are all required. `--shell-keep-going` also drops pipefail (legacy).
   Conditionals, `||`, `!` and background jobs can still swallow errors.
 - **`--validation`** is for required checks: one per check, standalone argv. It rejects `--shell`
   before execution; it does not inspect arbitrary executables or scripts. PASS only means that
@@ -42,11 +46,14 @@ All options and exit codes: [native executor usage](../tools/robot-exec/native/R
 ## `Ω-inspect`
 
 ```sh
-'Ω-inspect' EVIDENCE --stream stderr --search error --lines 20
+'Ω-inspect' EVIDENCE --stream stderr --search 'error|panic' --lines 20
 'Ω-inspect' EVIDENCE --offset 4096 --lines 50
 ```
 
-Reads only the requested slice of an evidence file instead of the whole log.
+Reads only the requested slice of an evidence file instead of the whole log: 100 lines or 16000
+bytes by default, at most 200 lines and 30000 bytes per call. `--search` is a regex with smart case
+(case-insensitive unless it contains an uppercase letter; text that is not a valid regex is
+searched literally) and returns each matching line whole.
 
 ## `Ω-prune`
 

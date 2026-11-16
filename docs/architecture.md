@@ -56,9 +56,9 @@ Runtime state stays outside the repository: `~/.agents/tasks/` (`active/`, `comp
 
 | Agent | Use for | Can edit |
 | --- | --- | --- |
-| `scout` | Fast lookups, log triage | No |
+| `scout` (Claude Code: `Explore`) | Fast lookups, log triage | No |
 | `coder` | A scoped change whose location and approach are known | Yes |
-| `architect` | Design tradeoffs, unresolved root causes, risky interfaces | No |
+| `architect` (Claude Code: `Plan`) | Design tradeoffs, unresolved root causes, risky interfaces | No |
 
 Robotics is a skill domain (`robotics-learning`, `robotics-validation`, …), not a role. The Codex
 model of each agent is set in `CODEX_AGENTS` (`install.py`), which generates standalone

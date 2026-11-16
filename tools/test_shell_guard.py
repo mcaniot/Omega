@@ -106,12 +106,10 @@ class GuardTest(unittest.TestCase):
     def test_miswritten_wrapper_calls_name_their_fix(self):
         evidence = f'{HOME}/.agents/tasks/evidence/20260101T000000-native-abcdef'
         expected = {
-            f"'Ω-inspect' {evidence} 2>&1 | head -200": 'Ω-inspect is already bounded',
             f"'Ω-inspect' {evidence} --offset 0; 'Ω-inspect' {evidence} --offset 2900": 'Ω-inspect is already bounded',
             f'{NATIVE} run -- ls | head': 'Nothing may precede or follow the wrapper',
             f'{NATIVE} inspect {evidence} | head -5': 'Ω-inspect is already bounded',
-            '\'Ω-run\' -- python3 -c "print(1 != 2, \'||\')"': 'Double quotes keep $, backquote and ! live',
-            "'Ω-run' --shell 'python3 - <<\"EOF\"\nprint(\"it's\")\nEOF'": 'Heredoc: create the file',
+            '\'Ω-run\' -- python3 -c "print(1, \'$x||\')"': 'Double quotes keep $, backquote and ! live',
             "cat > /tmp/s.py <<'EOF'\n# don't\n" + 'x = 1\n' * 60 + 'EOF': 'Heredoc: create the file',
         }
         for command, fix in expected.items():
@@ -122,6 +120,8 @@ class GuardTest(unittest.TestCase):
         quoted = {
             f"{NATIVE} run -- python3 -c 'print(1 << 2); x = \"<<\";' \"$HOME\"": 'Double quotes keep $, backquote and ! live',
             "cat > /tmp/s.py <<'EOF'\n# don't\nEOF": 'Ready-to-run',
+            '\'Ω-run\' -- python3 -c "print(1 != 2, \'||\')"': 'Ready-to-run',  # `!` is literal: requoted
+            "'Ω-run' --shell 'python3 - <<\"EOF\"\nprint(\"it's\")\nEOF'": 'Ready-to-run',
         }
         for command, fix in quoted.items():
             reason = self.reason(command)
@@ -230,6 +230,41 @@ class GuardTest(unittest.TestCase):
     def test_inspect_is_never_policy_gated(self):
         self.assertEqual(self.call(shlex.join([NATIVE, 'inspect', '/tmp/sudo'])), {})
 
+    def test_inspect_may_feed_a_read_only_filter(self):
+        # A trusted `Ω-inspect` on PATH (a real HOME is needed: the guard checks the alias target).
+        with tempfile.TemporaryDirectory() as home:
+            native = Path(home, '.agents/tools/robot-exec/native/run')
+            native.parent.mkdir(parents=True)
+            native.symlink_to('/bin/true')
+            bin_dir = Path(home, 'bin')
+            bin_dir.mkdir()
+            (bin_dir / 'Ω-inspect').symlink_to(native)
+
+            def decide(command):
+                payload = json.dumps({'tool_name': 'Bash', 'tool_input': {'command': command}}).encode()
+                done = subprocess.run([BINARY], input=payload, capture_output=True, timeout=30,
+                                      env={'PATH': f'{bin_dir}:/usr/bin:/bin', 'HOME': home, 'LC_ALL': 'en_US.UTF-8'})
+                self.assertEqual((done.returncode, done.stderr), (0, b''))
+                return json.loads(done.stdout)
+            for command in ["'Ω-inspect' /tmp/e --search error | head -5", "'Ω-inspect' /tmp/e 2>&1 | tail -20",
+                            "'Ω-inspect' /tmp/e | grep -c foo", "'Ω-inspect' /tmp/e --search 'a|b' | wc -l",
+                            "'Ω-inspect' /tmp/e | rg 'x y'", "'Ω-inspect' /tmp/e --search 'error' 2>&1 | head -30",
+                            "'Ω-inspect' /tmp/e --search 'nan' | grep -n 'loss'", 'Ω-inspect /tmp/e --search "a|b"  |  head -3',
+                            # Recorded: denied for `cut` or a second filter, each resent without them.
+                            "'Ω-inspect' /tmp/e --lines 90 | cut -c1-220",
+                            "'Ω-inspect' /tmp/e --search 'a|b' 2>/dev/null | cut -c1-700 | head -n 45"]:
+                with self.subTest(command=command):
+                    self.assertEqual(decide(command), {})
+            for command in ["'Ω-inspect' /tmp/e | python3 -c 'import os'", "'Ω-inspect' /tmp/e | head -5 | cat",
+                            "'Ω-inspect' /tmp/e | cut -c1-9 | sh", "'Ω-inspect' /tmp/e 2>/tmp/x | cut -c1-9",
+                            "'Ω-inspect' /tmp/e | head -5; ls", "'Ω-inspect' /tmp/e | head > /tmp/x",
+                            "'Ω-inspect' /tmp/e | rg --pre ls x", "ls | head", "'Ω-inspect' /tmp/e; ls | head",
+                            "'Ω-inspect' /tmp/e --search 'error' | head -3; ls", "'Ω-inspect' /tmp/e --search 'x' | head $(ls)",
+                            "'Ω-inspect' /tmp/e --search 'x' | head -3 > /tmp/x",
+                            "'Ω-inspect' /tmp/e --search \"$(ls)\" | head", "'Ω-inspect' /tmp/e --search 'x' || head"]:
+                with self.subTest(command=command):
+                    self.assertEqual(decide(command)['hookSpecificOutput']['permissionDecision'], 'deny')
+
     def test_prune_apply_asks(self):
         self.assertEqual(self.call(shlex.join([NATIVE, 'prune'])), {})
         result = self.call(shlex.join([NATIVE, 'prune', '--apply']))
@@ -263,6 +298,17 @@ class GuardTest(unittest.TestCase):
             self.assertEqual(decision(shlex.join(argv)), expected, argv)
         self.assertEqual(decision('pytest -q'), 'deny')
         self.assertEqual(decision('anything', tool='Read'), 'pass')
+        # Batched wrapper calls: allowed only when every call is clean on its own.
+        run = lambda *argv: shlex.join([NATIVE, 'run', *argv])  # noqa: E731
+        allowed = [f"{run('--shell', 'a; b')}; {run('--', 'ls')}", f"{run('--', 'ls')} && {run('--', 'pwd')}",
+                   f"{run('--', 'ls')}; {shlex.join([NATIVE, 'inspect', '/tmp/e'])}"]
+        denied = [f"{run('--', 'ls')}; {run('--', 'rm', 'x')}", f"{run('--', 'ls')}; ls", f"{run('--', 'ls')} | head",
+                  f"{run('--', 'ls')} || {run('--', 'pwd')}", f"{run('--', 'ls')} & {run('--', 'pwd')}",
+                  f"{run('--', 'ls')}; {run('--', 'git', 'push')}", f"{run('--', 'ls')}; echo $({run('--', 'pwd')})"]
+        for command in allowed:
+            self.assertEqual(decision(command), 'allow', command)
+        for command in denied:
+            self.assertNotEqual(decision(command), 'allow', command)
 
     def test_allow_clean_auto_wraps_unwrapped_policy_clean_commands(self):
         with tempfile.TemporaryDirectory() as home:
@@ -272,6 +318,7 @@ class GuardTest(unittest.TestCase):
             native.chmod(0o700)
             Path(home, 'bin').mkdir()
             Path(home, 'bin/Ω-run').symlink_to(native)
+            Path(home, 'bin/Ω-inspect').symlink_to(native)
 
             def output(command, args=('--allow-clean',), tool='Bash', **extra):
                 payload = json.dumps({'tool_name': tool, 'tool_input': {'command': command, **extra}}).encode()
@@ -285,8 +332,103 @@ class GuardTest(unittest.TestCase):
             self.assertEqual(wrapped['updatedInput'], {'command': shlex.join(['Ω-run', '--shell', "cd x && make 'a b'"]),
                                                        'timeout': 5000, 'description': 'd'})
             self.assertIn('Ω-run --shell', wrapped['additionalContext'])
+            # A cd before the wrapper moves into --cwd instead of nesting one result JSON in another.
+            for command, moved in [("cd ../a && 'Ω-run' --shell 'ls | head -3'",
+                                    ['Ω-run', '--cwd', '../a', '--shell', 'ls | head -3']),
+                                   ('cd /tmp/x && Ω-run -- make test', ['Ω-run', '--cwd', '/tmp/x', '--', 'make', 'test'])]:
+                self.assertEqual(output(command)['updatedInput'], {'command': shlex.join(moved)}, command)
+            for command in ("cd a && 'Ω-run' --cwd b -- ls", "cd a && 'Ω-run' -- ls | head", 'cd a && Ω-run -- ls; ls',
+                            'cd "$X" && Ω-run -- ls'):
+                self.assertNotIn('--cwd a', output(command).get('updatedInput', {}).get('command', ''), command)
             heredoc = "python3 - <<'EOF'\n" + 'print("x")\n' * 60 + 'EOF'
             self.assertEqual(output(heredoc)['updatedInput'], {'command': shlex.join(['Ω-run', '--shell', heredoc])})
+            # Recorded: 130 heredocs denied as malformed quoting because the body held an apostrophe,
+            # each costing a round trip to write a file instead. The body is data: auto-wrapped now.
+            for heredoc in ("python3 - <<'EOF'\ns = \"dataset's range\"\nprint(s)\nEOF",
+                            "cd /tmp && mkdir -p d && cat > d/f <<'EOF'\n#!/bin/bash\necho \"it's $1\"\nEOF\nchmod +x d/f",
+                            'cat <<-EOF\n\tdon\'t\n\tEOF'):
+                self.assertEqual(output(heredoc)['updatedInput'], {'command': shlex.join(['Ω-run', '--shell', heredoc])},
+                                 heredoc)
+            for command in ("python3 - <<'EOF'\nimport os\nos.system('git push --force')\nit's\nEOF",  # policy reads the body
+                            "python3 - <<'EOF'\nit's\n",  # unterminated body
+                            "echo it's <<'EOF'\nx\nEOF",  # unbalanced quote outside the body
+                            "'Ω-run' --shell 'git push --force origin 'main''",  # literal script, policy still applies
+                            "'Ω-run' --shell 'echo a' && 'Ω-run' --shell-keep-going 'x'"):
+                self.assertNotIn('updatedInput', output(command), command)
+            # Recorded: 107 wrapper calls whose single-quoted script held apostrophes were denied (the
+            # shell would cut the script); the text between the outer quotes is run as the script.
+            for options, script in [(['--cwd', '/tmp'], "python3 - <<\"EOF\"\ns.replace('a', 'b')\nEOF"),
+                                    ([], "rg -n 'x y' src | head"),
+                                    (['--timeout', '60'], "echo don't")]:
+                command = shlex.join(['Ω-run', *options]) + " --shell '" + script + "'"
+                self.assertEqual(output(command)['updatedInput'],
+                                 {'command': shlex.join(['Ω-run', *options, '--shell', script])}, command)
+            # Recorded: 26 wrapper calls denied for what sat outside them (an outer redirection or
+            # filter, a trailing `; true`, a plain command after the call), each resent by hand.
+            for command, fixed in [
+                    ("'Ω-run' --shell 'cat a; cat b' > /tmp/out.txt", "'Ω-run' --shell '{ cat a; cat b\n} > /tmp/out.txt'"),
+                    ("'Ω-run' --cwd /tmp --shell 'make' 2>&1 | head -5", "'Ω-run' --cwd /tmp --shell 'make 2>&1 | head -5'"),
+                    ("'Ω-run' -- rg -n x src | cut -c1-80", "'Ω-run' --shell 'rg -n x src | cut -c1-80'"),
+                    ("'Ω-run' --shell 'rg x | head' ; true", "'Ω-run' --shell 'rg x | head'"),
+                    ("'Ω-run' -- ls || true", "'Ω-run' -- ls"),
+                    ("'Ω-run' --shell 'ls'; sed -n '1,80p' f.yml", "'Ω-run' --shell 'ls'; 'Ω-run' --shell 'sed -n '\"'\"'1,80p'\"'\"' f.yml'"),
+                    ("'Ω-run' -- make 2>&1 | tail -3; 'Ω-inspect' /e --lines 9 | head",
+                     "'Ω-run' --shell 'make 2>&1 | tail -3'; 'Ω-inspect' /e --lines 9 | head"),
+                    # Recorded 8 times: a call with options only, as if it set a mode for the next.
+                    ("'Ω-run' --shell-keep-going 2>/dev/null; 'Ω-run' --shell 'ls'", "'Ω-run' --shell 'ls'"),
+                    ("'Ω-inspect' --help 2>&1 | head -20; ls /tmp", "'Ω-inspect' --help 2>&1 | head -20; 'Ω-run' --shell 'ls /tmp'")]:
+                wrapped = output(command)
+                self.assertEqual(wrapped.get('updatedInput'), {'command': fixed}, command)
+                self.assertLess(len(fixed), len(command) + 40)  # no nested result, no extra escaping
+            # Recorded: 34 argv wrapper calls denied for quoting the shell would not take as written
+            # (`!` or `\"` in double quotes, `(` or `\;` outside quotes) with no ready-to-run form.
+            for command, argv in [('Ω-run -- rg -n "a(?!b)" -g "!x/**"', ['rg', '-n', 'a(?!b)', '-g', '!x/**']),
+                                  ('Ω-run -- rg -F -e self.reset() src', ['rg', '-F', '-e', 'self.reset()', 'src']),
+                                  ('Ω-run -- sed -n 45,60p\\;125,150p f', ['sed', '-n', '45,60p;125,150p', 'f']),
+                                  ('Ω-run -- python3 -c "print(\\"x\\")"', ['python3', '-c', 'print("x")']),
+                                  ('Ω-run -- rg -e ^diff -e def\\ f x', ['rg', '-e', '^diff', '-e', 'def f', 'x']),
+                                  ('Ω-run -- rg -n x -g !*.md --glob=*.py --include *.h', ['rg', '-n', 'x', '-g', '!*.md',
+                                                                                        '--glob=*.py', '--include', '*.h'])]:
+                self.assertEqual(output(command).get('updatedInput'), {'command': shlex.join(['Ω-run', '--', *argv])},
+                                 command)
+            for command in ('Ω-run -- rg "$1" x', 'Ω-run -- ls ~/x', 'Ω-run -- ls *.py', 'Ω-run -- rg -g x *.py', 'Ω-run -- rg "a\\$b"',
+                            'Ω-run -- echo "a\\`b"', 'Ω-run -- ls {a,b}', 'Ω-run -- echo a # b', 'Ω-run -- echo "a\\\nb"',
+                            'Ω-run -- rg "!x" | head; rm -r y'):
+                self.assertNotIn('updatedInput', output(command), command)
+            # Recorded: 11 scripts escaped their heredoc delimiter ('"'"'EOF'"'"') but left a raw
+            # apostrophe in the body; the body is data, so the decoded script is what was meant.
+            script = "cd /tmp && python3 - <<'EOF'\ns = \"the episode's end\"\nprint('x')\nEOF\ngit diff --stat"
+            escaped = script.replace("'EOF'", "'\"'\"'EOF'\"'\"'").replace("print('x')", "print('\"'\"'x'\"'\"')")
+            command = f"'Ω-run' --shell '{escaped}'"
+            self.assertEqual(output(command).get('updatedInput'), {'command': shlex.join(['Ω-run', '--shell', script])})
+            # Recorded: options written after the script (`--shell '…' --cwd DIR`) move before it.
+            script = "python3 - <<\"EOF\"\nprint('x')\nEOF"
+            self.assertEqual(output(f"'Ω-run' --shell '{script}' --cwd /tmp").get('updatedInput'),
+                             {'command': shlex.join(['Ω-run', '--cwd', '/tmp', '--shell', script])})
+            script = "print(open('a').read())"  # recorded with --shell-executable python3
+            self.assertEqual(output(f"'Ω-run' --shell-executable /usr/bin/python3 --shell '{script}'").get('updatedInput'),
+                             {'command': shlex.join(['Ω-run', '--shell-executable', '/usr/bin/python3', '--shell', script])})
+            for script in ("echo it's\npython3 - <<'\"'\"'EOF'\"'\"'\nx\nEOF",  # slip outside the body
+                           "python3 - <<'\"'\"'EOF'\"'\"'\nit's\n",  # unterminated body
+                           "python3 - <<'\"'\"'EOF'\"'\"'\nprint('\"'\"'x'\"'\"')\nEOF"):  # no slip: already right
+                self.assertNotIn('updatedInput', output(f"'Ω-run' --shell '{script}'"), script)
+            # Recorded: 10 argv wrapper calls fed by a heredoc outside them (the wrapper passes no stdin).
+            body = "s = open('a').read()\nprint(\"x\")"
+            for options, delimiter in [(['--cwd', '/tmp'], "'EOF'"), ([], 'PY'), ([], '"E"')]:
+                command = shlex.join(['Ω-run', *options, '--', 'python3', '-']) + f" <<{delimiter}\n{body}\n{delimiter.strip(chr(34) + chr(39))}"
+                script = f"python3 - <<{delimiter}\n{body}\n{delimiter.strip(chr(34) + chr(39))}"
+                self.assertEqual(output(command).get('updatedInput'),
+                                 {'command': shlex.join(['Ω-run', *options, '--shell', script])}, command)
+            for command in ("'Ω-run' -- python3 - <<'EOF'\nx\nEOF\nrm -r y",  # runs after the body
+                            "'Ω-run' -- python3 - <<'EOF'\nx\nEOF\nls\nEOF",  # second command after the body
+                            "'Ω-run' -- python3 - <<'EOF' | head\nx\nEOF",
+                            "'Ω-run' -- python3 - <<'EOF'\nimport os; os.system('git push --force')\nEOF"):
+                self.assertNotIn('updatedInput', output(command), command)
+            for command in ("'Ω-run' -- ls; cd /tmp; 'Ω-run' -- ls",  # cd would not reach the next call
+                            "'Ω-run' --shell 'ls' & 'Ω-run' -- ls",  # background job
+                            "'Ω-run' --shell 'ls' | rm -r x",  # policy reads the moved filter
+                            "'Ω-run' -- ls; git push --force"):
+                self.assertNotIn('updatedInput', output(command), command)
             for command in ('git push', 'rm -r build', 'ros2 topic pub /cmd x', 'echo "unterminated',
                             'Ω-run --shell "echo $HOME"', 'omega-run -- "ls"', 'echo ' + 'a' * 17000):
                 denied = output(command)
@@ -297,6 +439,15 @@ class GuardTest(unittest.TestCase):
 
     def test_zsh_equals_argument_denied(self):
         self.assertDenied(self.call(shlex.join([NATIVE, 'run', '--', 'echo', '=ls'])))
+        self.assertDenied(self.call(f'{NATIVE} run -- rg -n x =='))
+        # Recorded 3 times: a quoted "==" is text to zsh, not an EQUALS expansion.
+        for command in (f'{NATIVE} inspect /tmp/e --search "=="', f"{NATIVE} run -- rg -n '=x' src"):
+            self.assertEqual(self.call(command), {}, command)
+
+    def test_bounded_reports_take_read_only_filters(self):
+        # Recorded: `Ω-resume TASK 2>&1 | head -c 20000` denied; the report is bounded like Ω-inspect.
+        self.assertEqual(self.call("'Ω-resume' t 2>&1 | head -c 20000"), self.call("'Ω-resume' t"))
+        self.assertNotEqual(self.call("'Ω-resume' t | sh"), self.call("'Ω-resume' t"))
 
     def test_internal_failure_fails_closed(self):
         # Nesting beyond the JSON parser's depth limit must deny, never pass through.
