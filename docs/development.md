@@ -42,6 +42,9 @@ omega follows [Semantic Versioning](https://semver.org/). The `version` in `rust
 the single source: `omega --version` prints it, and `tools/test_version.py` checks that
 `rust/Cargo.lock` and the latest `CHANGELOG.md` release match it.
 
+Release only on a measured improvement in the [benchmark](benchmark.md). Unchanged numbers show
+that a change costs nothing; they do not justify a new version.
+
 1. In `CHANGELOG.md`, move the `[Unreleased]` entries under `## [X.Y.Z] - YYYY-MM-DD` and update
    the compare links at the bottom.
 2. Set `version = "X.Y.Z"` in `rust/Cargo.toml`, then run

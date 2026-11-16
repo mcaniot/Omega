@@ -123,7 +123,8 @@ def replay(run, optimize, home, count_tokens):
 
 ROOT = Path(__file__).resolve().parents[1]
 # Baseline of docs/context-reliability.md: the tools before previews, task-first resume and fail-fast shell.
-BASELINE_REF = '4c612c4a794058619df6d2dec38a75573a73091e'
+# A tag, not a hash: it keeps the commit alive and resolvable across a history rewrite.
+BASELINE_REF = 'benchmark-baseline'
 # GPT-2 tokenizer used for the published numbers, pinned by hash.
 TOKENIZER_URL = 'https://huggingface.co/openai-community/gpt2/resolve/main/tokenizer.json'
 TOKENIZER_SHA256 = '8414cab924d8b9b33013f0d221c5862f365ee9be39c5c2bfae8a5a9e970478a6'
@@ -366,8 +367,12 @@ def main():
             built_optimize = getattr(args, label + '_optimize')
             if built_run is None or built_optimize is None:
                 ref = getattr(args, label + '_ref')
-                commit = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '--verify', ref + '^{commit}'],
-                                        capture_output=True, text=True, check=True).stdout.strip()
+                resolved = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '--verify', ref + '^{commit}'],
+                                          capture_output=True, text=True)
+                if resolved.returncode != 0:
+                    sys.exit(f'--{label}-ref {ref}: not a commit in this checkout; '
+                             'run `git fetch --tags origin` or pass another ref')
+                commit = resolved.stdout.strip()
                 report['refs'][label] = commit
                 print(f'building {label} from {commit[:12]}', file=sys.stderr)
                 release = build(commit, root / f'{label}-src')
