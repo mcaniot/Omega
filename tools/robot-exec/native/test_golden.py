@@ -284,6 +284,13 @@ class GoldenTests(unittest.TestCase):
                 actual = comparable(actual)
                 expected = comparable(self.golden[name])
                 expected['stdout'] = compact_envelope(expected['stdout'])
+                if name in {'timeout', 'timeout_ignores_term'}:
+                    # Intentional: a timed-out run carries a note against rerunning it unchanged.
+                    note = (',"note":"time limit reached: do not rerun unchanged in the foreground; '
+                            'run it in the background or split the work"')
+                    self.assertIn(note, actual['stdout'])
+                    actual['stdout'] = actual['stdout'].replace(note, '')
+                    actual['metadata'] = [item.replace(note, '') for item in actual['metadata']]
                 if name == 'run_help':
                     expected['stdout'] = expected['stdout'].replace(
                         '  --shell SHELL\n',

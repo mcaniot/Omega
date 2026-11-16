@@ -34,13 +34,15 @@ const EXIT_BLOCKED_DISK: i32 = 75;
 
 /// Final pipeline of a shell script: whether it is the whole script, whether it
 /// contains a pipe, the words of its last command, and the words of its first
-/// command when every later stage is a plain filter. Conservative lexer:
+/// command when every later stage is a plain filter or a search, and whether a
+/// search runs after the first stage. Conservative lexer:
 /// grouping, substitution and backticks yield `None` (no leniency applies).
 struct Tail {
     whole: bool,
     pipe: bool,
     words: Vec<Vec<u8>>,
     filtered: Option<Vec<Vec<u8>>>,
+    late_search: bool,
 }
 
 /// Stages that only pass lines on and report their own errors on stderr.
@@ -56,7 +58,7 @@ fn flush(words: &mut Vec<Vec<u8>>, word: &mut Vec<u8>) {
 }
 
 fn tail(script: &[u8]) -> Option<Tail> {
-    let (mut whole, mut pipe) = (true, false);
+    let (mut whole, mut pipe, mut late_search) = (true, false, false);
     let mut filtered: Option<Vec<Vec<u8>>> = None;
     let (mut words, mut word): (Vec<Vec<u8>>, Vec<u8>) = (Vec::new(), Vec::new());
     let mut quote = 0u8;
@@ -91,7 +93,8 @@ fn tail(script: &[u8]) -> Option<Tail> {
             }
             b'|' if next != Some(b'|') => {
                 flush(&mut words, &mut word);
-                filtered = if pipe { filtered.filter(|_| is_filter(&words)) } else { Some(std::mem::take(&mut words)) };
+                late_search |= pipe && is_search(&words);
+                filtered = if pipe { filtered.filter(|_| is_filter(&words) || is_search(&words)) } else { Some(std::mem::take(&mut words)) };
                 pipe = true;
                 words.clear();
             }
@@ -105,6 +108,7 @@ fn tail(script: &[u8]) -> Option<Tail> {
                     whole = false;
                 }
                 pipe = false;
+                late_search = false;
                 filtered = None;
                 words.clear();
             }
@@ -118,25 +122,36 @@ fn tail(script: &[u8]) -> Option<Tail> {
         words.push(word);
     }
     let filtered = filtered.filter(|_| is_filter(&words));
-    Some(Tail { whole, pipe, words, filtered })
+    late_search |= pipe && is_search(&words);
+    Some(Tail { whole, pipe, words, filtered, late_search })
 }
 
 fn is_search(words: &[Vec<u8>]) -> bool {
     let mut words = words.iter().skip_while(|w| w.contains(&b'='));
     let Some(first) = words.next() else { return false };
     match first.rsplit(|&b| b == b'/').next().unwrap_or_default() {
-        b"grep" | b"egrep" | b"fgrep" | b"rg" => true,
+        b"grep" | b"egrep" | b"fgrep" | b"rg" | b"pgrep" => true,
         b"git" => words.next().is_some_and(|w| w == b"grep"),
         _ => false,
     }
 }
 
-/// Outside validation: `grep`/`rg`/`git grep` as the whole command, alone, last in
-/// its pipeline or feeding only plain filters (`rg x | head`), exiting 1 with no
-/// output is "no match", not a failure.
+/// Outside validation: `grep`/`rg`/`git grep`/`pgrep` as the whole command, alone, last in
+/// its pipeline or feeding only plain filters and further searches
+/// (`rg x | head`, `pgrep -af x | grep -v y | cut -c1-80`), exiting 1 with no
+/// output is "no match", not a failure. A search after the first stage also exits 1 on
+/// the empty input of a failed earlier stage, so it only qualifies while stderr is kept:
+/// that failure then shows as output.
 fn is_no_match(cfg: &Config) -> bool {
+    let discards_stderr = |script: &[u8]| {
+        [&b"2>/dev/null"[..], b"2> /dev/null", b"&>/dev/null", b"&> /dev/null", b"2>&-"].iter().any(|n| script.windows(n.len()).any(|w| w == *n))
+    };
     match &cfg.script {
-        Some(script) => tail(script).is_some_and(|t| t.whole && (is_search(&t.words) || t.filtered.is_some_and(|first| is_search(&first)))),
+        Some(script) => tail(script).is_some_and(|t| {
+            t.whole
+                && (is_search(&t.words) || t.filtered.is_some_and(|first| is_search(&first)))
+                && !(t.late_search && discards_stderr(script))
+        }),
         None => is_search(&cfg.command),
     }
 }
@@ -797,6 +812,9 @@ pub fn execute(cfg: Config) -> i32 {
     } else {
         "PASS"
     };
+    if timed_out {
+        run.note = "time limit reached: do not rerun unchanged in the foreground; run it in the background or split the work";
+    }
     let sizes = (size_of(out), size_of(err));
     // Exit semantics relaxed outside --validation; interrupted/timed-out runs never qualify.
     if !cfg.validation && status == "FAIL" {

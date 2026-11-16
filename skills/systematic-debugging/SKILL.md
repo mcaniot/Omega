@@ -8,7 +8,7 @@ description: Use when a bug, crash, failing or flaky test, regression or unstabl
 No fix before the root cause is established.
 
 1. Reproduce the failure with the smallest bounded case. Record revision/diff, interpreter, backend, device, seed, configuration, timing and exact command. Capture complete output externally; read the full error and stack trace from evidence.
-2. Compare: check recent changes and the nearest working version or similar working code; list the differences. Trace the failing value to its owner, adding diagnostics at component boundaries. Check units, frames, joint/action ordering, tensor shapes, timestamps and normalization against the project contract.
+2. Compare: check recent changes and the nearest working version or similar working code; list the differences. When a dependency owns the failing behavior, read its source at the installed version and its upstream issues/changelog before hypothesizing. Trace the failing value to its owner, adding diagnostics at component boundaries. Check units, frames, joint/action ordering, tensor shapes, timestamps and normalization against the project contract.
 3. Test one evidence-backed hypothesis at a time with the smallest change; separate observations from hypotheses. A disproven hypothesis is replaced, never stacked with more fixes.
 4. Fix at the owner: add a test that fails before the fix, apply one correction, and verify it at the owning boundary. Symptom patches and "try X and see" are failures.
 

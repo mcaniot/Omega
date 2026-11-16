@@ -451,7 +451,8 @@ class ReliabilityTests(unittest.TestCase):
         here = str(Path(__file__).parent)
         needle = 'qq' + 'needle'
         for script in ('grep zzz /dev/null', 'cat /dev/null | rg zzz', f'git grep {needle} -- .',
-                       'grep zzz /dev/null | cat', 'rg -n zzz /dev/null 2>/dev/null | cut -c1-80 | head -5'):
+                       'grep zzz /dev/null | cat', 'rg -n zzz /dev/null 2>/dev/null | cut -c1-80 | head -5',
+                       'pgrep -x zzqqzz', 'grep zzz /dev/null | grep -v yyy | cut -c1-80'):
             code, result = run_shell(script, '--cwd', here)
             self.assertEqual((code, result['status'], result['exit_code']), (0, 'NO_MATCH', 0), script)
         code, result = run_with('run', '--', 'grep', 'zzz', '/dev/null')
@@ -460,7 +461,10 @@ class ReliabilityTests(unittest.TestCase):
             code, result = run_with('run', *arguments)
             self.assertEqual((code, result['status']), (1, 'FAIL'), arguments)
         for script, expected in (('grep zzz /dev/null | false', 1), ('grep zzz /dev/null | cat | false', 1), ('true | false | cat', 1),
-                                 ('grep zzz /dev/null; echo done', 1), ('grep zzz /nonexistent-file', 2)):
+                                 ('grep zzz /dev/null; echo done', 1), ('grep zzz /nonexistent-file', 2),
+                                 # A discarded stderr would hide the failed first stage behind the later search.
+                                 ('rg zzz /nonexistent-file 2>/dev/null | grep -v yyy | cut -c1-80', 1),
+                                 ('cat /nonexistent-file 2>/dev/null | rg zzz', 1)):
             code, result = run_shell(script)
             self.assertEqual((code, result['status']), (expected, 'FAIL'), script)
 

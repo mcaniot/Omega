@@ -135,8 +135,12 @@ pub fn error_class(call: &Value, result: &Value) -> &'static str {
     let mut lines = lower.lines().map(str::trim);
     let first = lines.next().unwrap_or("");
     if ["exit code 1", "exit code: 1", "process exited with code 1"].contains(&first)
-        && lines.all(str::is_empty) && words(&["grep", "egrep", "fgrep", "rg"]) {
+        && lines.all(str::is_empty) && words(&["grep", "egrep", "fgrep", "rg", "pgrep"]) {
         return "no_match";
+    }
+    // A run that hit its time limit: rerunning it unchanged in the foreground repeats the wait.
+    if first == "exit code 124" || compact.contains("\"status\":\"timeout\"") {
+        return "timeout";
     }
     if has(&["file has not been read yet"])
         || (words(&["Ω-inspect", "Ω-run", "omega-inspect"])

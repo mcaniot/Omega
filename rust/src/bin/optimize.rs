@@ -139,7 +139,7 @@ fn audit(
     let (mut read_calls, mut overlapping_read_calls, mut repeated_read_lines, mut novel_read_lines) = (0, 0, 0, 0);
     let mut legit_reread_lines = 0;
     let edits = ingest::edit_orders(&calls, &results, &call_order);
-    let mut error_classes = [("guard", 0u64), ("wrapper_usage", 0), ("sigpipe", 0), ("no_match", 0), ("data_loss", 0), ("real", 0)];
+    let mut error_classes = [("guard", 0u64), ("wrapper_usage", 0), ("sigpipe", 0), ("no_match", 0), ("data_loss", 0), ("timeout", 0), ("real", 0)];
     for (id, result) in &results {
         if result["is_error"] == true {
             let class = ingest::error_class(calls.get(id).unwrap_or(&Value::Null), result);

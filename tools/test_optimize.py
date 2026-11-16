@@ -506,6 +506,7 @@ class OptimizeTest(unittest.TestCase):
             ('Bash', {'command': 'cp a b'}, 'cp: No space left on device', 'data_loss'),
             ('Bash', {'command': 'run'}, json.dumps({'status': 'DATA_LOSS'}), 'data_loss'),
             ('Bash', {'command': 'make'}, 'Exit code 2\nerror: build failed', 'real'),
+            ('Bash', {'command': 'sim'}, 'Exit code 124\n' + json.dumps({'status': 'TIMEOUT', 'exit_code': 124}, separators=(',', ':')), 'timeout'),
         ]
         rows = []
         for i, (name, arguments, content, _) in enumerate(cases):
@@ -513,7 +514,7 @@ class OptimizeTest(unittest.TestCase):
         self.write_rows(rows)
         row = self.force_row()
         self.assertEqual(row['error_classes'], {'guard': 2, 'wrapper_usage': 3, 'sigpipe': 1,
-                                                'no_match': 1, 'data_loss': 2, 'real': 2})
+                                                'no_match': 1, 'data_loss': 2, 'timeout': 1, 'real': 2})
         self.assertEqual(row['workflow_errors'], 7)
         self.assertEqual(row['tool_errors'], len(cases))
 
