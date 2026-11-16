@@ -42,6 +42,9 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
   (`[n]ame`, `^anchor`): it kills the calling shell and the wrapper, leaving no result. The golden
   fixture gains 17 recorded cases covering this rule and every denial fix; one existing case
   (`run inspect … &`) now gets the `Ω-inspect` sentence.
+- The benchmark baseline is the `benchmark-baseline` tag instead of a commit hash that a history
+  rewrite had removed; an unknown ref ends with a one-line message. Releases require a measured
+  benchmark improvement.
 - The `context_guard` denial for large evidence files spells out the `Ω-inspect` call and its
   40-line / 7000-byte limits.
 

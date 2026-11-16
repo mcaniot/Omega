@@ -38,7 +38,7 @@ bounded summary plus the one matching line from `Ω-inspect`.
 
 ### Previous omega vs current omega
 
-The same workloads replayed on the baseline `4c612c4` (before previews, task-first resume and
+The same workloads replayed on the baseline tag `benchmark-baseline` (`9129c9a`; before previews, task-first resume and
 fail-fast shell) and on the current version. Medians of 15 replays.
 
 | Workload | Returned tokens | Reads | Local latency (ms) |
@@ -123,7 +123,7 @@ the run instead of counting as a win:
 
 | Option | Effect |
 | --- | --- |
-| `--before-ref REF` | Baseline commit (default `4c612c4`) |
+| `--before-ref REF` | Baseline commit (default: the `benchmark-baseline` tag; `git fetch --tags origin` if it is missing) |
 | `--after-ref REF` | Candidate commit (default `HEAD`; commit your change first) |
 | `--before-run`, `--before-optimize`, `--after-run`, `--after-optimize`, `--context-guard` | Use prebuilt binaries instead of building |
 | `--repeats N` | Replays per version (default 7) |
