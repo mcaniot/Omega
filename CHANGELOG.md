@@ -14,6 +14,10 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 
 ### Changed
 
+- `coder` gets one bounded step per run (about 5 files; larger plan steps are split) with the known
+  `file:line` map in its brief, returns `status: partial` when the work grows beyond that, and
+  stops at `maxTurns: 120`. Recorded runs of 60+ requests (whole plan steps, ~11 files, contexts
+  near 200k, 19 of 36 compacted) were 72 % of coder cost; the median run is 42 requests.
 - End-to-end A/B of the current version against plain Claude Code (advisor off, 3 repetitions,
   27/27 both): −24 % cost, −49 % turns, −33 % wall time; README and benchmark page updated.
   `tools/benchmark_context.py` passes `--fail-fast` for the strict-shell scenario (it failed on

@@ -198,6 +198,8 @@ class ResponseSettingsTest(unittest.TestCase):
         scout = self.installer.frontmatter(ROOT / 'agents/scout.md')[0]
         self.assertEqual((scout['name'], scout['model'], int(scout['maxTurns'])), ('Explore', 'claude-haiku-5-5', 30))
         self.assertEqual(self.installer.frontmatter(ROOT / 'agents/architect.md')[0]['name'], 'Plan')
+        # Recorded coder runs >= 60 requests: 72 % of coder cost, up to 240 requests; median 42.
+        self.assertEqual(int(self.installer.frontmatter(ROOT / 'agents/coder.md')[0]['maxTurns']), 120)
         self.assertEqual(self.installer.DENIED_AGENTS, ('Agent(general-purpose)',))
 
     def test_skill_references_and_trigger_descriptions(self):
