@@ -1,4 +1,5 @@
-//! UserPromptSubmit + SessionStart hook: titles the session "Prénom — branche" and tells the agent its name.
+//! UserPromptSubmit + SessionStart hook: titles the session "branche — Prénom" and tells the agent its name.
+//! Branch first so an alphabetical sidebar groups sessions by worktree.
 //!
 //! Session naming hook (see `hooks/test_session_name.py` for the output and registry contract).
 //! Any error prints nothing: naming must never block a prompt.
@@ -160,6 +161,17 @@ fn claim(session: &str, current: &str, now: f64, assign: bool) -> Result<(Option
     Ok((Some(name), told))
 }
 
+/// Name in a "branche — Prénom" title (last part); a legacy "Prénom — branche" title
+/// keeps its name when only the first part is a known name. No separator: no name.
+fn title_name(title: &str) -> &str {
+    let (Some((first, _)), Some((_, last))) = (title.split_once(SEP), title.rsplit_once(SEP)) else {
+        return "";
+    };
+    let (first, last) = (py_strip(first), py_strip(last));
+    let known = |n: &str| NAMES.split_whitespace().any(|k| k == n);
+    if !known(last) && known(first) { first } else { last }
+}
+
 /// Optional string field with Python's `event.get(key) or default`; other truthy types abort.
 fn text_field(event: &J, key: &str, default: &str) -> Result<String, Abort> {
     match event.get(key) {
@@ -192,7 +204,7 @@ fn answer(event: &J) -> Result<Option<J>, Abort> {
         _ => J::str(""),
     };
     let current = match &title {
-        J::Str(s) => s.split_once(SEP).map_or("", |(head, _)| py_strip(head)),
+        J::Str(s) => title_name(s),
         J::Arr(items) if !items.contains(&J::str(SEP)) => "",
         J::Obj(items) if !items.iter().any(|(k, _)| k == SEP) => "",
         _ => return Err(Abort),
@@ -204,7 +216,7 @@ fn answer(event: &J) -> Result<Option<J>, Abort> {
         return Ok(None);
     };
     let br = branch::branch(&text_field(event, "cwd", ".")?)?;
-    let new = if br.is_empty() { name.clone() } else { format!("{name}{SEP}{br}") };
+    let new = if br.is_empty() { name.clone() } else { format!("{br}{SEP}{name}") };
     let mut out = vec![("hookEventName".to_owned(), hook)];
     if is_prompt && title != J::Str(new.clone()) {
         out.push(("sessionTitle".into(), J::str(&new)));

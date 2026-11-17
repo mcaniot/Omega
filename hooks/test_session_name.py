@@ -137,7 +137,7 @@ class SessionNameTest(unittest.TestCase):
     def test_fresh_resume_and_title_cycle(self):
         outs = self.seq([self.ev(cwd=self.plain)])
         title = json.loads(outs[0])['hookSpecificOutput']['sessionTitle']
-        self.assertTrue(title.endswith(' — main'))
+        self.assertTrue(title.startswith('main — '))
         outs = self.seq([self.ev(cwd=self.plain),
                          self.ev(cwd=self.plain, title=title),  # title already correct: nothing
                          self.ev(cwd=self.plain, title=title),
