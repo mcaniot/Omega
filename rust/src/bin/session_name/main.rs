@@ -1,4 +1,5 @@
-//! UserPromptSubmit + SessionStart hook: titles the session "Prénom — branche" and tells the agent its name.
+//! UserPromptSubmit + SessionStart hook: titles the session "branche — Prénom" and tells the agent its name.
+//! Branch first so an alphabetical sidebar groups sessions by worktree.
 //!
 //! Session naming hook (see `hooks/test_session_name.py` for the output and registry contract).
 //! Any error prints nothing: naming must never block a prompt.
@@ -81,9 +82,17 @@ fn hashed_start(session: &str, count: usize) -> usize {
     digest.iter().fold(0u64, |r, b| (r * 256 + u64::from(*b)) % n) as usize
 }
 
-/// (name, name last told to the agent): kept from the title or registry, else hashed and probed past live names.
-/// With `assign` false an unknown session gets (None, None) and nothing is written.
-fn claim(session: &str, current: &str, now: f64, assign: bool) -> Result<(Option<String>, Option<J>), Abort> {
+/// (name, title last told to the agent): kept from the title or registry, else hashed and probed past live names.
+/// With `assign` false an unknown session gets (None, None) and nothing is written. The stored "told" becomes
+/// the title for `br`, unless `keep_told` (SessionStart, which asks for no rename).
+fn claim(
+    session: &str,
+    current: &str,
+    now: f64,
+    assign: bool,
+    br: &str,
+    keep_told: bool,
+) -> Result<(Option<String>, Option<J>), Abort> {
     let path = registry_path()?;
     let lock = OpenOptions::new()
         .write(true)
@@ -148,7 +157,7 @@ fn claim(session: &str, current: &str, now: f64, assign: bool) -> Result<(Option
     let entry = J::Obj(vec![
         ("name".into(), J::str(&name)),
         ("seen".into(), J::Float(now)),
-        ("told".into(), J::str(&name)),
+        ("told".into(), if keep_told { told.clone().unwrap_or(J::Null) } else { J::str(&title_for(&name, br)) }),
     ]);
     match reg.iter_mut().find(|(s, _)| s == session) {
         Some(slot) => slot.1 = entry,
@@ -158,6 +167,23 @@ fn claim(session: &str, current: &str, now: f64, assign: bool) -> Result<(Option
     fs::write(&tmp, J::Obj(reg).dumps(true)).map_err(|_| Abort)?;
     fs::rename(&tmp, &path).map_err(|_| Abort)?;
     Ok((Some(name), told))
+}
+
+fn title_for(name: &str, br: &str) -> String {
+    if br.is_empty() { name.to_owned() } else { format!("{br}{SEP}{name}") }
+}
+
+/// Name in a "branche — Prénom" title (last part). A legacy "Prénom — branche" title keeps its
+/// first part when the last one is the current branch `br`, or when only the first is a known name.
+/// No separator: no name.
+fn title_name<'a>(title: &'a str, br: &str) -> &'a str {
+    let (Some((first, _)), Some((_, last))) = (title.split_once(SEP), title.rsplit_once(SEP)) else {
+        return "";
+    };
+    let (first, last) = (py_strip(first), py_strip(last));
+    let known = |n: &str| NAMES.split_whitespace().any(|k| k == n);
+    let legacy = if br.is_empty() { false } else { last == br && first != br };
+    if legacy || (!known(last) && known(first)) { first } else { last }
 }
 
 /// Optional string field with Python's `event.get(key) or default`; other truthy types abort.
@@ -191,31 +217,33 @@ fn answer(event: &J) -> Result<Option<J>, Abort> {
         Some(v) if v.truthy() => v.clone(),
         _ => J::str(""),
     };
+    let br = branch::branch(&text_field(event, "cwd", ".")?)?;
     let current = match &title {
-        J::Str(s) => s.split_once(SEP).map_or("", |(head, _)| py_strip(head)),
+        J::Str(s) => title_name(s, &br),
         J::Arr(items) if !items.contains(&J::str(SEP)) => "",
         J::Obj(items) if !items.iter().any(|(k, _)| k == SEP) => "",
         _ => return Err(Abort),
     };
     // SessionStart carries no title: a fresh session may reuse an app row already
     // named by an earlier session, so leave naming to the first UserPromptSubmit.
-    let (name, told) = claim(&session, current, now(), !is_start)?;
+    let (name, told) = claim(&session, current, now(), !is_start, &br, is_start)?;
     let Some(name) = name else {
         return Ok(None);
     };
-    let br = branch::branch(&text_field(event, "cwd", ".")?)?;
-    let new = if br.is_empty() { name.clone() } else { format!("{name}{SEP}{br}") };
+    let new = title_for(&name, &br);
+    // A title the agent was never told (first prompt, branch switch, older registry) needs a rename.
+    let stale = told != Some(J::str(&new));
     let mut out = vec![("hookEventName".to_owned(), hook)];
     if is_prompt && title != J::Str(new.clone()) {
         out.push(("sessionTitle".into(), J::str(&new)));
     }
     let mut context = None;
     // SessionStart fires on startup, resume, /clear and compaction: each may drop what the agent knew.
-    if is_start || told != Some(J::str(&name)) {
+    if is_start || stale {
         context = Some(format!("Ton prénom dans cette session : {name} (titre « {new} »)."));
     }
     // The desktop app ignores sessionTitle and auto-titles the first turn; only its MCP tool can fix it.
-    if is_prompt && told.is_none() && std::env::var_os("CLAUDE_CODE_ENTRYPOINT").is_some_and(|v| v == "claude-desktop") {
+    if is_prompt && stale && std::env::var_os("CLAUDE_CODE_ENTRYPOINT").is_some_and(|v| v == "claude-desktop") {
         if let Some(c) = context.as_mut() {
             c.push_str(&format!(
                 " Renomme la session sans bloquer le tour : charge mcp__ccd_session_mgmt__set_session_title \

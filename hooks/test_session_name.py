@@ -137,7 +137,7 @@ class SessionNameTest(unittest.TestCase):
     def test_fresh_resume_and_title_cycle(self):
         outs = self.seq([self.ev(cwd=self.plain)])
         title = json.loads(outs[0])['hookSpecificOutput']['sessionTitle']
-        self.assertTrue(title.endswith(' — main'))
+        self.assertTrue(title.startswith('main — '))
         outs = self.seq([self.ev(cwd=self.plain),
                          self.ev(cwd=self.plain, title=title),  # title already correct: nothing
                          self.ev(cwd=self.plain, title=title),
@@ -207,6 +207,15 @@ class SessionNameTest(unittest.TestCase):
         self.seq([self.ev(cwd=self.plain), self.ev(cwd=self.plain), self.ev(hook='SessionStart', cwd=self.plain),
                   self.ev(session='z', title='Q — r', cwd=self.plain, hook='SessionStart')], env_extra=env)
         self.seq([self.ev(cwd=self.plain)], env_extra={'CLAUDE_CODE_ENTRYPOINT': 'cli'})
+
+    def test_desktop_branch_switch(self):
+        """A branch switch, or a session resumed elsewhere, asks for one rename on the next prompt."""
+        env = {'CLAUDE_CODE_ENTRYPOINT': 'claude-desktop'}
+        self.seq([self.ev(cwd=self.plain), self.ev(cwd=self.plain),
+                  self.ev(hook='SessionStart', cwd=self.worktree),
+                  self.ev(cwd=self.worktree), self.ev(cwd=self.worktree)], env_extra=env)
+        legacy = json.dumps({'s1': {'name': 'Nox', 'seen': T0 - 10, 'told': 'Nox'}})
+        self.seq([self.ev(cwd=self.plain, title='Nox — main'), self.ev(cwd=self.plain)], seed=legacy, env_extra=env)
 
     def test_bad_input(self):
         self.seq([b'', b'{', b'[]', b'[1]', b'"x"', b'null', b'{}', b'\xff', b'{"session_id": ""}',
