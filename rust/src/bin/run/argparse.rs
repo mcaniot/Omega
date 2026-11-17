@@ -438,7 +438,8 @@ options:
   --validation
                         Require an independent argv check (reject --shell)
   --shell SHELL
-                        Fail fast with errexit and pipefail (bash/zsh)
+                        Run every command with pipefail (bash/zsh)
+  --fail-fast           With --shell: also stop at the first failure
   --shell-keep-going
                         Explicit legacy shell semantics; not for validations
   --shell-executable SHELL_EXECUTABLE
@@ -471,7 +472,7 @@ options:
   --offset OFFSET
   --lines LINES
   --max-bytes MAX_BYTES
-  --search SEARCH       Literal substring filter; use short distinctive terms
+  --search SEARCH       Regex line filter (smart case, literal if invalid)
 ";
 const PRUNE_USAGE: &str = "usage: run.py prune [-h] [--days DAYS] [--apply]\n";
 const PRUNE_HELP: &str = "usage: run.py prune [-h] [--days DAYS] [--apply]
@@ -502,6 +503,7 @@ pub static RUN: Parser = Parser {
         Opt { names: &["--timeout"], dest: "timeout", kind: Kind::Float },
         Opt { names: &["--validation"], dest: "validation", kind: Kind::Flag },
         Opt { names: &["--shell"], dest: "shell", kind: Kind::Str },
+        Opt { names: &["--fail-fast"], dest: "fail_fast", kind: Kind::Flag },
         Opt { names: &["--shell-keep-going"], dest: "shell_keep_going", kind: Kind::Flag },
         Opt { names: &["--shell-executable"], dest: "shell_executable", kind: Kind::Str },
         Opt { names: &["--inline-bytes"], dest: "inline_bytes", kind: Kind::Int },

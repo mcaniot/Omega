@@ -1,4 +1,6 @@
-"""Context budget hook contracts: one checkpoint reminder per crossing, never a denial."""
+"""Context budget hook contracts: one checkpoint reminder per crossing; the only block is the
+cold-resume notice, once per idle period."""
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -16,12 +18,18 @@ class ContextBudgetTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
         (self.home / '.agents/tasks/active').mkdir(parents=True)
+        (self.home / '.agents/tasks/active/demo.md').write_text('# demo\n')
         self.transcript = self.home / 'transcript.jsonl'
         self.set_tokens(1000)
 
-    def set_tokens(self, total, sidechain_tokens=None):
-        lines = [{'type': 'user', 'message': {'content': 'hi'}},
-                 {'type': 'assistant', 'message': {'usage': {
+    def set_tokens(self, total, sidechain_tokens=None, idle=None, task='demo'):
+        stamp = {}
+        if idle is not None:
+            at = datetime.now(timezone.utc) - timedelta(seconds=idle)
+            stamp = {'timestamp': at.strftime('%Y-%m-%dT%H:%M:%S.') + f'{at.microsecond // 1000:03d}Z'}
+        content = f'checkpoint ~/.agents/tasks/active/{task}.md' if task else 'hi'
+        lines = [{'type': 'user', 'message': {'content': content}},
+                 {'type': 'assistant', **stamp, 'message': {'usage': {
                      'input_tokens': 10, 'cache_creation_input_tokens': 20,
                      'cache_read_input_tokens': total - 30, 'output_tokens': 5}}}]
         if sidechain_tokens:
@@ -152,6 +160,42 @@ class ContextBudgetTest(unittest.TestCase):
             stream.write(json.dumps({'type': 'assistant', 'message': {'usage': {
                 'input_tokens': 185_000}}}) + '\n')
         self.assertIn('Context 185k:', self.run_hook('PostToolUse')['hookSpecificOutput']['additionalContext'])
+
+
+    def test_cold_resume_blocks_once_per_idle_period(self):
+        # Gain (capsim replay of recorded Opus sessions): a restart from the task file instead of
+        # rewriting a cold 100k context writes ~35k instead of 100k tokens at the cache-write price.
+        self.set_tokens(100_000, idle=7300)
+        block = self.run_hook('UserPromptSubmit', prompt='continue the review')
+        self.assertEqual(block['decision'], 'block')
+        self.assertIn('idle 2h01 with 100k tokens', block['reason'])
+        self.assertIn("/clear, then `'Ω-resume' demo`", block['reason'])  # the user need not know the task name
+        self.assertNotIn('continue the review', block['reason'])  # Claude Code appends it itself
+        self.assertEqual(self.run_hook('UserPromptSubmit', prompt='continue the review'), {})
+        self.assertEqual(self.run_hook('PostToolUse'), {})  # never blocks a tool
+        self.set_tokens(100_000, idle=7400)  # a new idle period warns again
+        self.assertEqual(self.run_hook('UserPromptSubmit', prompt='x')['decision'], 'block')
+
+    def test_cold_resume_ignores_warm_small_or_undated_sessions(self):
+        self.set_tokens(100_000, idle=1800)
+        self.assertEqual(self.run_hook('UserPromptSubmit', prompt='x'), {})
+        self.set_tokens(40_000, idle=7300)
+        self.assertEqual(self.run_hook('UserPromptSubmit', prompt='x'), {})
+        self.set_tokens(100_000)
+        self.assertEqual(self.run_hook('UserPromptSubmit', prompt='x'), {})
+        self.set_tokens(100_000, idle=7300)
+        self.assertEqual(self.run_hook('UserPromptSubmit', prompt='x', agent_id='a1'), {})
+        env = {'OMEGA_CONTEXT_COLD_SECONDS': '10000'}
+        self.assertEqual(self.run_hook('UserPromptSubmit', env=env, prompt='x'), {})
+        # No existing task file named in the session: /clear would lose its state, so no block.
+        for task in (None, 'gone'):
+            self.set_tokens(100_000, idle=7300, task=task)
+            self.assertEqual(self.run_hook('UserPromptSubmit', prompt='x'), {}, task)
+        self.set_tokens(100_000, idle=7300)
+        # `claude -p --resume` or SDK: a block would end the run unanswered.
+        self.assertEqual(self.run_hook('UserPromptSubmit', env={'CLAUDE_CODE_ENTRYPOINT': 'sdk-cli'}, prompt='x'), {})
+        self.assertEqual(self.run_hook('UserPromptSubmit', env={'CLAUDE_CODE_ENTRYPOINT': 'cli'}, prompt='x')['decision'],
+                         'block')
 
 
 if __name__ == '__main__':

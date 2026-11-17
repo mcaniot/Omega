@@ -1,6 +1,15 @@
 # Benchmark
 
-How many tokens omega saves, measured on reproducible synthetic workloads.
+What omega saves, at two levels:
+
+- **Tool output** (this page down to [Options](#options)): tokens the tools return on
+  reproducible synthetic workloads. Deterministic, no model call; it guards the binaries against
+  regressions.
+- [**End to end**](#end-to-end): cost, turns, wall time and correctness of real model sessions,
+  in headless A/B runs and in recorded sessions. This is what the bill reflects.
+
+The tool-output saving is large, but tool output is a small share of a session's cost, which is
+dominated by cache reads and writes of the whole context and by subagents.
 
 ```sh
 uv run --no-project --with tokenizers python3 tools/benchmark_context.py
@@ -24,11 +33,11 @@ Deterministic: one run is enough.
 | --- | ---: | ---: | ---: |
 | Read a 3000-line file without a limit | 42,952 | 4,174 | −90 % |
 | Read the same small file twice | 5,016 | 2,552 | −49 % |
-| Read lines 1–200, then 101–300 | 8,108 | 6,160 | −24 % |
+| Read lines 1–200, then 101–300 | 8,108 | 8,108 | 0 % |
 | Read, edit, read again (must not be refused) | 5,027 | 5,027 | 0 % |
 | 4000-line build log with one failure, then find it ¹ | 13,689 | 341 | −98 % |
 | Read a large saved log to find the failure ¹ | 68,656 | 152 | −100 % |
-| **Total** | **143,448** | **18,406** | **−87 %** |
+| **Total** | **143,448** | **20,354** | **−86 %** |
 
 omega's counts vary by a few tokens between runs: they include evidence paths and timestamps.
 
@@ -65,7 +74,8 @@ What got worse, and is tracked:
 ### Tokenizer check
 
 Claude's current tokenizer is not public, so the same run was repeated with two other tokenizers
-(`--tokenizer-json`). The savings barely move:
+(`--tokenizer-json`) in a separate run, so its GPT-2 total differs from the table above. The
+savings barely move:
 
 | Tokenizer | Plain → omega | Change | Previous → current omega |
 | --- | ---: | ---: | ---: |
@@ -97,7 +107,7 @@ the run instead of counting as a win:
 | --- | --- |
 | Large Read | The Read is bounded to lines 1–200 of 3000 and says so |
 | Same file twice | The second Read is refused as `already in context` |
-| Overlapping Reads | The second Read is narrowed to the missing lines 201–300, which are then allowed |
+| Overlapping Reads | The second Read is allowed and recorded: only a fully covered Read is refused |
 | Read after edit | The Read after an edit is **not** refused and contains the new line |
 | Build log | The complete log is kept on disk; `Ω-inspect` finds the failure |
 | Saved log | A Read of an evidence file is redirected to `Ω-inspect` |
@@ -132,3 +142,95 @@ the run instead of counting as a win:
 
 The report records the refs, binary and script hashes, platform, Python version and tokenizer
 hash. History of the earlier measurements: [Context reliability](context-reliability.md).
+
+## End to end
+
+Measured on 2026-11-16 with Opus 5.5 (`claude -p`, headless). Costs are the API-equivalent
+`total_cost_usd` that Claude Code reports, not a subscription bill.
+
+### Headless A/B
+
+One session per arm and repetition solves 9 independent tasks with hidden checks (5 generic: build
+log, NaN log, diff review, code navigation, edit loop; 4 robotics: quaternion frame, joint-limit
+trap, dt/decimation, observation order). Arms run in parallel, 3 repetitions each. Means per
+session.
+
+**Current version** (after the changes below; Claude Code's advisor tool disabled, so only Opus
+runs):
+
+| Arm | Correct | Cost (USD) | Turns | Cache read | Cache write | Output | Wall (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain Claude Code, no instructions | 27/27 | 0.306 | 16.3 | 351,419 | 19,360 | 4,052 | 52 |
+| omega, real setup | 27/27 | 0.233 | 8.3 | 173,539 | 17,846 | 2,776 | 35 |
+| Change | = | −24 % | −49 % | −51 % | −8 % | −31 % | −33 % |
+
+omega is cheaper in every repetition (−34 %, −8 %, −27 %): half the turns means half the context
+re-read per session. In the run before, with the advisor enabled (`advisorModel: fable`), plain
+Claude Code consulted it in 2 of 3 repetitions (about 30k uncached input tokens to Fable each,
+0.70 and 0.76 USD sessions) and omega never; that run gave 0.632 vs 0.266 USD, with the
+advisor's cost dominating the gap.
+
+**Earlier version** (morning of 2026-11-16, before removing the `Ω-run` rule):
+
+| Arm | Correct | Cost (USD) | Turns | Cache read | Cache write | Wall (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain Claude Code, no instructions | 27/27 | 0.460 | 18.7 | 413,548 | 20,343 | 74 |
+| Plain tools + tool-neutral instructions | 27/27 | 0.237 | 13.3 | 265,342 | 14,307 | 52 |
+| omega + the same instructions | 27/27 | 0.242 | 8.7 | 194,974 | 17,318 | 40 |
+| omega, real setup | 27/27 | 0.290 | 10.0 | 218,197 | 22,336 | 39 |
+
+- With the same instructions, omega costs the same (+2 %; per repetition −3 %, +4 %, +7 %) with
+  35 % fewer turns, 27 % fewer cache reads and 23 % less wall time: its larger fixed prefix (hook
+  and tool context) offsets the shorter sessions.
+- omega's real setup against plain Claude Code: −24 % on average, but one plain repetition
+  consulted the Fable advisor (0.760 USD); without that repetition the gap is about −3 %.
+- Most of the gain over plain Claude Code comes from the instructions, not from the tooling.
+
+A follow-up A/B (same tasks, same omega tooling, 3 repetitions) removed the AGENTS.md rule that
+every command must go through `Ω-run`, since `shell_guard --allow-clean` already wraps clean
+commands: 27/27 in both arms, 0.293 → 0.265 USD (−10 %), 11.3 → 9.7 turns, 56 → 38 s. Costs
+overlap between repetitions. The rule was removed for Claude and kept for Codex, whose guard
+denies unwrapped commands.
+
+### Recorded sessions
+
+Replay of the user's recorded Claude Code sessions, main conversation and subagents:
+
+- Per request, the main conversation costs 25 % less with omega; per session, cost is 23 %
+  higher, and subagents account for all of the difference. Delegated work costs about half as much
+  per unit of work, but delegation adds work.
+- Requests after more than 1 h idle rewrite the whole context at the cache-write price: 35 % of all
+  cache writes. Restarting at those points from the task file would have cut cost by 13–15 % on
+  69 Opus sessions; the [cold resume](hooks.md) notice now offers it.
+
+### Limits
+
+Checked for bias on the current A/B:
+
+- **No cache advantage.** Both arms read the same ~9.8k-token shared prefix from cache on their
+  first request; omega writes its own extra ~6.3k prefix again in every repetition, so it is not
+  helped by earlier runs. Arms run at the same time, with the same tools, turn limit and checks;
+  plain runs with `--safe-mode` (no customization).
+- **Tools vs instructions.** The current table compares the full setup with uninstructed Claude
+  Code. With the same tool-neutral instructions in both arms, the current version is not cheaper:
+  0.244 vs 0.226 USD (+8 %; per repetition +21 %, +13 %, −12 %), 7.3 vs 7.7 turns, 34 vs 33 s,
+  27/27 both (earlier version: +2 %). The saving comes from omega's instructions (fewer, batched
+  calls); its tools add a fixed prefix and pay off only on large outputs, which these tasks rarely
+  produce once the model batches its calls.
+- **Large outputs.** A second A/B with the same instructions on three commands printing 0.25–1.2 MB
+  (training run with a NaN, build with one error among decoy warnings, test run with two unnamed
+  failures; 3 repetitions): omega 0.105 vs 0.112 USD, 3.7 vs 5 turns, 9/9 vs 8/9 correct. In both
+  arms Opus 5.5 redirected the output to a file and searched it itself, so no tool result exceeded
+  3 KB and the tools had nothing to bound. Their gain shows only when a model does dump a large
+  output, as in recorded sessions (about 1.8M tokens saved over 100 sessions).
+- **Statistics.** Per-repetition cost changes are −34 %, −8 %, −27 %: a 95 % interval of about
+  −56 % to +9 %. Turns (−25 % to −61 %) and wall time are consistently lower.
+- **Task choice.** The tasks were written alongside omega: two exercise large logs and four
+  exercise the robotics rules of its AGENTS.md. Both arms solve all of them, so the benchmark
+  measures cost, not quality.
+- **No delegation.** These sessions never spawn subagents; in recorded sessions subagents made
+  omega 23 % more expensive per session, so real use can differ from this result.
+- Three repetitions per arm: differences under about 10 % are within run-to-run spread.
+- Synthetic tasks and a single model; agent behavior varies between runs.
+- The A/B harness is not shipped in this repository yet, and the recorded-session figures reflect
+  one user's work mix.

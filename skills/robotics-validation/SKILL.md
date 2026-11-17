@@ -19,3 +19,5 @@ Fix or report a failed prerequisite before any simulation; a simulation does not
 For motion, inspect actual joint limits, forbidden contacts, finite states and control stability over the relevant interval. For policies, check temporal chunks/horizons as well as action/observation ordering. Assert observable outcomes with meaningful negative controls; unit tests do not certify physical safety.
 
 Reuse successful checks until affected code, dependencies or configuration change. Isaac Lab already supplies repository skills for test audits and backend/asset diagnostics; load only the matching one without copying it globally. Report PASS, FAIL, BLOCKED or INCONCLUSIVE with exact commands, exit statuses and evidence references; distinguish skipped or unavailable validation from success.
+
+Read references/lessons.md before acting.

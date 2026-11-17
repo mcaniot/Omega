@@ -24,7 +24,7 @@ pub struct Config {
     pub python: bool,
     /// `--validation`: strict exit semantics, no SIGPIPE/NO_MATCH leniency.
     pub validation: bool,
-    /// Script of a `--shell` run (the command is then `shell -e -o pipefail -c script`).
+    /// Script of a `--shell` run (`shell -o pipefail -c script`; `--fail-fast` adds `-e`).
     pub script: Option<Arg>,
 }
 
@@ -161,6 +161,12 @@ fn is_no_match(cfg: &Config) -> bool {
 /// pipeline qualifies, so no later command was skipped by errexit.
 fn is_early_pipe_close(cfg: &Config) -> bool {
     cfg.script.as_deref().and_then(tail).is_some_and(|t| t.pipe)
+}
+
+/// A fail-fast `--shell` script of several commands: a failure may have skipped the later ones.
+fn is_strict_sequence(cfg: &Config) -> bool {
+    let strict = cfg.command.get(1).is_some_and(|a| a == b"-e");
+    strict && cfg.script.as_deref().and_then(tail).is_some_and(|t| !t.whole)
 }
 
 fn min_free_mb() -> u64 {
@@ -592,9 +598,38 @@ fn emit(bytes: &[u8]) {
     let _ = out.flush();
 }
 
+/// A clean PASS whose whole output fits inline prints that output as is, stdout then stderr, like
+/// the plain Bash tool: the JSON envelope (status, exit code, evidence path, escapes) cost about
+/// 190 bytes on each of 93 % of recorded results and carried nothing to act on. Any other outcome,
+/// a note, invalid UTF-8, a NUL byte or `OMEGA_RUN_JSON=1` keep the JSON.
+fn plain_pass(cfg: &Config, code: i32, crash_signal: i32, sizes: (i64, i64), status: &str, note: &str, fds: (i32, i32)) -> bool {
+    let total = sizes.0 + sizes.1;
+    if status != "PASS" || code != 0 || crash_signal != 0 || !note.is_empty()
+        || total > cfg.inline_bytes || total > diag::INLINE_BUDGET as i64
+        || std::env::var_os("OMEGA_RUN_JSON").is_some_and(|v| v == "1") {
+        return false;
+    }
+    let (out, err) = (diag::read_fd(fds.0), diag::read_fd(fds.1));
+    if [&out, &err].iter().any(|d| d.contains(&0) || std::str::from_utf8(d).is_err()) {
+        return false;
+    }
+    let mut text = out;
+    if !err.is_empty() {
+        if !text.is_empty() && !text.ends_with(b"\n") {
+            text.push(b'\n');
+        }
+        text.extend_from_slice(&err);
+    }
+    emit(&text);
+    true
+}
+
 /// Native fast-path summary; falls back to the complete form for anything it
 /// cannot represent exactly.
 fn summary(cfg: &Config, code: i32, crash_signal: i32, sizes: (i64, i64), status: &str, note: &str, directory: &[u8], fds: (i32, i32)) {
+    if plain_pass(cfg, code, crash_signal, sizes, status, note, fds) {
+        return;
+    }
     let mut s = Summary {
         status: status.into(),
         exit_code: code,
@@ -605,6 +640,7 @@ fn summary(cfg: &Config, code: i32, crash_signal: i32, sizes: (i64, i64), status
         stdout: None,
         stderr: None,
         diagnostics: Vec::new(),
+        matched: 0,
         preview: Vec::new(),
     };
     let total = sizes.0 + sizes.1;
@@ -822,6 +858,8 @@ pub fn execute(cfg: Config) -> i32 {
             (status, code, run.note) = ("PASS", 0, "SIGPIPE from early pipe close ignored");
         } else if returncode == 1 && sizes == (0, 0) && is_no_match(&cfg) {
             (status, code, run.note) = ("NO_MATCH", 0, "search found no match (exit 1 reported as 0)");
+        } else if is_strict_sequence(&cfg) {
+            run.note = "--fail-fast: commands after the failing one did not run";
         }
     }
     // Delayed write errors (ENOSPC, EIO) surface at flush: never report such a run as complete.

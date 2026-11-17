@@ -67,7 +67,7 @@ CODEX_HOOKS = (
 # Claude context hooks: (event, matcher or None, binary).
 CONTEXT_HOOKS = (
     ('PreToolUse', 'Read', 'context_guard'),
-    ('PostToolUse', 'Edit|Write|MultiEdit', 'context_guard'),
+    ('PostToolUse', 'Read|Edit|Write|MultiEdit', 'context_guard'),
     ('SessionStart', None, 'context_guard'),
     ('PostCompact', None, 'context_guard'),
     ('PostToolUse', '*', 'context_budget'),
@@ -83,6 +83,11 @@ CONTEXT_ENV = {
     'ANTHROPIC_MODEL': 'opus[1m]',
     'OMEGA_CONTEXT_SOFT': '150000',
 }
+# scout and architect take the names of the built-in Explore and Plan subagents in Claude Code, which a same-named
+# user agent overrides: plan mode and the model's habit of calling Explore reach them. The built-in general-purpose
+# duplicates coder on the session model; its listing is re-written in every session and draws delegation away from
+# coder. Added to permissions.deny; a user entry is never removed.
+DENIED_AGENTS = ('Agent(general-purpose)',)
 COMMANDS = {
     'omega': BINARIES['optimize'],
     'omega-optimize': BINARIES['optimize'],
@@ -235,10 +240,16 @@ def frontmatter(path):
     return fields, body.strip()
 
 
+# Codex's shell_guard denies unwrapped commands (no auto-wrap), so only Codex agents get the rule.
+CODEX_SHELL_RULE = ("Shell only via `'Ω-run' -- <argv>` or `'Ω-run' --shell '<script>'` (no outer operators, "
+                    "redirection or cd; use --cwd).")
+
+
 def codex_agent(path):
     fields, body = frontmatter(path)
-    model, effort = CODEX_AGENTS[fields['name']]
-    lines = [f'name = "{fields["name"]}"',
+    body = body.rstrip('\n') + '\n\n' + CODEX_SHELL_RULE + '\n'
+    model, effort = CODEX_AGENTS[path.stem]
+    lines = [f'name = "{path.stem}"',
              f'description = {json.dumps(fields["description"], ensure_ascii=False)}',
              f'model = "{model}"', f'model_reasoning_effort = "{effort}"',
              f'developer_instructions = {json.dumps(body, ensure_ascii=False)}']
@@ -365,21 +376,37 @@ def hook_binary(hook):
 
 
 def ensure_hook(groups, matcher, binary, wanted):
-    """Register `wanted` once: rewrite our own entry in place (hand-made or older form), else append."""
-    for group in groups:
-        if group.get('matcher', '*') not in (matcher, '*'):
-            continue
-        for index, hook in enumerate(group.get('hooks', [])):
-            if hook_binary(hook) == str(binary):
-                if hook == wanted:
-                    return False
-                group['hooks'][index] = wanted
-                return True
-    group = {'hooks': [wanted]}
-    if matcher:
-        group['matcher'] = matcher
-    groups.append(group)
-    return True
+    """Register `wanted` exactly once: rewrite our own entry in place (hand-made or older form), else append.
+
+    Our entry under a matcher we no longer use is retargeted when the group is ours alone; every
+    other copy is removed, so a matcher change never leaves the hook registered twice.
+    """
+    def ours(hook):
+        return hook_binary(hook) == str(binary)
+
+    before = json.dumps(groups, sort_keys=True)
+    holders = [group for group in groups if any(ours(hook) for hook in group.get('hooks', []))]
+    home = next((group for group in holders if group.get('matcher', '*') in (matcher, '*')), None)
+    if home is None:
+        home = next((group for group in holders if all(ours(hook) for hook in group['hooks'])), None)
+        if home is not None:
+            home.pop('matcher', None)
+            if matcher:
+                home['matcher'] = matcher
+    for group in holders:
+        if group is not home:
+            group['hooks'] = [hook for hook in group['hooks'] if not ours(hook)]
+    groups[:] = [group for group in groups if group.get('hooks') or not any(group is holder for holder in holders)]
+    if home is None:
+        home = {'hooks': [wanted]}
+        if matcher:
+            home['matcher'] = matcher
+        groups.append(home)
+    else:
+        index = next(i for i, hook in enumerate(home['hooks']) if ours(hook))
+        home['hooks'] = [wanted if i == index else hook for i, hook in enumerate(home['hooks'])
+                         if i == index or not ours(hook)]
+    return json.dumps(groups, sort_keys=True) != before
 
 
 def write_codex_hooks(apply):
@@ -429,6 +456,11 @@ def write_context_settings(apply):
     for key, value in CONTEXT_ENV.items():
         if env.get(key) != value:
             env[key] = value
+            changed = True
+    deny = settings.setdefault('permissions', {}).setdefault('deny', [])
+    for rule in DENIED_AGENTS:
+        if rule not in deny:
+            deny.append(rule)
             changed = True
     if not changed:
         return

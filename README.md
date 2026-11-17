@@ -19,8 +19,13 @@ context:
 - **Command output on disk**: `Ω-run` stores the full log as evidence and returns a bounded summary.
 - **Guard hooks** that wrap shell commands, bound large reads and refuse re-reads of unchanged lines.
 
-On reproducible workloads, the model receives **87 % fewer tokens** than with plain Claude Code
-tools, without losing the information it needs ([benchmark](docs/benchmark.md)).
+On reproducible tool workloads (large reads, long build logs), the model receives **86 % fewer
+tokens** from its tools without losing the information it needs. End to end, on long headless
+sessions against plain Claude Code (Opus 5.5, same 9 tasks, all solved by both), the full omega
+setup (tools and instructions) used half the turns and a third less wall time; cost was 24 % lower
+on average, but with 3 repetitions that cost gap is not yet statistically solid. With the same
+instructions on both sides the cost is equal (+8 %, within noise): the end-to-end saving comes from
+the instructions; the tools bound large outputs ([benchmark](docs/benchmark.md)).
 
 ## How it works
 
@@ -88,7 +93,7 @@ Agents call these themselves; the guards rewrite plain shell commands to `Ω-run
 | Audit sessions and read the report | [`omega optimize`](docs/optimize.md) |
 | Understand the layout, agents and context rules | [Architecture](docs/architecture.md) |
 | Run the tests or cut a release | [Development](docs/development.md) |
-| See how many tokens omega saves | [Benchmark](docs/benchmark.md) |
+| See what omega saves, per tool and end to end | [Benchmark](docs/benchmark.md) |
 
 ## Versions
 

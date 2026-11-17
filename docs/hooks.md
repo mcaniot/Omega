@@ -6,7 +6,7 @@ What each omega hook does, when it runs and what happens if it fails.
 | --- | --- | --- | --- |
 | [`shell_guard`](#shell_guard) | Bash calls (Claude, Codex) | Wraps or denies shell commands | The command is **blocked** |
 | [`context_guard`](#context_guard) | Read, Edit/Write, session start, compaction (Claude) | Bounds large reads, refuses re-reads | The call goes through |
-| [`context_budget`](#context_budget) | Every tool call, prompt, compaction (Claude) | Checkpoint reminder, compaction instructions | The call goes through |
+| [`context_budget`](#context_budget) | Every tool call, prompt, compaction (Claude) | Checkpoint reminder, compaction instructions, cold-resume notice | The call goes through |
 | `session_name` | Session start, prompt (Claude) | Names the session | The call goes through |
 
 ## `shell_guard`
@@ -24,11 +24,14 @@ What each omega hook does, when it runs and what happens if it fails.
 - **Large evidence files** (over 8 KiB) are redirected to `Ω-inspect`.
 - **Large text files** (over 8 KiB) read without a limit of 1..200 are not denied: the Read runs
   as 200 lines from the requested offset (`updatedInput`) and says which range was returned. That
-  rewrite is its only `allow`; Claude Code still applies deny and ask rules after it. This is a
+  rewrite is its only `allow`; Claude Code still applies deny and ask rules after it. A Read that
+  reaches the end of the file within 300 lines, in a file of at most 30000 bytes, runs as written
+  (bounding it would cost a second round trip for a short tail). This is a
   line bound, not a byte or token guarantee. Images, PDFs and notebooks keep their native behavior.
 - **Re-reads**: in the main session (not subagents), a Read of lines already read and unchanged
-  since is denied (`already in context`); a partly covered range is narrowed to the missing lines.
-  Editing or writing the file, compaction and `/clear` reset this.
+  since is denied (`already in context`) only when every requested line is covered; a partly covered
+  range is allowed. A range is recorded when the Read succeeded (`PostToolUse`), never before it
+  runs. Editing or writing the file, compaction and `/clear` reset this.
 - **C/C++**: the first C/C++ edit of a session gets a one-time pointer to the `cpp-quality` skill.
 
 ## `context_budget`
@@ -41,6 +44,17 @@ What each omega hook does, when it runs and what happens if it fails.
 - The same hook prints the compaction instructions (task file and next action, verified decisions,
   uncommitted files, evidence paths, failed approaches), except when you pass your own to `/compact`.
 - After a compaction, `SessionStart` tells the session to resume from the task file.
+- **Cold resume.** The first prompt after more than 1 h idle (`OMEGA_CONTEXT_COLD_SECONDS`) with at
+  least 60k tokens of context (`OMEGA_CONTEXT_COLD_TOKENS`) is blocked once: the 1 h prompt cache
+  has expired, so the prompt would rewrite the whole context at the cache-write price. It only
+  blocks when the session named an existing `~/.agents/tasks/active/<task>.md` (newest mention in
+  the last 8 MB of the transcript); the notice then gives the exact `/clear` then
+  `'Ω-resume' <task>` to run (Claude Code appends the blocked prompt under
+  `Original prompt:`); sending the prompt again continues in the same session. Replayed on 69
+  recorded Opus sessions, restarting at those points cut the cost by 13–15 %. The 1 h threshold
+  assumes the subscription TTL; on usage credits or an API key the main conversation uses 5 min.
+  Claude Code's built-in `idleCompaction` is the automatic alternative (from 100k tokens, compacts
+  just before expiry); after any compaction the hook stays silent until a new usage is recorded.
 
 ## Registration
 

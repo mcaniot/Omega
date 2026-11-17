@@ -192,6 +192,16 @@ class ResponseSettingsTest(unittest.TestCase):
         for agent in (ROOT / 'agents').glob('*.md'):
             self.assertNotIn('skills', self.installer.frontmatter(agent)[0], agent)
 
+    def test_claude_routes_builtin_explore_and_plan_to_omega_workers(self):
+        # Same-named user agents replace the built-ins: plan mode's Explore runs on Haiku (recorded
+        # built-in Explore: Opus, 1.84 USD/run, 14-30 tool turns, so scout needs more than 15).
+        scout = self.installer.frontmatter(ROOT / 'agents/scout.md')[0]
+        self.assertEqual((scout['name'], scout['model'], int(scout['maxTurns'])), ('Explore', 'claude-haiku-5-5', 30))
+        self.assertEqual(self.installer.frontmatter(ROOT / 'agents/architect.md')[0]['name'], 'Plan')
+        # Recorded coder runs >= 60 requests: 72 % of coder cost, up to 240 requests; median 42.
+        self.assertEqual(int(self.installer.frontmatter(ROOT / 'agents/coder.md')[0]['maxTurns']), 120)
+        self.assertEqual(self.installer.DENIED_AGENTS, ('Agent(general-purpose)',))
+
     def test_skill_references_and_trigger_descriptions(self):
         skills = {p.name for p in (ROOT / 'skills').iterdir()}
         sources = [*(ROOT / 'agents').glob('*.md'), *(ROOT / 'skills').glob('*/SKILL.md'), ROOT / 'AGENTS.md']

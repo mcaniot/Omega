@@ -11,6 +11,9 @@ use ledger::{Coverage, Ledger};
 
 const LARGE_TEXT_BYTES: u64 = 8192;
 const MAX_READ_LINES: u64 = 200;
+/// A Read that reaches the end of the file within these limits runs as written.
+const WHOLE_READ_LINES: u64 = 300;
+const WHOLE_READ_BYTES: u64 = 30000;
 const MAX_COUNTED_BYTES: u64 = 1 << 20;
 const CPP_HINT: &str = "C/C++ edited: if this code can run in a realtime or control path, load the `cpp-quality` skill and re-check the change (no lock, heap allocation, blocking call or unbounded work).";
 
@@ -35,12 +38,8 @@ fn line_count(file: &str, metadata: &std::fs::Metadata) -> Option<u64> {
         .map(|b| b.iter().filter(|&&c| c == b'\n').count() as u64 + u64::from(b.last().is_some_and(|&c| c != b'\n')))
 }
 
-/// Deny re-reads of unchanged lines already in context; record the range otherwise.
-fn ledger_check(payload: &Value, file: &str, metadata: &std::fs::Metadata) -> Option<Value> {
-    if payload.get("agent_id").is_some() {
-        return None; // Subagents have their own context.
-    }
-    let state = session_ledger(payload)?;
+/// Inclusive line range a Read will return (1-based), when it can be told.
+fn read_range(payload: &Value, file: &str, metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
     let input = &payload["tool_input"];
     let start = match input.get("offset") {
         None | Some(Value::Null) => 1,
@@ -57,29 +56,39 @@ fn ledger_check(payload: &Value, file: &str, metadata: &std::fs::Metadata) -> Op
         (None, Some(t)) => t,
         (None, None) => return None,
     };
-    if end < start {
-        return None;
-    }
-    let key = ledger::key(Path::new(file));
-    let stamp = ledger::stamp(metadata);
-    let mut book = Ledger::load(&state);
-    match book.check(&key, stamp, start, end) {
-        Coverage::Full => Some(deny(&format!(
-            "already in context: lines {start}-{end} of {file} (unchanged since read)"
-        ))),
-        Coverage::Partial(a, b) => Some(deny(&format!(
-            "partly in context (unchanged since read): Read {file} with offset={a} limit={} for lines {a}-{b} only",
-            b - a + 1
-        ))),
-        Coverage::Missing => {
-            book.record(&key, stamp, start, end);
-            book.save(&state);
-            None
-        }
-    }
+    (end >= start).then_some((start, end))
 }
 
-/// Drop ledger state on context reset or file mutation.
+/// Deny a re-read only when every requested line is in context and the file is unchanged.
+/// Nothing is recorded here: `record_read` does it once the Read has succeeded.
+fn ledger_check(payload: &Value, file: &str, metadata: &std::fs::Metadata) -> Option<Value> {
+    if payload.get("agent_id").is_some() {
+        return None; // Subagents have their own context.
+    }
+    let state = session_ledger(payload)?;
+    let (start, end) = read_range(payload, file, metadata)?;
+    let mut book = Ledger::load(&state);
+    matches!(book.check(&ledger::key(Path::new(file)), ledger::stamp(metadata), start, end), Coverage::Full)
+        .then(|| deny(&format!("already in context: lines {start}-{end} of {file} (unchanged since read)")))
+}
+
+/// PostToolUse of a successful Read: its range is now in context. The payload carries the
+/// input actually run, including a limit set by the PreToolUse bound.
+fn record_read(payload: &Value) {
+    if payload.get("agent_id").is_some() {
+        return;
+    }
+    let (Some(state), Some(file)) = (session_ledger(payload), payload["tool_input"].get("file_path").and_then(Value::as_str)) else {
+        return;
+    };
+    let Ok(metadata) = Path::new(file).metadata() else { return };
+    let Some((start, end)) = read_range(payload, file, &metadata).filter(|_| metadata.is_file()) else { return };
+    let mut book = Ledger::load(&state);
+    book.record(&ledger::key(Path::new(file)), ledger::stamp(&metadata), start, end);
+    book.save(&state);
+}
+
+/// Drop ledger state on context reset or file mutation; record a successful Read.
 fn invalidate(payload: &Value) {
     let Some(state) = session_ledger(payload) else { return };
     let event = payload.get("hook_event_name").and_then(Value::as_str);
@@ -88,6 +97,8 @@ fn invalidate(payload: &Value) {
             && matches!(payload.get("source").and_then(Value::as_str), Some("compact" | "clear")));
     if reset {
         ledger::remove(&state);
+    } else if event == Some("PostToolUse") && payload.get("tool_name").and_then(Value::as_str) == Some("Read") {
+        record_read(payload);
     } else if event == Some("PostToolUse")
         && matches!(payload.get("tool_name").and_then(Value::as_str), Some("Edit" | "Write" | "MultiEdit"))
     {
@@ -103,7 +114,9 @@ fn invalidate(payload: &Value) {
 /// Measured: the model never loads `cpp-quality` on its own, and it is the one skill that
 /// changed correctness (mutex and allocation in a control step).
 fn cpp_hint(payload: &Value) -> Option<Value> {
-    if payload.get("hook_event_name").and_then(Value::as_str) != Some("PostToolUse") {
+    if payload.get("hook_event_name").and_then(Value::as_str) != Some("PostToolUse")
+        || payload.get("tool_name").and_then(Value::as_str) == Some("Read")
+    {
         return None;
     }
     let file = payload["tool_input"].get("file_path").and_then(Value::as_str)?;
@@ -175,7 +188,7 @@ fn evaluate(payload: &Value) -> Value {
         if real.starts_with(evidence) {
             return deny(
                 "Large evidence file: do not Read the log. Through Bash run 'Ω-inspect' EVIDENCE_DIR [--stream stderr] \
-                 with --search TEXT or --offset BYTES --lines N (at most 40 lines and 7000 bytes per call; continue at next_offset).",
+                 with --search TEXT or --offset BYTES --lines N (at most 200 lines and 30000 bytes per call; continue at next_offset).",
             );
         }
     }
@@ -188,14 +201,21 @@ fn evaluate(payload: &Value) -> Value {
 /// Run an unbounded or oversized Read of a large text file as its first MAX_READ_LINES lines
 /// instead of denying it: a denial costs one full-context round trip for the same result.
 fn bounded(payload: &Value, file: &str, metadata: &std::fs::Metadata) -> Value {
+    let start = payload["tool_input"].get("offset").and_then(Value::as_u64).unwrap_or(1).max(1);
+    let end = start + MAX_READ_LINES - 1;
+    let total = line_count(file, metadata);
+    // A short tail past the bound would cost a second round trip worth more than its lines.
+    if metadata.len() <= WHOLE_READ_BYTES && total.is_some_and(|total| total < start + WHOLE_READ_LINES) {
+        let mut whole = payload.clone();
+        whole["tool_input"].as_object_mut().map(|input| input.remove("limit"));
+        return ledger_check(&whole, file, metadata).unwrap_or_else(|| json!({}));
+    }
     let mut payload = payload.clone();
     payload["tool_input"]["limit"] = json!(MAX_READ_LINES);
     if let Some(denied) = ledger_check(&payload, file, metadata) {
         return denied;
     }
-    let start = payload["tool_input"].get("offset").and_then(Value::as_u64).unwrap_or(1).max(1);
-    let end = start + MAX_READ_LINES - 1;
-    let range = match line_count(file, metadata) {
+    let range = match total {
         Some(total) => format!("{start}-{} of {total}", end.min(total)),
         None => format!("{start}-{end}"),
     };
