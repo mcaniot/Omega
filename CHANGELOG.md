@@ -14,8 +14,8 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 - Optional Omega theme for the Claude desktop app: `install.py --omega-theme --apply` links the
   plugin `themes/omega-theme/` (colours and an animated backdrop); without the flag nothing changes.
 - `code-review` skill for MR/PR and local diffs: findings backed by `file:line`, scenario and
-  consequence, checks labelled run / inspected / not verified, comments proposed (blocking, then
-  optional) and published inline with `glab` or `gh` only after explicit approval.
+  consequence, checks labelled run / inspected / not verified, comments in Conventional Comments
+  format proposed (blocking, then optional) and published inline with `glab` or `gh` only after explicit approval.
 
 ### Changed
 

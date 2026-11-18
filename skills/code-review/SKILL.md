@@ -35,6 +35,7 @@ Apply with judgment, not mechanically; state the concrete gain before proposing 
 - Confirmed bug: state the problem and its consequence. Debatable choice: ask one targeted question.
 - Model the tone on the user's real review comments, preferably ones they edited or approved (fetch them from the platform when available); never invent examples of their style.
 - Include every remark the user gave and flag those the code does not confirm.
+- Format each comment as a [Conventional Comment](https://conventionalcomments.org/): `<label> [(decorations)]: <subject>`, then an optional short discussion. Labels: `issue`, `suggestion`, `question`, `nitpick`, `todo`, `thought`, `chore`, `note`; no `praise`. Mark every `issue` and `todo` `(blocking)` or `(non-blocking)`; a confirmed bug is `issue (blocking)`, an optional improvement `suggestion (non-blocking)`.
 
 ## Proposal
 
