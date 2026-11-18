@@ -828,10 +828,15 @@ impl Guard {
         if matches!(argv.first().map(String::as_str), Some("cat" | "head" | "tail")) {
             if let Some(path) = argv.iter().skip(1).find(|a| a.contains(EVIDENCE)) {
                 let path = path.trim_end_matches('/');
+                // A glob file name (`stdout*`) names a file of the directory, never the directory.
+                let glob = |name: &str| name.contains(['*', '?', '[']);
                 let (dir, stream) = match path.rsplit_once('/') {
                     Some((dir, "stdout.log" | "stdout")) => (dir, "stdout"),
                     Some((dir, "stderr.log" | "stderr")) => (dir, "stderr"),
                     Some((dir, "result.json")) => (dir, "auto"),
+                    Some((dir, name)) if glob(name) && name.starts_with("stdout") => (dir, "stdout"),
+                    Some((dir, name)) if glob(name) && name.starts_with("stderr") => (dir, "stderr"),
+                    Some((dir, name)) if glob(name) => (dir, "auto"),
                     _ => (path, "auto"),
                 };
                 let args = ["\u{3a9}-inspect", "--stream", stream, "--lines", "40", "--max-bytes", "7000", dir];

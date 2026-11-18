@@ -150,6 +150,9 @@ class GuardTest(unittest.TestCase):
             f'tail -n 5 {directory}/stderr.log | head': 'stderr',
             f'head {directory}/stdout': 'stdout',
             f'cat {directory}/result.json': 'auto',
+            f'cat {directory}/stdout* 2>/dev/null | sed -n 1,299p': 'stdout',
+            f'head {directory}/stderr*': 'stderr',
+            f'cat {directory}/*.log': 'auto',
         }
         for command, stream in expected.items():
             hint = shlex.join(['Ω-inspect', '--stream', stream, '--lines', '40', '--max-bytes', '7000', directory])
