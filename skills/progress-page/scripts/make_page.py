@@ -459,7 +459,7 @@ def render(state, root, refresh, mtime):
                  f'<ol class="journal recent">{log_items(log[:LOG_SHOWN])}</ol>'
                  + (f'<details id="journal-ancien"><summary>{len(older)} plus ancien{"s" if len(older) > 1 else ""}</summary>'
                     f'<ol class="journal">{log_items(older)}</ol></details>' if older else '') + '</section>')
-        toc.append(('changements', 'Journal'))
+    # No TOC entry for the journal: it sits directly above the TOC, so the link would not move.
     links = ''.join(f'<li><a href="#{anchor}">{name}</a></li>' for anchor, name in toc)
     aside += f'<nav class="card toc" aria-label="Sur cette page"><h2>Sur cette page</h2><ul>{links}</ul></nav>'
     parts.append(f'<div class="layout"><main>{"".join(main)}</main><aside>{aside}</aside></div>')

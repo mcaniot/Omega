@@ -6,6 +6,8 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-18
+
 ### Added
 
 - `Ω-resume` (and `omega-resume`) runs `omega resume`; agents now call `'Ω-resume'` and
@@ -198,6 +200,11 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 - The `scripted-robot-scenes` skill, which was specific to one project.
 - `Ω-read` / `omega-read` and the `local_read` binary; the installer removes the deployed copies.
 
+### Fixed
+
+- `progress-page`: the task page table of contents no longer lists the journal, which sits
+  directly above it, so the link did nothing.
+
 ## [1.0.0] - 2026-11-12
 
 First production release of the versioned agent setup.
@@ -230,5 +237,6 @@ First production release of the versioned agent setup.
 - Daily systemd user timers for `omega optimize` and evidence pruning.
 - GitHub Actions: tests on every push; GitHub Release created from each `v*` tag.
 
-[Unreleased]: https://github.com/mcaniot/Omega/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/mcaniot/Omega/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/mcaniot/Omega/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/mcaniot/Omega/releases/tag/v1.0.0

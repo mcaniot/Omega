@@ -51,7 +51,7 @@ Requirements: Linux, Python 3.12, a Rust toolchain (`cargo`), Claude Code and/or
 git clone git@github.com:mcaniot/Omega.git && cd Omega
 python3 install.py            # dry run: shows what would change, touches nothing
 python3 install.py --apply    # link sources, build and install the binaries, register hooks
-omega --version               # → omega 1.0.0
+omega --version               # → omega 1.1.0
 ```
 
 Keep `~/.local/bin` on `PATH`, then restart Claude Code and start a new Codex conversation.
