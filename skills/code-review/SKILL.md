@@ -46,7 +46,7 @@ Default output, and the end of the task unless publication is approved: `Blockin
 1. Re-fetch the head SHA and diff. If they changed, re-check each approved comment; present any invalidated or moved comment in its new form and wait.
 2. Skip comments that duplicate an existing discussion.
 3. Post only the approved comments, inline on their line when possible:
-   - GitLab: `glab api projects/:fullpath/merge_requests/IID/discussions --input BODY.json`, body `{"body": …, "position": {"position_type": "text", "base_sha", "start_sha", "head_sha" (from the MR `diff_refs`), "old_path", "new_path", "new_line" or "old_line" for a removed line}}`. Bracketed `-f 'position[...]'` names are rejected in a JSON body.
+   - GitLab: `glab api -X POST projects/:fullpath/merge_requests/IID/discussions -H 'Content-Type: application/json' --input -` with the JSON body on stdin (`--input FILE` failed with "no such file"), body `{"body": …, "position": {"position_type": "text", "base_sha", "start_sha", "head_sha" (from the MR `diff_refs`), "old_path", "new_path", "new_line" or "old_line" for a removed line}}`. Bracketed `-f 'position[...]'` names are rejected in a JSON body.
    - GitHub: `gh api repos/OWNER/REPO/pulls/N/comments` with `body`, `commit_id`, `path`, `line`, `side`.
    - Fall back to a general note citing `file:line` only when the inline post fails.
 4. Never edit code, resolve discussions, approve or merge without an explicit request.
