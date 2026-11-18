@@ -27,6 +27,7 @@ Keep this checkout on a branch that contains these files. To update, pull, run t
 | `--budget` | Print the bytes loaded into every session |
 | `--responses-only --apply` | Update only response prompts and their selection |
 | `--context-only --apply` | Install the context guard, the `omega` CLI and command links only |
+| `--omega-theme` | Opt-in: also link the Omega theme plugin for the Claude desktop app; off by default |
 
 ## What takes effect when
 

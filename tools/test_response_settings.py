@@ -101,6 +101,21 @@ class ResponseSettingsTest(unittest.TestCase):
         for dest, source in self.installer.response_links():
             self.assertEqual(dest.resolve(), source)
 
+    def test_omega_theme_is_opt_in_and_preserves_settings(self):
+        plugin = self.installer.CLAUDE / 'skills/omega-theme'
+        manifest = json.loads((ROOT / 'themes/omega-theme/.claude-plugin/plugin.json').read_text())
+        self.assertEqual(manifest['name'], 'omega-theme')
+        with patch('sys.argv', ['install.py', '--responses-only', '--apply']):
+            self.assertEqual(self.installer.main(), 0)
+        self.assertFalse(plugin.exists())
+        settings = json.loads(self.claude.read_text())
+        self.assertEqual(list(self.installer.write_theme(False)), [(plugin, 'would link')])
+        self.assertFalse(plugin.exists())
+        self.assertEqual(list(self.installer.write_theme(True)), [(plugin, 'linked')])
+        self.assertEqual(plugin.resolve(), ROOT / 'themes/omega-theme')
+        self.assertEqual(json.loads(self.claude.read_text()), settings)
+        self.assertEqual(list(self.installer.write_theme(True)), [(plugin, 'ok')])
+
     def test_codex_agents_are_standalone_and_obsolete_roles_are_removed(self):
         self.installer.AGENTS = self.home / '.agents'
         agents = self.codex.parent / 'agents'

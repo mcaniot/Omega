@@ -365,6 +365,12 @@ def write_response_settings(apply):
         yield dest, 'written' if apply else 'would write'
 
 
+def write_theme(apply):
+    """Opt-in Omega desktop theme: link the plugin that colours the Claude desktop app."""
+    plugin = CLAUDE / 'skills/omega-theme'
+    yield plugin, link(plugin, REPO / 'themes/omega-theme', apply)
+
+
 def hook_binary(hook):
     """Executable a command hook runs, with `$HOME` expanded; None when it is not a plain command."""
     command = str(hook.get('command', '')).replace('${HOME}', str(HOME)).replace('$HOME', str(HOME))
@@ -496,10 +502,11 @@ def main():
     mode.add_argument('--budget', action='store_true', help='print always-loaded context size in bytes')
     parser.add_argument('--responses-only', action='store_true', help='deploy only response instructions and settings')
     parser.add_argument('--context-only', action='store_true', help='deploy only the Claude Read guard and its hook')
+    parser.add_argument('--omega-theme', action='store_true', help='also install the Omega theme plugin for the Claude desktop app')
     args = parser.parse_args()
     if args.context_only:
-        if args.responses_only or args.budget:
-            parser.error('--context-only cannot be combined with --responses-only or --budget')
+        if args.responses_only or args.budget or args.omega_theme:
+            parser.error('--context-only cannot be combined with --responses-only, --budget or --omega-theme')
         # Parse settings before building/installing anything; malformed settings stay untouched.
         list(write_context_settings(False))
         results = list(install_binaries(args.apply, names=('context_guard', 'context_budget', 'optimize', 'shell_guard', 'session_name')))
@@ -515,6 +522,8 @@ def main():
     results = [(dest, link(dest, source, args.apply)) for dest, source in sources]
     if not any(status.startswith('CONFLICT') for _, status in results):
         results += list(write_response_settings(args.apply))
+    if args.omega_theme:
+        results += list(write_theme(args.apply))
     if not args.responses_only:
         results += list(remove_stale_links(args.apply))
         results += list(remove_retired_read(args.apply))

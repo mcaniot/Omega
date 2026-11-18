@@ -11,6 +11,11 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 - `Ω-resume` (and `omega-resume`) runs `omega resume`; agents now call `'Ω-resume'` and
   `'Ω-optimize'`. The `omega resume` / `omega optimize` names keep working.
 - One-command token benchmark (`tools/benchmark_context.py`) and its [Benchmark](docs/benchmark.md) page.
+- Optional Omega theme for the Claude desktop app: `install.py --omega-theme --apply` links the
+  plugin `themes/omega-theme/` (colours and an animated backdrop); without the flag nothing changes.
+- `code-review` skill for MR/PR and local diffs: findings backed by `file:line`, scenario and
+  consequence, checks labelled run / inspected / not verified, comments proposed (blocking, then
+  optional) and published inline with `glab` or `gh` only after explicit approval.
 
 ### Changed
 
@@ -166,6 +171,9 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
   benchmark improvement.
 - The `context_guard` denial for large evidence files spells out the `Ω-inspect` call and its
   200-line / 30000-byte limits.
+- `shell_guard` rewrites a chained command that starts with the `omega` CLI (`omega --help; …`)
+  to `Ω-run --shell` like any other command; it was taken for a miswritten wrapper call and denied
+  without a ready-to-run command.
 
 ### Removed
 

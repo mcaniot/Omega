@@ -12,7 +12,9 @@ What each omega hook does, when it runs and what happens if it fails.
 ## `shell_guard`
 
 - A plain command that the policy would allow once wrapped is **rewritten** to `Ω-run --shell`
-  instead of being denied (Claude only).
+  instead of being denied (Claude only). A miswritten wrapper call (`Ω-run …` with an outer pipe
+  or chaining) is denied with its fix instead of being nested in another wrapper; the `omega` CLI
+  is a plain command and is rewritten.
 - File removal commands are denied, with a hint to use `trash-put`.
 - `pkill -f PATTERN` is denied unless the pattern cannot match its own command line (`[n]ame`,
   `^anchor`): it would kill the calling shell and the wrapper, leaving no result.

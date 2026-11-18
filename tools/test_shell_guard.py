@@ -90,7 +90,8 @@ class GuardTest(unittest.TestCase):
         return result['hookSpecificOutput']['permissionDecisionReason']
 
     def test_denial_offers_ready_to_run_rewrite(self):
-        for command in ['pytest -q | head', "echo 'it''s' && ls"]:
+        # The omega CLI is a plain command, not a miswritten wrapper call.
+        for command in ['pytest -q | head', "echo 'it''s' && ls", 'omega --help; omega --version']:
             rewrite = shlex.join(['Ω-run', '--shell', command])
             self.assertIn(f'Ready-to-run: {rewrite} ', self.reason(command))
         self.assertIn("Ready-to-run: 'Ω-run' --shell 'echo \"unterminated'", self.reason('echo "unterminated'))

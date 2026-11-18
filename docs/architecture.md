@@ -25,6 +25,7 @@ What each source is for:
 | `AGENTS.md` | Global instructions, loaded in every session |
 | `prompts/codex.md` | Compact replacement for Codex's stock base prompt; final response only |
 | `output-styles/final-only.md` | Final response only, preserving Claude's coding instructions |
+| `themes/omega-theme/` | Optional desktop app plugin: Omega colours and an animated backdrop (`--omega-theme`) |
 | `agents/*.md` | The three workers |
 | `skills/*/SKILL.md` | On-demand procedures; only the `Use when …` description is loaded until a task matches |
 | `rust/` | Cargo crate `omega-tools`: evidence executor, [hooks](hooks.md), `omega` CLI |
@@ -40,6 +41,9 @@ Where the installer puts it:
 - `prompts/codex.md` → `~/.codex/instructions.md` (link), selected by `model_instructions_file`.
 - `output-styles/final-only.md` → `~/.claude/output-styles/final-only.md` (link), selected by
   `outputStyle`.
+- `themes/omega-theme/` → `~/.claude/skills/omega-theme` (link), loaded as a plugin; it sets the desktop
+  app colours and backdrop at session start, only with `--omega-theme`. `hooks/make-colors.js` is
+  the unmodified helper from Claude Code's `plugin-authoring` skill; `hooks/logo.js` is generated.
 - `agents/*.md` → `~/.claude/agents/` (links) and `~/.codex/agents/*.toml` (generated).
 - `skills/` → `~/.agents/skills/` (Codex scans it) and `~/.claude/skills/` (links).
 - `rust/` → real 0700 files: `~/.agents/tools/robot-exec/native/run`,

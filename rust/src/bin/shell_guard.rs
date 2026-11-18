@@ -17,6 +17,9 @@ const GUIDANCE_TAIL: &str = "Shell output must use the evidence wrapper. Invoke 
 For shell syntax pass one single-quoted --shell 'SCRIPT' argument; no outer operators, \
 redirection or cd (use --cwd).";
 
+/// Names of the native `omega` CLI: plain commands, not output wrappers.
+const OMEGA_CLI: [&str; 5] = ["omega", "omega-optimize", "\u{3a9}-optimize", "omega-resume", "\u{3a9}-resume"];
+
 /// Longest suggested rewrite; keeps hook output bounded.
 const MAX_REWRITE_BYTES: usize = 300;
 
@@ -711,7 +714,8 @@ impl Guard {
         // A miswritten wrapper call is not re-wrapped: nesting would hide the mistake.
         let head = argv.first().map(String::as_str).or_else(|| command.split(py_isspace).next()).unwrap_or_default();
         let head = head.trim_start_matches(['\'', '"']);
-        let wrapper = head.contains('\u{3a9}') || head.starts_with("omega") || head.contains("/.agents/tools/");
+        let wrapper = !OMEGA_CLI.contains(&head)
+            && (head.contains('\u{3a9}') || head.starts_with("omega") || head.contains("/.agents/tools/"));
         let literal = if wrapper { Self::literal_script(command) } else { None };
         // Retired `Ω-read FILE…` (still called in recorded sessions): bounded `head` of the files
         // instead of a failed round trip.
@@ -1263,7 +1267,7 @@ impl Guard {
         if argv.is_empty() || (command != shlex_join(&argv) && inert_split(command).as_ref() != Some(&argv)) {
             return self.denied_unwrapped("Unwrapped or noncanonical shell command.", command, &argv);
         }
-        if matches!(argv[0].as_str(), "omega" | "omega-optimize" | "Ω-optimize" | "omega-resume" | "Ω-resume") {
+        if OMEGA_CLI.contains(&argv[0].as_str()) {
             if !Self::trusted_alias(&argv[0], &self.optimize) {
                 return self.denied("Untrusted omega command on PATH.");
             }

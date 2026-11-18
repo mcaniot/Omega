@@ -63,9 +63,10 @@ Anything the installer does not own is reported as `CONFLICT` and left untouched
 | --- | --- |
 | `AGENTS.md` | Global instructions shared by Claude Code and Codex |
 | `agents/` | The three workers: `scout`, `coder`, `architect` |
-| `skills/` | Procedures loaded on demand (robotics, debugging, C++, retro, …) |
+| `skills/` | Procedures loaded on demand (robotics, debugging, code review, C++, retro, …) |
 | `rust/` | Native binaries: `Ω-run`, `Ω-inspect`, guards, `omega` CLI |
 | `prompts/`, `output-styles/` | Compact response prompts for Codex and Claude Code |
+| `themes/` | Optional Omega theme for the Claude desktop app (`install.py --omega-theme`) |
 | `systemd/` | Optional daily maintenance timers |
 
 Where each piece lands under `~/.agents`, `~/.claude` and `~/.codex`:

@@ -1,0 +1,9 @@
+{
+  "name": "omega-theme",
+  "version": "0.1.0",
+  "description": "Omega: the logo's orange and gold on navy, colors and an animated backdrop for the desktop app.",
+  "author": {
+    "name": "Maxime Caniot"
+  },
+  "icon": ".claude-plugin/icon.png"
+}
