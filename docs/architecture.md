@@ -54,7 +54,7 @@ Where the installer puts it:
 - `systemd/` → linked by hand ([installation](installation.md#schedule-maintenance)).
 
 Runtime state stays outside the repository: `~/.agents/tasks/` (`active/`, `completed/`,
-`evidence/`, `reports/`, `state/`) and `~/.agents/state/`.
+`evidence/`, `reports/`, `state/`), `~/.agents/state/` and the `progress-page` hub `~/.agents/progress/`.
 
 ## Agents
 

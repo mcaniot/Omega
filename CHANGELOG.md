@@ -16,6 +16,11 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 - `code-review` skill for MR/PR and local diffs: findings backed by `file:line`, scenario and
   consequence, checks labelled run / inspected / not verified, comments in Conventional Comments
   format proposed (blocking, then optional) and published inline with `glab` or `gh` only after explicit approval.
+- `progress-page` skill: a static progress page (`index.html`) rendered from `state.json` by
+  `scripts/make_page.py`, opened from `file://`. Text and media URLs escaped, malformed state
+  rejected with the faulty key, PNG sizes reserved, pausable auto-reload, recent-changes log,
+  atomic writes. Every page registers in one hub, `~/.agents/progress/index.html`, so all tracked
+  tasks are followed from a single tab; a broken or corrupt entry never blocks the others.
 
 ### Changed
 
