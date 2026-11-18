@@ -21,6 +21,19 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
   rejected with the faulty key, PNG sizes reserved, pausable auto-reload, recent-changes log,
   atomic writes. Every page registers in one hub, `~/.agents/progress/index.html`, so all tracked
   tasks are followed from a single tab; a broken or corrupt entry never blocks the others.
+  The hub ranks tasks waiting for the user (`ask`) first and counts them in the tab title, shows
+  relative ages, flags silent tasks and updates since the last visit, and keeps unmounted pages
+  listed. `--step`, `--add-step`, `--log`, `--fig`, `--warn` and `--ask` update `state.json` under
+  a lock and render in one command; `--show` prints the numbered steps, `--all` re-renders every
+  page, `--forget` removes one. Missions expected to run more than about an hour unattended create
+  their page unprompted (`AGENTS.md`).
+  Pages follow handoffs and `/clear`: `--task` and `--agent` link the page to its task file and
+  session, a new agent is logged as a takeover and shown on the hub, and `--find TASK` returns the
+  existing page so a resumed session never starts a second one.
+  Redesign after a UX study (Linear, Geist, Primer, Carbon, NN/g): light and dark themes from the
+  Omega palette, solid orange reserved for questions waiting for the user, status icons with
+  distinct shapes, per-step progress bars, hub grouped by urgency with summary chips, task page
+  with a journal sidebar and an in-page image viewer.
 
 ### Changed
 

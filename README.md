@@ -18,6 +18,7 @@ context:
 - **Skills loaded on demand**: only their one-line description is in the context until a task matches.
 - **Command output on disk**: `Ω-run` stores the full log as evidence and returns a bounded summary.
 - **Guard hooks** that wrap shell commands, bound large reads and refuse re-reads of unchanged lines.
+- **Progress pages** for long missions: one static page per task and a single hub to follow them all in one browser tab.
 
 On reproducible tool workloads (large reads, long build logs), the model receives **86 % fewer
 tokens** from its tools without losing the information it needs. End to end, on long headless
@@ -63,7 +64,7 @@ Anything the installer does not own is reported as `CONFLICT` and left untouched
 | --- | --- |
 | `AGENTS.md` | Global instructions shared by Claude Code and Codex |
 | `agents/` | The three workers: `scout`, `coder`, `architect` |
-| `skills/` | Procedures loaded on demand (robotics, debugging, code review, C++, retro, …) |
+| `skills/` | Procedures loaded on demand (robotics, debugging, code review, C++, retro, progress pages, …) |
 | `rust/` | Native binaries: `Ω-run`, `Ω-inspect`, guards, `omega` CLI |
 | `prompts/`, `output-styles/` | Compact response prompts for Codex and Claude Code |
 | `themes/` | Optional Omega theme for the Claude desktop app (`install.py --omega-theme`) |
@@ -83,6 +84,22 @@ Where each piece lands under `~/.agents`, `~/.claude` and `~/.codex`:
 
 Agents call these themselves; the guards rewrite plain shell commands to `Ω-run`. The ASCII names
 (`omega-run`, `omega resume`, `omega optimize`, …) keep working.
+
+### Follow long missions
+
+A mission expected to run more than about an hour unattended keeps a progress page, created by its
+agent without being asked (`progress-page` skill). Keep one tab open on the hub:
+
+```text
+file://$HOME/.agents/progress/index.html
+```
+
+It groups every mission by urgency — waiting for your decision (counted in the tab title), blocked,
+active, finished — with the latest visual, per-step progress, last change and the age of the last
+update; a task silent for 2 h is flagged. Each card opens the task page: steps, journal, decisions
+and an image viewer. Pages reload themselves (pausable), work offline from `file://`, follow light
+or dark mode, and survive `/clear` and handoffs: the task file links the page, and a new agent is
+logged as a takeover.
 
 ## Documentation
 
