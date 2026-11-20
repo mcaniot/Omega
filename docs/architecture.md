@@ -49,12 +49,13 @@ Where the installer puts it:
 - `rust/` → real 0700 files: `~/.agents/tools/robot-exec/native/run`,
   `~/.agents/tools/{shell_guard,context_guard,context_budget,optimize}` and
   `~/.claude/hooks/session_name`.
-- Command links → `~/.local/bin/Ω-{run,inspect,prune,optimize}`, `~/.local/bin/omega`
-  and the `omega-*` ASCII names.
+- Command links → `~/.local/bin/Ω-{run,inspect,prune,optimize,resume}`, `~/.local/bin/omega`,
+  the `omega-*` ASCII names and `omega-progress`.
 - `systemd/` → linked by hand ([installation](installation.md#schedule-maintenance)).
 
 Runtime state stays outside the repository: `~/.agents/tasks/` (`active/`, `completed/`,
-`evidence/`, `reports/`, `state/`), `~/.agents/state/` and the `progress-page` hub `~/.agents/progress/`.
+`evidence/`, `reports/`, `state/`), `~/.agents/state/`, `~/.agents/activity/` (hook events for the
+progress hub, kept 7 days) and the `progress-page` hub `~/.agents/progress/`.
 
 ## Agents
 

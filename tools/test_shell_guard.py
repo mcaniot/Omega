@@ -305,14 +305,86 @@ class GuardTest(unittest.TestCase):
         # Batched wrapper calls: allowed only when every call is clean on its own.
         run = lambda *argv: shlex.join([NATIVE, 'run', *argv])  # noqa: E731
         allowed = [f"{run('--shell', 'a; b')}; {run('--', 'ls')}", f"{run('--', 'ls')} && {run('--', 'pwd')}",
-                   f"{run('--', 'ls')}; {shlex.join([NATIVE, 'inspect', '/tmp/e'])}"]
+                   f"{run('--', 'ls')}; {shlex.join([NATIVE, 'inspect', '/tmp/e'])}",
+                   f"{run('--', 'ls')} || {run('--', 'pwd')}"]
         denied = [f"{run('--', 'ls')}; {run('--', 'rm', 'x')}", f"{run('--', 'ls')}; ls", f"{run('--', 'ls')} | head",
-                  f"{run('--', 'ls')} || {run('--', 'pwd')}", f"{run('--', 'ls')} & {run('--', 'pwd')}",
+                  f"{run('--', 'ls')} & {run('--', 'pwd')}", f"{run('--', 'ls')} || {run('--', 'rm', 'x')}",
                   f"{run('--', 'ls')}; {run('--', 'git', 'push')}", f"{run('--', 'ls')}; echo $({run('--', 'pwd')})"]
         for command in allowed:
             self.assertEqual(decision(command), 'allow', command)
         for command in denied:
             self.assertNotEqual(decision(command), 'allow', command)
+
+    def test_every_text_the_executor_may_run_is_checked(self):
+        def decision(command):
+            for alias, sub in (('Ω-run', 'run'), ('Ω-inspect', 'inspect'), ('Ω-prune', 'prune')):
+                command = command.replace(alias, f'{NATIVE} {sub}')
+            payload = json.dumps({'tool_name': 'Bash', 'tool_input': {'command': command}}).encode()
+            code, out, err = guard(payload, args=('--allow-clean',))
+            self.assertEqual((code, err), (0, b''))
+            return json.loads(out).get('hookSpecificOutput', {}).get('permissionDecision', 'pass')
+        key = '/home/tester/.' + 'ssh/id_' + 'rsa'
+        cases = [
+            ("Ω-run -- bash -c 'sudo id' --shell x", 'deny'),
+            ("Ω-run bash -c 'git push --force' --shell x", 'ask'),
+            ("Ω-run '--shell=sudo id' --", 'deny'),
+            ('Ω-run --shell-executable --shell -- sudo id', 'deny'),
+            (f'Ω-inspect /tmp/x | head -n 5 {key}', 'deny'),
+            (f'Ω-run -- head -n 5 {key}', 'ask'),
+            ('Ω-prune --appl', 'ask'), ('Ω-prune --apply=1', 'ask'), ('Ω-prune', 'allow'),
+            ('Ω-run -- git -P push --force', 'deny'), ('Ω-run -- git -P commit -m x', 'ask'),
+            ('Ω-run -- git --work-tree . reset --hard', 'ask'), ('Ω-run -- git --no-pager log', 'allow'),
+            ('Ω-run -- git -C x status', 'allow'),
+            ('Ω-run git commit -m x -- f', 'ask'), ('Ω-run rm -rf /tmp/x -- y', 'deny'),
+            ('Ω-run --cwd /home/u/.ssh -- cat config', 'ask'), ('Ω-run -- tar czf x.tgz /home/u/.ssh', 'ask'),
+            ('Ω-run -- Ω-prune --apply', 'ask'), ("Ω-run --shell 'Ω-prune --apply'", 'ask'),
+            (f'Ω-run -- {NATIVE} prune --app', 'ask'), ("Ω-run -- sh -c 'ls; Ω-prune --apply'", 'ask'),
+            ('Ω-run -- Ω-prune --dry-run', 'allow'),
+            ('Ω-run --timeout 5 pkill -f name', 'deny'), ('Ω-run --fail-fast --cwd /tmp pkill -f name', 'deny'),
+            ("Ω-run --shell 'which git\nrm important.txt'", 'deny'), ('Ω-run -- git rm x', 'allow'),
+            ('Ω-inspect /x/y | rg --hostname-bin /tmp/x foo', 'deny'),
+            ('Ω-run -- git stash', 'ask'), ("Ω-run --shell 'git stash pop'", 'ask'), ('Ω-run -- git stash -u', 'ask'),
+            ('Ω-run -- git stash list', 'allow'),
+            ('Ω-inspect /x/y | head -n 5 /etc/passwd', 'deny'), ('Ω-inspect /x/y | grep -f /etc/passwd', 'deny'),
+            ('Ω-inspect /x/y | grep -rn foo', 'deny'), ('Ω-inspect /x/y | grep -e a /etc/passwd', 'deny'),
+            ("Ω-run --shell 'git --no-pager log; rm important.txt'", 'deny'),
+            ('Ω-run --native-only --timeout 5 pkill -f name', 'deny'),
+            ('Ω-run --shell-executable -- -- pkill -f name', 'deny'),
+        ]
+        for command, expected in cases:
+            self.assertEqual(decision(command), expected, command)
+
+    def test_rewrites_never_drop_part_of_the_command(self):
+        with tempfile.TemporaryDirectory() as home:
+            native = Path(home, '.agents/tools/robot-exec/native/run')
+            native.parent.mkdir(parents=True)
+            native.write_text('#!/bin/sh\n')
+            native.chmod(0o700)
+            Path(home, 'bin').mkdir()
+            for name in ('Ω-run', 'Ω-inspect'):
+                Path(home, 'bin', name).symlink_to(native)
+
+            def result(command):
+                payload = json.dumps({'tool_name': 'Bash', 'tool_input': {'command': command}}).encode()
+                done = subprocess.run([BINARY, '--allow-clean'], input=payload, capture_output=True, timeout=30,
+                                      env={'PATH': f'{home}/bin:/usr/bin:/bin', 'HOME': home})
+                return json.loads(done.stdout)['hookSpecificOutput']
+            for command in ('cat ~/.agents/tasks/evidence/x/stdout.log && echo done',
+                            'cat ~/.agents/tasks/evidence/x/stdout.log > /tmp/out.txt'):
+                self.assertEqual(result(command)['updatedInput']['command'], shlex.join(['Ω-run', '--shell', command]))
+            for command in ('cat ~/.agents/tasks/evidence/x/stdout.log\npytest -q tests',
+                            'cat ~/.agents/tasks/evidence/x/stdout.log | python3 parse.py',
+                            'cat ~/.agents/tasks/evidence/x/stdout.log | grep -c ERROR',
+                            'cat ~/.agents/tasks/evidence/x/stdout.log | tee f',
+                            'cat ~/.agents/tasks/evidence/x/stdout.log /tmp/other.txt',
+                            'cat ~/.agents/tasks/evidence/2026*/stdout.log'):
+                self.assertEqual(result(command)['updatedInput']['command'], shlex.join(['Ω-run', '--shell', command]))
+            inspect = shlex.split(result('cat ~/.agents/tasks/evidence/x/stdout.log 2>&1')['updatedInput']['command'])
+            self.assertEqual((inspect[0], inspect[-1]), ('Ω-inspect', f'{home}/.agents/tasks/evidence/x'))
+            reason = result("Ω-run --shell='make build' 2>/dev/null; Ω-run -- ls")
+            self.assertNotIn("Ready-to-run: 'Ω-run' -- ls", reason['permissionDecisionReason'])
+            self.assertNotIn('Ready-to-run: ', result('Ω-run --shell-keep-going; true')['permissionDecisionReason'])
+            self.assertEqual(result("'Ω-run' -- false || ls")['permissionDecision'], 'allow')
 
     def test_allow_clean_auto_wraps_unwrapped_policy_clean_commands(self):
         with tempfile.TemporaryDirectory() as home:

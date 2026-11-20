@@ -48,6 +48,12 @@ class ContextGuardTest(unittest.TestCase):
         self.assertEqual(hook['updatedInput'], {'file_path': str(path), 'offset': 1601, 'limit': 200})
         self.assertIn('lines 1601-1800 of 2000', hook['additionalContext'])
 
+    def test_huge_offset_does_not_wrap_the_reported_range(self):
+        path = self.home / 'huge.py'
+        path.write_text('line\n' * 8000)
+        hook = self.evaluate(path, offset=2**64 - 1)['hookSpecificOutput']
+        self.assertIn(f'lines {2**64 - 1}-{2**64 - 1} of 8000 of {path}', hook['additionalContext'])
+
     def test_read_reaching_the_end_within_300_lines_and_30000_bytes_runs_as_written(self):
         # Bounding lines 1-200 of 230 would cost a second round trip for 30 lines.
         path = self.large_file()

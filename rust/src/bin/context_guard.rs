@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 #[path = "../state/ledger.rs"]
 mod ledger;
-use ledger::{Coverage, Ledger};
+use ledger::Ledger;
 
 const LARGE_TEXT_BYTES: u64 = 8192;
 const MAX_READ_LINES: u64 = 200;
@@ -51,8 +51,8 @@ fn read_range(payload: &Value, file: &str, metadata: &std::fs::Metadata) -> Opti
     };
     let total = line_count(file, metadata);
     let end = match (limit, total) {
-        (Some(n), Some(t)) => (start + n - 1).min(t),
-        (Some(n), None) => start + n - 1,
+        (Some(n), Some(t)) => (start.saturating_add(n - 1)).min(t),
+        (Some(n), None) => start.saturating_add(n - 1),
         (None, Some(t)) => t,
         (None, None) => return None,
     };
@@ -68,7 +68,7 @@ fn ledger_check(payload: &Value, file: &str, metadata: &std::fs::Metadata) -> Op
     let state = session_ledger(payload)?;
     let (start, end) = read_range(payload, file, metadata)?;
     let mut book = Ledger::load(&state);
-    matches!(book.check(&ledger::key(Path::new(file)), ledger::stamp(metadata), start, end), Coverage::Full)
+    book.covers(&ledger::key(Path::new(file)), ledger::stamp(metadata), start, end)
         .then(|| deny(&format!("already in context: lines {start}-{end} of {file} (unchanged since read)")))
 }
 
@@ -78,7 +78,7 @@ fn record_read(payload: &Value) {
     if payload.get("agent_id").is_some() {
         return;
     }
-    let (Some(state), Some(file)) = (session_ledger(payload), payload["tool_input"].get("file_path").and_then(Value::as_str)) else {
+    let (Some(state), Some(file)) = (session_ledger(payload), payload["tool_input"]["file_path"].as_str()) else {
         return;
     };
     let Ok(metadata) = Path::new(file).metadata() else { return };
@@ -91,18 +91,18 @@ fn record_read(payload: &Value) {
 /// Drop ledger state on context reset or file mutation; record a successful Read.
 fn invalidate(payload: &Value) {
     let Some(state) = session_ledger(payload) else { return };
-    let event = payload.get("hook_event_name").and_then(Value::as_str);
+    let event = payload["hook_event_name"].as_str();
     let reset = event == Some("PostCompact")
         || (event == Some("SessionStart")
-            && matches!(payload.get("source").and_then(Value::as_str), Some("compact" | "clear")));
+            && matches!(payload["source"].as_str(), Some("compact" | "clear")));
     if reset {
         ledger::remove(&state);
-    } else if event == Some("PostToolUse") && payload.get("tool_name").and_then(Value::as_str) == Some("Read") {
+    } else if event == Some("PostToolUse") && payload["tool_name"].as_str() == Some("Read") {
         record_read(payload);
     } else if event == Some("PostToolUse")
-        && matches!(payload.get("tool_name").and_then(Value::as_str), Some("Edit" | "Write" | "MultiEdit"))
+        && matches!(payload["tool_name"].as_str(), Some("Edit" | "Write" | "MultiEdit"))
     {
-        if let Some(file) = payload["tool_input"].get("file_path").and_then(Value::as_str) {
+        if let Some(file) = payload["tool_input"]["file_path"].as_str() {
             let mut book = Ledger::load(&state);
             book.forget(&ledger::key(Path::new(file)));
             book.save(&state);
@@ -114,12 +114,12 @@ fn invalidate(payload: &Value) {
 /// Measured: the model never loads `cpp-quality` on its own, and it is the one skill that
 /// changed correctness (mutex and allocation in a control step).
 fn cpp_hint(payload: &Value) -> Option<Value> {
-    if payload.get("hook_event_name").and_then(Value::as_str) != Some("PostToolUse")
-        || payload.get("tool_name").and_then(Value::as_str) == Some("Read")
+    if payload["hook_event_name"].as_str() != Some("PostToolUse")
+        || payload["tool_name"].as_str() == Some("Read")
     {
         return None;
     }
-    let file = payload["tool_input"].get("file_path").and_then(Value::as_str)?;
+    let file = payload["tool_input"]["file_path"].as_str()?;
     let extension = Path::new(file).extension()?.to_str()?.to_ascii_lowercase();
     if !matches!(extension.as_str(), "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx" | "ipp") {
         return None;
@@ -137,16 +137,16 @@ fn cpp_hint(payload: &Value) -> Option<Value> {
 }
 
 fn evaluate(payload: &Value) -> Value {
-    let event = payload.get("hook_event_name").and_then(Value::as_str).unwrap_or("PreToolUse");
+    let event = payload["hook_event_name"].as_str().unwrap_or("PreToolUse");
     if event != "PreToolUse" {
         invalidate(payload);
         return cpp_hint(payload).unwrap_or_else(|| json!({}));
     }
-    if payload.get("tool_name").and_then(Value::as_str) != Some("Read") {
+    if payload["tool_name"].as_str() != Some("Read") {
         return json!({});
     }
     let input = &payload["tool_input"];
-    let Some(file) = input.get("file_path").and_then(Value::as_str) else {
+    let Some(file) = input["file_path"].as_str() else {
         return json!({}); // Let Read report its own argument errors.
     };
     let path = Path::new(file);
@@ -156,25 +156,10 @@ fn evaluate(payload: &Value) -> Value {
     if !metadata.is_file() {
         return json!({});
     }
-    let extension = path
-        .extension()
-        .and_then(|x| x.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let extension = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
     if matches!(
         extension.as_str(),
-        "png"
-            | "jpg"
-            | "jpeg"
-            | "gif"
-            | "webp"
-            | "bmp"
-            | "tif"
-            | "tiff"
-            | "ico"
-            | "avif"
-            | "pdf"
-            | "ipynb"
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "ico" | "avif" | "pdf" | "ipynb"
     ) {
         return json!({}); // Serialized image bytes are not text tokens.
     }
@@ -192,7 +177,7 @@ fn evaluate(payload: &Value) -> Value {
             );
         }
     }
-    match input.get("limit").and_then(Value::as_u64) {
+    match input["limit"].as_u64() {
         Some(1..=MAX_READ_LINES) => tracked(),
         _ => bounded(payload, file, &metadata),
     }
@@ -201,11 +186,11 @@ fn evaluate(payload: &Value) -> Value {
 /// Run an unbounded or oversized Read of a large text file as its first MAX_READ_LINES lines
 /// instead of denying it: a denial costs one full-context round trip for the same result.
 fn bounded(payload: &Value, file: &str, metadata: &std::fs::Metadata) -> Value {
-    let start = payload["tool_input"].get("offset").and_then(Value::as_u64).unwrap_or(1).max(1);
-    let end = start + MAX_READ_LINES - 1;
+    let start = payload["tool_input"]["offset"].as_u64().unwrap_or(1).max(1);
+    let end = start.saturating_add(MAX_READ_LINES - 1);
     let total = line_count(file, metadata);
     // A short tail past the bound would cost a second round trip worth more than its lines.
-    if metadata.len() <= WHOLE_READ_BYTES && total.is_some_and(|total| total < start + WHOLE_READ_LINES) {
+    if metadata.len() <= WHOLE_READ_BYTES && total.is_some_and(|total| total < start.saturating_add(WHOLE_READ_LINES)) {
         let mut whole = payload.clone();
         whole["tool_input"].as_object_mut().map(|input| input.remove("limit"));
         return ledger_check(&whole, file, metadata).unwrap_or_else(|| json!({}));
@@ -216,7 +201,7 @@ fn bounded(payload: &Value, file: &str, metadata: &std::fs::Metadata) -> Value {
         return denied;
     }
     let range = match total {
-        Some(total) => format!("{start}-{} of {total}", end.min(total)),
+        Some(total) => format!("{start}-{} of {total}", end.min(total).max(start)),
         None => format!("{start}-{end}"),
     };
     json!({"hookSpecificOutput": {

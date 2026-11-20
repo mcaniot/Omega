@@ -17,12 +17,14 @@ pub enum Style {
 
 pub fn json_str(out: &mut Vec<u8>, s: &[u8], style: Style) {
     out.push(b'"');
+    // Invalid UTF-8 becomes U+FFFD so the JSON stays valid UTF-8 in every style.
+    let s = String::from_utf8_lossy(s);
     if style == Style::PyAscii {
-        for c in String::from_utf8_lossy(s).chars() {
+        for c in s.chars() {
             escape_char(out, c);
         }
     } else {
-        for &b in s {
+        for &b in s.as_bytes() {
             escape_byte(out, b);
         }
     }
@@ -196,10 +198,7 @@ pub fn parse_int(text: &[u8]) -> Option<i64> {
     if !body.chars().all(|c| c.is_ascii_digit() || c == '_') {
         return None;
     }
-    let value: i128 = match digits(body)?.parse::<i128>() {
-        Ok(v) => v,
-        Err(_) => i128::MAX,
-    };
+    let value: i128 = digits(body)?.parse::<i128>().unwrap_or(i128::MAX);
     let value = if negative { -value } else { value };
     Some(value.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
 }

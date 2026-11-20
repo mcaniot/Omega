@@ -236,6 +236,21 @@ class OptimizeTest(unittest.TestCase):
         self.assertEqual(self.settings.read_text(), '{invalid')
         self.assertEqual(self.transcript.read_bytes(), self.original_transcript)
 
+    def test_failed_run_leaves_no_report_and_retry_works(self):
+        report = self.home / 'r.json'
+        self.settings.write_text('{')
+        done = self.run_command('--check', '--report', str(report), success=False)
+        self.assertIn('Invalid Claude settings', done.stderr)
+        self.assertFalse(report.exists())
+        self.settings.write_text(json.dumps(self.original_settings))
+        self.run_command('--check', '--report', str(report))
+        self.assertGreater(report.stat().st_size, 0)
+
+    def test_non_utf8_argument_is_an_error_not_a_panic(self):
+        done = subprocess.run([BINARY, '--report', b'\xff.json'], env=self.env, capture_output=True, timeout=20)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(b'Invalid UTF-8 argument', done.stderr)
+
     def test_empty_home_is_read_only(self):
         self.transcript.unlink()
         self.settings.unlink()
@@ -531,6 +546,16 @@ class OptimizeTest(unittest.TestCase):
         self.assertEqual((row['repeated_read_lines'], row['legit_reread_lines'],
                           row['avoidable_reread_lines']), (8, 4, 4))
 
+    def test_notebook_edit_makes_a_reread_legit(self):
+        text = '\n'.join(f'Notebook line number {i} is long enough to fingerprint.' for i in range(2))
+        read = {'file_path': '/nb.ipynb'}
+        self.write_rows(self.tool('r1', 'Read', read, text) + self.tool('r2', 'Read', read, text)
+                        + self.tool('ed', 'NotebookEdit', {'notebook_path': '/nb.ipynb'}, 'ok')
+                        + self.tool('r3', 'Read', read, text))
+        row = self.force_row()
+        self.assertEqual((row['repeated_read_lines'], row['legit_reread_lines'],
+                          row['avoidable_reread_lines']), (4, 2, 2))
+
     def test_compare_prints_gates_and_exits_zero_even_when_ko(self):
         base = self.home / 'base.json'
         base.write_text(json.dumps({'sessions': [{'tokens_total': 3000}, {'tokens_total': 3000}]}))
@@ -543,6 +568,7 @@ class OptimizeTest(unittest.TestCase):
         table = self.run_command('--force', '--compare', str(base)).stdout
         self.assertIn('compactions', table)
         self.assertRegex(table, r'compactions\s+1\s+== 0\s+KO')
+        self.assertIn('compactions               1            == 0         ', table)  # columns padded
         base.write_text(json.dumps({'sessions': [{'tokens_total': 900}]}))
         report = json.loads(self.run_command('--force', '--json', '--compare', str(base)).stdout)
         self.assertFalse(report['gates']['median_tokens_per_session']['ok'])
@@ -761,6 +787,15 @@ class PrefixTest(unittest.TestCase):
         self.assertEqual([f['kind'] for f in report['findings']], ['duplicate_instruction_file'])
         self.assertEqual(report['aggregate']['global_floor_tokens'], 510)
         self.assertAlmostEqual(report['aggregate']['weighted_prefix_share'], 510 * 4 / 2635)
+
+    def test_partial_multibyte_tail_and_table_padding(self):
+        self.session('p1', 'a', [self.message('a', 10, 500, 0)])
+        path = self.home / '.claude/projects/p1/a.jsonl'
+        with path.open('ab') as stream:
+            stream.write(b'{"type": "user", "text": "\xe2\x82')
+        project, = json.loads(self.run_prefix('--json'))['projects']
+        self.assertEqual(project['first_context_min'], 510)
+        self.assertRegex(self.run_prefix().splitlines()[1], r'^1 {5}1 {7}510 {9}100\.0% {2}\d+ ')
 
     def test_path_imported_and_loaded_natively_is_not_a_duplicate(self):
         (self.cwd / 'CLAUDE.local.md').write_text('@docs/extra.md\n@./docs/extra.md\n')

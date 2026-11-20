@@ -21,9 +21,7 @@
 use super::ingest;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
 use std::path::PathBuf;
 
 /// Fallback when a session has no single-result context delta to calibrate from.
@@ -51,23 +49,6 @@ struct Request {
 struct Access {
     path: String,
     read_tokens: Option<f64>,
-}
-
-fn result_bytes(result: &Value) -> usize {
-    match &result["content"] {
-        Value::String(s) => s.len(),
-        Value::Array(blocks) => blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).map(str::len).sum(),
-        _ => 0,
-    }
-}
-
-fn median(mut values: Vec<f64>) -> f64 {
-    values.sort_by(f64::total_cmp);
-    match values.len() {
-        0 => 0.0,
-        n if n % 2 == 1 => values[n / 2],
-        n => (values[n / 2 - 1] + values[n / 2]) / 2.0,
-    }
 }
 
 /// Cost of the session with `savings` (result index, tokens) removed from later contexts,
@@ -153,11 +134,11 @@ fn replay_session(path: &std::path::Path, threshold: u64) -> Result<Option<Value
                     call_order.entry(id.to_owned()).or_insert(index);
                     if let Some(message) = &message_id { call_message.entry(id.to_owned()).or_insert(message.clone()); }
                 }
-            } else if block["type"] == "tool_result" {
-                if let Some(id) = block["tool_use_id"].as_str() {
-                    results.insert(id.to_owned(), block.clone());
-                    result_order.entry(id.to_owned()).or_insert(index);
-                }
+            } else if block["type"] == "tool_result"
+                && let Some(id) = block["tool_use_id"].as_str()
+            {
+                results.insert(id.to_owned(), block.clone());
+                result_order.entry(id.to_owned()).or_insert(index);
             }
         }
     }
@@ -169,7 +150,7 @@ fn replay_session(path: &std::path::Path, threshold: u64) -> Result<Option<Value
 
     // Calibration: request pairs whose context growth is driven by exactly one tool result.
     let mut result_marks: Vec<(usize, usize)> = results.iter()
-        .map(|(id, r)| (result_order.get(id).copied().unwrap_or(0), result_bytes(r))).collect();
+        .map(|(id, r)| (result_order.get(id).copied().unwrap_or(0), ingest::result_bytes(r))).collect();
     result_marks.sort();
     let mut samples = Vec::new();
     for pair in requests.windows(2) {
@@ -181,13 +162,14 @@ fn replay_session(path: &std::path::Path, threshold: u64) -> Result<Option<Value
             samples.push(between[0].1 as f64 / delta);
         }
     }
-    let bytes_per_token = if samples.is_empty() { DEFAULT_BYTES_PER_TOKEN } else { median(samples.clone()) };
-    let tokens_of = |id: &String| results.get(id).map_or(0.0, |r| result_bytes(r) as f64 / bytes_per_token);
+    let calibration_samples = samples.len();
+    let bytes_per_token = if samples.is_empty() { DEFAULT_BYTES_PER_TOKEN } else { ingest::median(samples) };
+    let tokens_of = |id: &String| results.get(id).map_or(0.0, |r| ingest::result_bytes(r) as f64 / bytes_per_token);
 
     // R1 and the shared ordered walk over calls.
     let edits = ingest::edit_orders(&calls, &results, &call_order);
     let mut ordered: Vec<(&String, &Value)> = calls.iter().collect();
-    ordered.sort_by_key(|(id, _)| (call_order.get(*id).copied().unwrap_or(0), (*id).clone()));
+    ordered.sort_by_key(|(id, _)| (call_order.get(*id).copied().unwrap_or(0), *id));
     let mut seen: HashMap<String, (Option<usize>, Option<String>)> = HashMap::new();
     let mut r1_savings = Vec::new();
     for (id, call) in &ordered {
@@ -268,7 +250,7 @@ fn replay_session(path: &std::path::Path, threshold: u64) -> Result<Option<Value
         "segments": segments,
         "handoffs": segments - 1,
         "bytes_per_token": bytes_per_token,
-        "calibration_samples": samples.len(),
+        "calibration_samples": calibration_samples,
     })))
 }
 
@@ -283,26 +265,15 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                     .ok_or("--sessions requires 1..50")?;
             }
             "--handoff-tokens" | "--soft-reset-tokens" => {
-                let n = args.next().and_then(|v| v.parse::<u64>().ok()).filter(|n| *n > 0).ok_or("--handoff-tokens requires a positive integer")?;
-                threshold = n;
+                threshold = args.next().and_then(|v| v.parse::<u64>().ok()).filter(|n| *n > 0).ok_or("--handoff-tokens requires a positive integer")?;
             }
             "--report" => report = Some(PathBuf::from(args.next().ok_or("--report requires a new JSON file path")?)),
             _ => return Err(format!("Unknown argument: {arg}")),
         }
     }
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is required")?);
-    let root = home.join(".claude/projects");
-    let mut paths = Vec::new();
-    if root.exists() {
-        for directory in fs::read_dir(&root).map_err(|e| e.to_string())? {
-            let directory = directory.map_err(|e| e.to_string())?;
-            if directory.file_type().map_err(|e| e.to_string())?.is_dir() {
-                ingest::discover(&directory.path(), false, &mut paths)?;
-            }
-        }
-    }
     let mut files = Vec::new();
-    for path in paths {
+    for path in ingest::claude_transcripts(&home)? {
         let modified = path.metadata().and_then(|m| m.modified()).map_err(|e| e.to_string())?;
         files.push((modified, path));
     }
@@ -311,10 +282,10 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     for (_, path) in files.into_iter().take(limit) {
         rows.extend(replay_session(&path, threshold)?);
     }
-    let sum = |f: &dyn Fn(&Value) -> f64| rows.iter().map(f).sum::<f64>();
-    let (baseline, counterfactual) = (sum(&|r| r["baseline_tokens"].as_f64().unwrap_or(0.0)), sum(&|r| r["counterfactual_tokens"].as_f64().unwrap_or(0.0)));
-    let rule = |k: &str| sum(&|r| r["savings"][k].as_f64().unwrap_or(0.0));
-    let field = |k: &str| sum(&|r| r[k].as_f64().unwrap_or(0.0));
+    let rule = |k: &str| rows.iter().map(|r| r["savings"][k].as_f64().unwrap_or(0.0)).sum::<f64>();
+    let field = |k: &str| rows.iter().map(|r| r[k].as_f64().unwrap_or(0.0)).sum::<f64>();
+    let median_of = |k: &str| ingest::median(rows.iter().map(|r| r[k].as_f64().unwrap_or(0.0)).collect());
+    let (baseline, counterfactual) = (field("baseline_tokens"), field("counterfactual_tokens"));
     let (rereads, avoidable) = (field("post_cut_rereads"), field("avoidable_rereads"));
     let mut top: Vec<&Value> = rows.iter().collect();
     top.sort_by_key(|r| std::cmp::Reverse(r["baseline_tokens"].as_i64().unwrap_or(0) - r["counterfactual_tokens"].as_i64().unwrap_or(0)));
@@ -326,9 +297,9 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             "sessions": rows.len(),
             "baseline_total": baseline,
             "counterfactual_total": counterfactual,
-            "baseline_median": median(rows.iter().map(|r| r["baseline_tokens"].as_f64().unwrap_or(0.0)).collect()),
-            "counterfactual_median": median(rows.iter().map(|r| r["counterfactual_tokens"].as_f64().unwrap_or(0.0)).collect()),
-            "reduction_pct_median": median(rows.iter().map(|r| r["reduction_pct"].as_f64().unwrap_or(0.0)).collect()),
+            "baseline_median": median_of("baseline_tokens"),
+            "counterfactual_median": median_of("counterfactual_tokens"),
+            "reduction_pct_median": median_of("reduction_pct"),
             "ratio": if counterfactual > 0.0 { baseline / counterfactual } else { 0.0 },
             "target_ratio": 3.0,
             "savings": {"r1": rule("r1"), "r2": rule("r2"), "r3": rule("r3")},
@@ -343,9 +314,8 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         },
     });
     if let Some(path) = report {
-        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).map_err(|e| e.to_string())?;
-        serde_json::to_writer_pretty(&mut file, &output).map_err(|e| e.to_string())?;
-        file.write_all(b"\n").and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
+        let mut file = ingest::create_new(&path)?;
+        ingest::write_json(&mut file, &output)?;
     }
     if json_output {
         println!("{output}");
@@ -354,9 +324,12 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     println!("SESSION   REQS  BASELINE    COUNTERFACTUAL  REDUCTION  R1        R2        R3        SEG  B/TOK");
     for row in output["sessions"].as_array().into_iter().flatten() {
         let session: String = row["session"].as_str().unwrap_or("?").chars().take(8).collect();
-        println!("{session:8}  {:<4}  {:<10}  {:<14}  {:<8.2}%  {:<8}  {:<8}  {:<8}  {:<3}  {:.2}",
-            row["requests"], row["baseline_tokens"], row["counterfactual_tokens"], row["reduction_pct"].as_f64().unwrap_or(0.0),
-            row["savings"]["r1"], row["savings"]["r2"], row["savings"]["r3"], row["segments"], row["bytes_per_token"].as_f64().unwrap_or(0.0));
+        // serde_json::Value ignores width specifiers; format plain numbers.
+        let n = |v: &Value| v.as_i64().unwrap_or(0);
+        let reduction = format!("{:.2}%", row["reduction_pct"].as_f64().unwrap_or(0.0));
+        println!("{session:8}  {:<4}  {:<10}  {:<14}  {reduction:<9}  {:<8}  {:<8}  {:<8}  {:<3}  {:.2}",
+            n(&row["requests"]), n(&row["baseline_tokens"]), n(&row["counterfactual_tokens"]),
+            n(&row["savings"]["r1"]), n(&row["savings"]["r2"]), n(&row["savings"]["r3"]), n(&row["segments"]), row["bytes_per_token"].as_f64().unwrap_or(0.0));
     }
     let a = &output["aggregate"];
     println!("Total baseline {} -> counterfactual {} (ratio {:.2}, target >= 3); median {} -> {}; savings r1/r2/r3 {}/{}/{}",

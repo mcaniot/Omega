@@ -2,7 +2,8 @@
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Extract only returned read data, not commands, offsets or serialized images.
@@ -31,11 +32,11 @@ pub fn read_text(call: &Value, result: &Value) -> Vec<String> {
                     }
                 }
                 for line in s.lines() {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(line) {
-                        if parsed.get("output").is_some() || parsed.get("evidence").is_some() {
-                            text(&parsed, depth + 1, output);
-                            continue;
-                        }
+                    if let Ok(parsed) = serde_json::from_str::<Value>(line)
+                        && (parsed.get("output").is_some() || parsed.get("evidence").is_some())
+                    {
+                        text(&parsed, depth + 1, output);
+                        continue;
                     }
                     output.push(line.to_owned());
                 }
@@ -60,16 +61,15 @@ pub fn read_text(call: &Value, result: &Value) -> Vec<String> {
 /// Fingerprints of the source lines a read returned (Read-tool line numbers stripped, short lines ignored).
 pub fn read_fingerprints(call: &Value, result: &Value) -> HashSet<String> {
     let mut found = HashSet::new();
+    // read_text already returns single lines.
     for text in read_text(call, result) {
-        for line in text.lines() {
-            // Read-tool line numbers are presentation, not source content.
-            let line = if call["name"] == "Read" {
-                line.split_once(['→', '\t']).filter(|(n, _)| !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()))
-                    .map_or(line, |(_, s)| s)
-            } else { line };
-            if line.len() >= 32 {
-                found.insert(super::hex(&Sha256::digest(line.as_bytes())));
-            }
+        // Read-tool line numbers are presentation, not source content.
+        let line = if call["name"] == "Read" {
+            text.split_once(['→', '\t']).filter(|(n, _)| !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()))
+                .map_or(text.as_str(), |(_, s)| s)
+        } else { text.as_str() };
+        if line.len() >= 32 {
+            found.insert(super::hex(&Sha256::digest(line.as_bytes())));
         }
     }
     found
@@ -83,11 +83,13 @@ pub fn edit_orders<'a>(
 ) -> HashMap<&'a str, Vec<usize>> {
     let mut edits: HashMap<&str, Vec<usize>> = HashMap::new();
     for (id, call) in calls {
+        // NotebookEdit names its file notebook_path.
+        let path = call["input"]["file_path"].as_str().or_else(|| call["input"]["notebook_path"].as_str());
         if matches!(call["name"].as_str(), Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit"))
-            && results.get(id).is_some_and(|r| r["is_error"] != true) {
-            if let Some(path) = call["input"]["file_path"].as_str() {
-                edits.entry(path).or_default().push(call_order.get(id).copied().unwrap_or(0));
-            }
+            && results.get(id).is_some_and(|r| r["is_error"] != true)
+            && let Some(path) = path
+        {
+            edits.entry(path).or_default().push(call_order.get(id).copied().unwrap_or(0));
         }
     }
     edits
@@ -166,6 +168,57 @@ pub fn discover(root: &Path, recursive: bool, files: &mut Vec<PathBuf>) -> Resul
         }
     }
     Ok(())
+}
+
+/// Top-level transcripts of every Claude project directory.
+pub fn claude_transcripts(home: &Path) -> Result<Vec<PathBuf>, String> {
+    let root = home.join(".claude/projects");
+    let mut paths = Vec::new();
+    if root.exists() {
+        for directory in fs::read_dir(&root).map_err(|e| e.to_string())? {
+            let directory = directory.map_err(|e| e.to_string())?;
+            if directory.file_type().map_err(|e| e.to_string())?.is_dir() {
+                discover(&directory.path(), false, &mut paths)?;
+            }
+        }
+    }
+    Ok(paths)
+}
+
+/// Text bytes of a tool result; images are not text, so their serialized bytes never count.
+pub fn result_bytes(result: &Value) -> usize {
+    match &result["content"] {
+        Value::String(s) => s.len(),
+        Value::Array(blocks) => blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).map(str::len).sum(),
+        _ => 0,
+    }
+}
+
+pub fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    match values.len() {
+        0 => 0.0,
+        n if n % 2 == 1 => values[n / 2],
+        n => (values[n / 2 - 1] + values[n / 2]) / 2.0,
+    }
+}
+
+/// New private (0600) file; the error names the path.
+pub fn create_new(path: &Path) -> Result<File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Pretty JSON plus newline, flushed to disk.
+pub fn write_json(file: &mut File, value: &Value) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+    bytes.push(b'\n');
+    file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|e| e.to_string())
 }
 
 pub fn codex(row: Value) -> Value {

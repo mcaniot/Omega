@@ -11,6 +11,7 @@ Usage:
   make_page.py --serve [HOST:]PORT        (or omega-progress [HOST:]PORT) read-only HTTP view of the hub and pages (default 127.0.0.1:8765;
                                           URL printed with a random token, or $PROGRESS_TOKEN)
   make_page.py --answered < HOOK.json     UserPromptSubmit hook: clear the questions of that session
+  make_page.py --activity < HOOK.json     session hook: log the event for the hub (kept 7 days)
 
 Update flags change STATE.json (dated, validated, written atomically under a lock) before rendering;
 steps are numbered from 1 as on the page. N=STATUS keeps the note, N=STATUS:: clears it, N=STATUS::x
@@ -29,7 +30,9 @@ The page opens from file:// without a server; its labels are French. State keys 
   figures: [{file, title, note?, full?, date?}]  (relative to the state directory, oldest first;
                                                   .mp4/.webm → video; full: link to the full render),
   log?: [{date, text}]                           (oldest first; older than the 5 most recent fold away),
-  sections?: [{title, items: [text]}].
+  sections?: [{title, items?: [text], table?: {columns: [text], rows: [[cell]]}}]
+                                                 (--section TITLE::JSON adds or replaces one by title:
+                                                  a JSON list sets items, an object sets the table).
 """
 import argparse
 import base64
@@ -254,6 +257,9 @@ figcaption{display:grid;gap:2px;padding:10px 14px;font-size:13px;color:var(--tex
 figcaption b{font-size:14px;font-weight:600;color:var(--text)}
 .list{max-width:78ch} .list li{position:relative;margin-top:6px;padding-left:16px}
 .list li::before{content:"";position:absolute;left:2px;top:.62em;width:5px;height:5px;border-radius:50%;background:var(--border-2)}
+.tbl{overflow-x:auto;margin-top:8px} .tbl table{border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+.tbl th,.tbl td{padding:6px 12px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+.tbl th{font-weight:600;color:var(--text-2);background:var(--surface-2)}
 .journal li{position:relative;padding:0 0 14px 20px;font-size:13px;line-height:1.45;color:var(--text-2)}
 .journal li:last-child{padding-bottom:0} .journal .d{display:block}
 .journal li::before{content:"";position:absolute;z-index:1;left:0;top:4px;width:9px;height:9px;border-radius:50%;
@@ -362,15 +368,35 @@ def validate(state):
     if not isinstance(steps, list):
         return '"steps" must be a list'
     for i, step in enumerate(steps):
-        if not isinstance(step, dict) or 'step' not in step or step.get('status') not in STATUS:
+        if not isinstance(step, dict) or 'step' not in step or step.get('status') not in tuple(STATUS):
             return f'steps[{i}] needs "step" and "status" among {", ".join(STATUS)}'
     ask = state.get('ask')
     if ask is not None and not isinstance(ask, str) and not (isinstance(ask, list) and all(isinstance(a, str) for a in ask)):
         return '"ask" must be a text or a list of texts'
-    for key, fields in (('figures', ('file', 'title')), ('log', ('date', 'text')), ('sections', ('title', 'items'))):
+    for key, fields in (('figures', ('file', 'title')), ('log', ('date', 'text'))):
         items = state.get(key, [])
         if not isinstance(items, list) or not all(isinstance(e, dict) and all(f in e for f in fields) for e in items):
             return f'"{key}" must be a list of objects with {", ".join(fields)}'
+        if not all(isinstance(e[f], str) for e in items for f in fields if f != 'date'):
+            return f'"{key}" fields must be texts'
+    sections = state.get('sections', [])
+    if not isinstance(sections, list) or not all(isinstance(s, dict) and isinstance(s.get('title'), str)
+                                                 and isinstance(s.get('items', []), list) and table_error(s.get('table')) is None
+                                                 for s in sections):
+        return '"sections" must be a list of objects with a text "title", optional "items" (list) and "table"'
+    if any('full' in e and not isinstance(e['full'], str) for e in state.get('figures', [])):
+        return '"figures[].full" must be a text'
+    return None
+
+
+def table_error(table):
+    """None for an absent or well-formed table, else what is wrong."""
+    if table is None:
+        return None
+    if not isinstance(table, dict) or not isinstance(table.get('columns'), list) or not isinstance(table.get('rows'), list):
+        return 'a table needs "columns" and "rows" lists'
+    if not all(isinstance(r, list) and len(r) == len(table['columns']) for r in table['rows']):
+        return f'every table row needs {len(table["columns"])} cells, one per column'
     return None
 
 
@@ -425,12 +451,13 @@ def figure(root, fig, eager, lead=False):
         # No link around a video: clicks on its controls would open the file.
         media = f'<div class="m"><video src="{src}" controls muted loop preload="metadata"></video></div>'
     else:
-        size = png_size(os.path.join(root, fig['file']))
+        path = os.path.join(root, fig['file'])
+        size = png_size(path)
         dims = f' width="{size[0]}" height="{size[1]}"' if size else ''
         lazy = '' if eager else ' loading="lazy"'
         title = html.escape(fig['title'], quote=True)
         # The viewer script opens .zoom links in the <dialog>; without script the link opens the file.
-        img = inline(os.path.join(root, fig['file'])) or src
+        img = (inline(path) if inside(path, root) else None) or src
         media = f'<a class="m zoom" href="{src}" data-title="{title}"><img src="{img}" alt="{title}"{dims}{lazy}></a>'
     note = f'<span>{text(fig["note"])}</span>' if fig.get('note') else ''
     extra = [f'<a href="{url(fig["full"])}">rendu complet</a>'] if fig.get('full') else []
@@ -513,9 +540,14 @@ def render(state, root, refresh, mtime):
                 + '</section>')
     toc += [('avancement', 'Étapes'), ('visuels', 'Visuels')]
     for i, section in enumerate(state.get('sections', []), 1):
-        items = ''.join(f'<li>{text(x)}</li>' for x in section['items'])
+        items = ''.join(f'<li>{text(x)}</li>' for x in section.get('items', []))
+        table = section.get('table')
+        if table:
+            head = ''.join(f'<th>{text(c)}</th>' for c in table['columns'])
+            rows = ''.join('<tr>' + ''.join(f'<td>{text(c)}</td>' for c in row) + '</tr>' for row in table['rows'])
+            table = f'<div class="tbl"><table><thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table></div>'
         main.append(f'<section id="section-{i}" class="card"><h2>{text(section["title"])}</h2>'
-                    f'<ul class="list">{items}</ul></section>')
+                    + (f'<ul class="list">{items}</ul>' if items else '') + (table or '') + '</section>')
         toc.append((f'section-{i}', text(section['title'])))
     log = list(reversed(state.get('log', [])))
     aside = ''
@@ -543,6 +575,10 @@ def write_atomic(path, content):
     os.replace(tmp, path)
 
 
+def all_done(steps):
+    return bool(steps) and all(s['status'] == 'fait' for s in steps)
+
+
 def rank(state):
     """0 waits for the user, 1 blocked, 2 active, 3 finished."""
     steps = state['steps']
@@ -553,9 +589,8 @@ def rank(state):
     # Closing the task (active/ → completed/) is what finishes a mission, whatever its steps say.
     if task_file(state, 'completed'):
         return 3
-    done = steps and all(s['status'] == 'fait' for s in steps)
     # A finished page whose task file is still active was resumed: in progress until new steps say otherwise.
-    return 3 if done and not task_active(state) else 2
+    return 3 if all_done(steps) and not task_active(state) else 2
 
 
 def task_file(state, folder):
@@ -572,9 +607,7 @@ def task_active(state):
 
 def to_close(state, mtime):
     """Every step done, task still active and nothing new for a day: the agent forgot to close it."""
-    steps = state['steps']
-    return (bool(steps) and all(s['status'] == 'fait' for s in steps) and task_active(state)
-            and time.time() - mtime > CLOSE_AFTER)
+    return all_done(state['steps']) and task_active(state) and time.time() - mtime > CLOSE_AFTER
 
 
 def hub_line(cls, name, content, extra=''):
@@ -582,14 +615,10 @@ def hub_line(cls, name, content, extra=''):
     return f'<p class="{cls}">{icon(name)}<span class="tx">{content}</span>{extra}</p>'
 
 
-def hub_card(state_path):
+def hub_card(state_path, state):
     root = pathlib.Path(state_path).parent
-    with open(state_path, encoding='utf-8') as f:
-        state = json.load(f)
-    error = validate(state)
-    if error:
-        raise ValueError(error)
     steps, level, mtime = state['steps'], rank(state), int(os.path.getmtime(state_path))
+    done = all_done(steps)
     numbered = list(enumerate(steps, 1))
     # A blocked step leads; the other steps under way are counted next to it.
     current = sorted((e for e in numbered if e[1]['status'] in ('bloqué', 'en cours')),
@@ -598,12 +627,12 @@ def hub_card(state_path):
         i, step = current[0]
         more = f'<span class="more">+{len(current) - 1} en parallèle</span>' if len(current) > 1 else ''
         lines = [hub_line('cur', STATUS[step['status']], f'Étape {i} · {text(step["step"])}', more)]
-    elif level == 3:
+    elif level == 3 or (done and not task_active(state)):
         lines = [hub_line('cur', 'ok', 'Toutes les étapes sont faites')]
     elif to_close(state, mtime):
         lines = [hub_line('cur', 'warn', f'À clôturer : tout est fait, la tâche <code>{text(state["task"])}</code> '
                           'est encore active (la déplacer dans completed/)')]
-    elif steps and all(s['status'] == 'fait' for s in steps):
+    elif done:
         lines = [hub_line('cur', 'run', f'Reprise (tâche <code>{text(state["task"])}</code>), pas encore de nouvelle étape')]
     elif steps:
         i, step = next(e for e in numbered if e[1]['status'] == 'à faire')
@@ -626,7 +655,7 @@ def hub_card(state_path):
              if images else f'<span class="thumb">{icon("img")}</span>')
     bar, count = progress(steps)
     agent = f'<span class="who">{text(state["agent"])}</span>' if state.get('agent') else ''
-    card = (f'<article class="task r{level}" data-t="{mtime}" data-k="{html.escape(state_path, quote=True)}" '
+    card = (f'<article class="task r{level}" data-t="{mtime}" '
             f'data-open="{int(level == 2)}">{thumb}<div class="body">'
             f'<h3><a href="{page}">{text(state["title"])}</a><span class="new">nouveau</span></h3>'
             + ''.join(lines) + f'</div><div class="meta">{bar}<span><b>{count}</b> étapes</span>'
@@ -829,9 +858,10 @@ def update_hub(add=None, forget=None):
         cards, kept, missions = [], [], {}
         for p in paths:
             try:
-                card = hub_card(p)
                 state = load(p)
+                card = hub_card(p, state)
             except Exception as error:  # noqa: BLE001 - one broken page must not hide the others
+                state = {}
                 if now - since.get(p, now) > MISSING_KEPT:
                     continue
                 card = missing_card(p, error)
@@ -884,7 +914,7 @@ def apply_updates(state, args, root):
         state['steps'].append({'step': label, 'status': 'à faire'})
         changes.append(f'étape {len(state["steps"])} « {label} » ajoutée')
     if args.task and args.task != state.get('task'):
-        if state.get('task') and state['steps'] and all(s['status'] == 'fait' for s in state['steps']):
+        if state.get('task') and all_done(state['steps']):
             # A follow-up task on a finished page would show nothing to do: it brings its own steps.
             raise ValueError(f'--task {args.task}: every step of this page is done; add the new objectives '
                              "with --add-step in the same command, or create a new page for the new task")
@@ -900,7 +930,7 @@ def apply_updates(state, args, root):
     for spec in args.step:
         index, _, rest = spec.partition('=')
         status, has_note, note = rest.partition('::')
-        if not index.isdigit() or not 1 <= int(index) <= len(state['steps']) or status not in STATUS:
+        if not index.isdecimal() or not 1 <= int(index) <= len(state['steps']) or status not in STATUS:
             raise ValueError(f'--step {spec!r}: expected N=STATUS[::note], N in 1..{len(state["steps"])}, '
                              f'STATUS among {", ".join(STATUS)}')
         step = state['steps'][int(index) - 1]
@@ -921,7 +951,7 @@ def apply_updates(state, args, root):
                                                 'date': stamp()})
         changes.append(f'visuel {file}')
     ask = args.ask
-    if ask is None and state.get('ask') and not state.get('ask_session') and (args.step or args.add_step or args.fig or args.log or args.warn is not None):
+    if ask is None and state.get('ask') and not state.get('ask_session') and (args.step or args.add_step or args.fig or args.section or args.log or args.warn is not None):
         # Without a hook-tracked session (Codex, plain shell): the agent stops after asking, so its
         # next progress update comes after the user's answer.
         ask = ''
@@ -939,6 +969,27 @@ def apply_updates(state, args, root):
             state['ask_session'] = session
         else:
             state.pop('ask_session', None)
+    for spec in args.section:
+        title, _, value = spec.partition('::')
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = None
+        content = {'items' if isinstance(value, list) else 'table': value}
+        if isinstance(value, list):
+            error = None
+        else:
+            error = table_error(value) if isinstance(value, dict) else 'expected a JSON list or table object'
+        if not title or error:
+            raise ValueError(f'--section {spec[:80]!r}: expected TITLE::JSON (list of texts or '
+                             f'{{"columns": [...], "rows": [[...]]}}): {error or "empty title"}')
+        sections = state.setdefault('sections', [])
+        same = [i for i, s in enumerate(sections) if isinstance(s, dict) and s.get('title') == title]
+        if same:
+            sections[same[0]] = {'title': title, **content}
+        else:
+            sections.append({'title': title, **content})
+        changes.append(f'section « {title} »')
     if args.log:
         state.setdefault('log', []).append({'date': stamp(), 'text': args.log})
         changes.append('journal')
@@ -1069,7 +1120,7 @@ def served_files():
                                   if inside(os.path.join(root, n), root)})
                 _SERVED[path] = cached
             files |= cached[1]
-        except (OSError, ValueError):
+        except (OSError, ValueError, AttributeError, TypeError):  # unreadable or malformed state: skip it
             continue
     return files
 
@@ -1204,6 +1255,7 @@ def serve(host, port, token, name=None):
         def log_message(self, format, *args):  # noqa: A002 - base signature
             pass
 
+    wildcard = host == '0.0.0.0'
     server = http.server.ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
     stop = threading.Event()
@@ -1212,12 +1264,12 @@ def serve(host, port, token, name=None):
 
     def publish():
         # mDNS alias NAME.local -> this machine; stderr goes to the journal.
-        address = lan_ip() if host in ('0.0.0.0', '') else host
+        address = lan_ip() if wildcard else host
         return address, subprocess.Popen(['avahi-publish', '-a', '-R', f'{name}.local', address],
                                          stdout=subprocess.DEVNULL)
 
     address, publisher = publish() if name else (None, None)
-    shown = f'{name}.local' if name else socket.gethostname() if host in ('0.0.0.0', '') else host
+    shown = f'{name}.local' if name else socket.gethostname() if wildcard else host
     port_part = '' if server.server_address[1] == 80 else f':{server.server_address[1]}'
     print(f'http://{shown}{port_part}{prefix}/', flush=True)
     code = 0
@@ -1231,7 +1283,7 @@ def serve(host, port, token, name=None):
                       file=sys.stderr, flush=True)
                 code = 1
                 break
-            if host in ('0.0.0.0', '') and lan_ip() != address:  # new DHCP address: republish
+            if wildcard and lan_ip() != address:  # new DHCP address: republish
                 publisher.terminate()
                 publisher.wait()
                 address, publisher = publish()
@@ -1247,6 +1299,7 @@ def serve(host, port, token, name=None):
             publisher.wait()
     sys.exit(code)
 
+
 def main():
     # `omega-progress [HOST:]PORT` (installed link) is `make_page.py --serve [HOST:]PORT`.
     served = os.path.basename(sys.argv[0]) == 'omega-progress'
@@ -1259,7 +1312,7 @@ def main():
         opts = cli.parse_args(sys.argv[1:] if served else sys.argv[2:])
         host, _, port = opts.address.rpartition(':')
         host = host or ('0.0.0.0' if opts.name else '127.0.0.1')
-        if not port.isdigit() or not 0 <= int(port) < 65536:  # 0: any free port (tests)
+        if not port.isdecimal() or not 0 <= int(port) < 65536:  # 0: any free port (tests)
             cli.error(f'invalid port {port!r}')
         if opts.name and is_loopback(host):
             cli.error('--name needs a network address (0.0.0.0 or a LAN IP), not loopback')
@@ -1281,6 +1334,8 @@ def main():
     parser.add_argument('--fig', action='append', default=[], metavar='FILE=TITLE[::note]')
     parser.add_argument('--add-step', action='append', default=[], metavar='TEXT', help='append a step (à faire)')
     parser.add_argument('--log', metavar='TEXT')
+    parser.add_argument('--section', action='append', default=[], metavar='TITLE::JSON',
+                        help='add or replace a section: a JSON list of texts or {"columns": [...], "rows": [[...]]}')
     parser.add_argument('--warn', metavar='TEXT', help="warning banner ('' clears it)")
     parser.add_argument('--show', action='store_true', help='print task, agent, numbered steps, question and warning')
     parser.add_argument('--task', metavar='TASK', help='link the page to ~/.agents/tasks/active/TASK.md')
@@ -1292,7 +1347,7 @@ def main():
     args = parser.parse_args()
     if args.refresh < MIN_REFRESH:
         parser.error(f'--refresh must be at least {MIN_REFRESH} seconds')
-    updates = (args.step or args.add_step or args.fig or args.log or args.task or args.agent
+    updates = (args.step or args.add_step or args.fig or args.log or args.section or args.task or args.agent
                or args.ask is not None or args.warn is not None)
     if args.find:
         found = [p for p in read_registry(hub_dir() / 'pages.json') if task_of(p) == args.find]
@@ -1302,6 +1357,8 @@ def main():
         return
     if not args.state and not args.all:
         parser.error('STATE is required unless --all')
+    if args.all and (args.forget or args.show):
+        parser.error('--all excludes --forget and --show')
     if (args.all or args.forget or args.show) and updates:
         parser.error('--all, --forget and --show take no update flag')
     if args.forget:

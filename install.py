@@ -120,18 +120,28 @@ def response_links():
     yield CLAUDE / 'output-styles/final-only.md', REPO / 'output-styles/final-only.md'
 
 
-def tracked(root):
-    for path in sorted(root.rglob('*')):
-        parts = path.relative_to(root).parts
-        if path.is_file() and not any(p.startswith('.') or p == '__pycache__' for p in parts):
-            yield path
+def write_atomic(dest, text):
+    """Replace dest (following a user-managed symlink) atomically, keeping its mode."""
+    target = dest.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f'.{target.name}.install-tmp')
+    with tmp.open('w', encoding='utf-8') as stream:
+        os.chmod(tmp, target.stat().st_mode & 0o777 if target.exists() else 0o600)
+        stream.write(text)
+    os.replace(tmp, target)
+
+
+def walk(root):
+    """Every file under root except bytecode caches, dotfiles included."""
+    return {p.relative_to(root) for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts}
 
 
 def deployable(root):
     """Sources to link: tests and golden fixtures stay in the repository."""
-    for path in tracked(root):
+    for path in sorted(root.rglob('*')):
         parts = path.relative_to(root).parts
-        if not (path.name.startswith('test_') or 'fixtures' in parts):
+        if path.is_file() and not any(p.startswith('.') or p == '__pycache__' for p in parts) \
+                and not (path.name.startswith('test_') or 'fixtures' in parts):
             yield path
 
 
@@ -163,8 +173,7 @@ def same(dest, source):
         return dest.is_file() and dest.read_bytes() == source.read_bytes()
     if not dest.is_dir():
         return False
-    ours = {p.relative_to(source) for p in tracked(source)}
-    theirs = {p.relative_to(dest) for p in tracked(dest)}
+    ours, theirs = walk(source), walk(dest)
     return ours == theirs and all((dest / p).read_bytes() == (source / p).read_bytes() for p in ours)
 
 
@@ -231,7 +240,12 @@ def install_binaries(apply, names=None):
     if names is not None:
         for name in names:
             command += ['--bin', name]
-    subprocess.run(command, cwd=REPO / 'rust', check=True)
+    try:
+        subprocess.run(command, cwd=REPO / 'rust', check=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        for dest in binaries.values():
+            yield dest, f'CONFLICT (cargo build failed: {error})'
+        return
     for name, dest in binaries.items():
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(f'.{dest.name}.install-tmp')
@@ -336,12 +350,7 @@ def write_codex_agents(apply):
         if removed:
             tomllib.loads(text)  # never write an unparsable config
             if apply:
-                target = config.resolve()
-                tmp = target.with_name(f'.{target.name}.install-tmp')
-                with tmp.open('w', encoding='utf-8') as stream:
-                    os.chmod(tmp, target.stat().st_mode & 0o777)
-                    stream.write(text)
-                os.replace(tmp, target)
+                write_atomic(config, text)
             yield config, ('removed' if apply else 'would remove') + f' legacy [agents.{",".join(removed)}]'
 
 
@@ -365,13 +374,7 @@ def write_response_settings(apply):
         updates.append((claude, json.dumps(settings, indent=2, ensure_ascii=False) + '\n'))
     for dest, text in updates:
         if apply:
-            target = dest.resolve()  # preserve any user-managed config symlink
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_name(f'.{target.name}.install-tmp')
-            with tmp.open('w', encoding='utf-8') as stream:
-                os.chmod(tmp, target.stat().st_mode & 0o777 if target.exists() else 0o600)
-                stream.write(text)
-            os.replace(tmp, target)
+            write_atomic(dest, text)
         yield dest, 'written' if apply else 'would write'
 
 
@@ -440,13 +443,7 @@ def write_codex_hooks(apply):
     if not changed:
         return
     if apply:
-        target = dest.resolve()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f'.{target.name}.install-tmp')
-        with tmp.open('w', encoding='utf-8') as stream:
-            os.chmod(tmp, target.stat().st_mode & 0o777 if target.exists() else 0o600)
-            stream.write(json.dumps(config, indent=2, ensure_ascii=False) + '\n')
-        os.replace(tmp, target)
+        write_atomic(dest, json.dumps(config, indent=2, ensure_ascii=False) + '\n')
     yield dest, 'written (trust the new hook in Codex)' if apply else 'would write'
 
 
@@ -481,13 +478,7 @@ def write_context_settings(apply):
     if not changed:
         return
     if apply:
-        target = dest.resolve()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f'.{target.name}.install-tmp')
-        with tmp.open('w', encoding='utf-8') as stream:
-            os.chmod(tmp, target.stat().st_mode & 0o777 if target.exists() else 0o600)
-            stream.write(json.dumps(settings, indent=2, ensure_ascii=False) + '\n')
-        os.replace(tmp, target)
+        write_atomic(dest, json.dumps(settings, indent=2, ensure_ascii=False) + '\n')
     yield dest, 'written' if apply else 'would write'
 
 
@@ -511,7 +502,7 @@ def main():
     mode.add_argument('--apply', action='store_true', help='write changes (default is a dry run)')
     mode.add_argument('--budget', action='store_true', help='print always-loaded context size in bytes')
     parser.add_argument('--responses-only', action='store_true', help='deploy only response instructions and settings')
-    parser.add_argument('--context-only', action='store_true', help='deploy only the Claude Read guard and its hook')
+    parser.add_argument('--context-only', action='store_true', help='deploy only the hook binaries, Claude hooks and omega/optimize/resume commands')
     parser.add_argument('--omega-theme', action='store_true', help='also install the Omega theme plugin for the Claude desktop app')
     args = parser.parse_args()
     if args.context_only:
@@ -537,15 +528,17 @@ def main():
     if not args.responses_only:
         results += list(remove_stale_links(args.apply))
         results += list(remove_retired_read(args.apply))
-        results += list(install_binaries(args.apply))
-        results += list(write_context_settings(args.apply))
-        results += list(write_codex_hooks(args.apply))
+        binaries = list(install_binaries(args.apply))
+        results += binaries
+        if not any(status.startswith('CONFLICT') for _, status in binaries):
+            results += list(write_context_settings(args.apply))
+            results += list(write_codex_hooks(args.apply))
         results += list(install_commands(args.apply))
         results += list(write_codex_agents(args.apply))
     for dest, status in results:
         if status != 'ok':
             print(f'{status:12s} {dest}')
-    problems = [s for _, s in results if s.startswith(('CONFLICT', 'STALE'))]
+    problems = [s for _, s in results if s.startswith('CONFLICT')]
     print(f'{len(results)} targets, {len(problems)} need attention' + ('' if args.apply else ' (dry run)'))
     return 1 if problems else 0
 

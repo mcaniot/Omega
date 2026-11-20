@@ -5,9 +5,8 @@
 use super::ingest;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -97,14 +96,9 @@ fn description_bytes(skill: &Path) -> usize {
 }
 
 fn skills(dir: &Path) -> Value {
-    let (mut count, mut bytes) = (0usize, 0usize);
-    let mut skill_files: Vec<PathBuf> = fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path().join("SKILL.md")).filter(|p| p.is_file()).collect();
-    skill_files.sort();
-    for file in &skill_files {
-        count += 1;
-        bytes += description_bytes(file);
-    }
-    json!({"count": count, "description_bytes": bytes})
+    let skill_files: Vec<PathBuf> = fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path().join("SKILL.md")).filter(|p| p.is_file()).collect();
+    let bytes: usize = skill_files.iter().map(|file| description_bytes(file)).sum();
+    json!({"count": skill_files.len(), "description_bytes": bytes})
 }
 
 #[derive(Default)]
@@ -118,8 +112,9 @@ struct Project {
 fn session(path: &Path) -> Result<Option<(String, u64, u64, u64)>, String> {
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let (mut cwd, mut order, mut contexts): (Option<String>, Vec<String>, BTreeMap<String, u64>) = (None, Vec::new(), BTreeMap::new());
-    for line in BufReader::new(file).lines() {
-        let Ok(row) = serde_json::from_str::<Value>(&line.map_err(|e| e.to_string())?) else { continue };
+    // Split on bytes: an unfinished multibyte tail from an active writer is not valid UTF-8.
+    for line in BufReader::new(file).split(b'\n') {
+        let Ok(row) = serde_json::from_slice::<Value>(&line.map_err(|e| e.to_string())?) else { continue };
         if cwd.is_none() {
             cwd = row["cwd"].as_str().map(str::to_string);
         }
@@ -140,15 +135,6 @@ fn session(path: &Path) -> Result<Option<(String, u64, u64, u64)>, String> {
     // Synthetic/aborted messages report zero usage; the first real request defines the prefix.
     let Some(first) = order.iter().map(|id| contexts[id]).find(|c| *c > 0) else { return Ok(None) };
     Ok(Some((cwd, first, order.len() as u64, contexts.values().sum())))
-}
-
-fn median(mut values: Vec<u64>) -> f64 {
-    values.sort_unstable();
-    match values.len() {
-        0 => 0.0,
-        n if n % 2 == 1 => values[n / 2] as f64,
-        n => (values[n / 2 - 1] + values[n / 2]) as f64 / 2.0,
-    }
 }
 
 fn instruction_chain(cwd: &Path, home: &Path, global: &Chain) -> Chain {
@@ -185,15 +171,11 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     }
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is required")?);
     let cutoff = SystemTime::now() - Duration::from_secs(WINDOW_DAYS * 86_400);
-    let mut paths = Vec::new();
-    if let Ok(root) = fs::read_dir(home.join(".claude/projects")) {
-        for directory in root.flatten() {
-            let name = directory.file_name().to_string_lossy().to_lowercase();
-            if !name.contains("bench") && directory.file_type().map_err(|e| e.to_string())?.is_dir() {
-                ingest::discover(&directory.path(), false, &mut paths)?;
-            }
-        }
-    }
+    let mut paths = ingest::claude_transcripts(&home)?;
+    paths.retain(|path| {
+        let project = path.parent().and_then(Path::file_name).unwrap_or_default();
+        !project.to_string_lossy().to_lowercase().contains("bench")
+    });
     paths.sort();
     let mut projects: BTreeMap<String, Project> = BTreeMap::new();
     for path in paths {
@@ -239,7 +221,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         }
         rows.push(json!({
             "cwd": cwd, "sessions": project.firsts.len(), "requests": project.requests,
-            "first_context_min": prefix, "first_context_median": median(project.firsts.clone()),
+            "first_context_min": prefix, "first_context_median": ingest::median(project.firsts.iter().map(|first| *first as f64).collect()),
             "context_total": project.context, "prefix_share": share,
             "instruction_files": files, "instruction_bytes": sum(&files),
             "project_instruction_bytes": project_bytes,
@@ -263,9 +245,8 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         },
     });
     if let Some(path) = report {
-        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).map_err(|e| e.to_string())?;
-        serde_json::to_writer_pretty(&mut file, &output).map_err(|e| e.to_string())?;
-        file.write_all(b"\n").and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
+        let mut file = ingest::create_new(&path)?;
+        ingest::write_json(&mut file, &output)?;
     }
     if json_output {
         println!("{output}");
@@ -273,9 +254,12 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     }
     println!("SESS  REQS    MIN_PREFIX  SHARE   INSTR_B  SKILL_B  REDUC_TOK/REQ  PROJECT");
     for row in output["projects"].as_array().into_iter().flatten() {
-        println!("{:<4}  {:<6}  {:<10}  {:<5.1}%  {:<7}  {:<7}  {:<13}  {}", row["sessions"], row["requests"], row["first_context_min"],
-            row["prefix_share"].as_f64().unwrap_or(0.0) * 100.0, row["instruction_bytes"], row["skills"]["description_bytes"],
-            row["reducible_tokens_per_request"], row["cwd"].as_str().unwrap_or("?"));
+        // serde_json::Value ignores width specifiers; format plain numbers.
+        let n = |v: &Value| v.as_u64().unwrap_or(0);
+        let share = format!("{:.1}%", row["prefix_share"].as_f64().unwrap_or(0.0) * 100.0);
+        println!("{:<4}  {:<6}  {:<10}  {share:<6}  {:<7}  {:<7}  {:<13}  {}", n(&row["sessions"]), n(&row["requests"]), n(&row["first_context_min"]),
+            n(&row["instruction_bytes"]), n(&row["skills"]["description_bytes"]),
+            n(&row["reducible_tokens_per_request"]), row["cwd"].as_str().unwrap_or("?"));
     }
     for f in &findings {
         println!("FINDING {} {} {}", f["kind"].as_str().unwrap_or("?"), f["project"].as_str().unwrap_or("?"), f["path"].as_str().unwrap_or(&f["bytes"].to_string()));

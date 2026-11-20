@@ -22,7 +22,7 @@ const LINE_LIMIT: usize = 2048;
 struct Fragment {
     offset: u64,
     end: u64,
-    text: String,
+    text: Vec<u8>,
 }
 
 fn encode(directory: &[u8], stream: &str, offset: i64, next: u64, fragments: &[Fragment], eof: bool, note: &str) -> Vec<u8> {
@@ -34,7 +34,7 @@ fn encode(directory: &[u8], stream: &str, offset: i64, next: u64, fragments: &[F
             b.push(b',');
         }
         b.extend_from_slice(format!("{{\"offset\":{},\"text\":", f.offset).as_bytes());
-        py::json_str(&mut b, f.text.as_bytes(), Style::Py);
+        py::json_str(&mut b, &f.text, Style::Py);
         b.push(b'}');
     }
     b.extend_from_slice(format!("],\"eof\":{}", eof).as_bytes());
@@ -63,22 +63,29 @@ fn read_stream(directory: &[u8], stream: &str, offset: i64, lines: i64, max_byte
     let mut count = 0i64;
     while count < lines && used < max_bytes {
         let at = pos;
-        read_line(&mut source, &mut raw, LINE_LIMIT.min((max_bytes - used) as usize)).map_err(open_error)?;
+        // A needle scan reads whole lines: budget-sized chunks would split a match.
+        let limit = if needle.is_some() { LINE_LIMIT } else { LINE_LIMIT.min((max_bytes - used) as usize) };
+        read_line(&mut source, &mut raw, limit).map_err(open_error)?;
         if raw.is_empty() {
             break;
         }
         pos += raw.len() as u64;
-        if needle.is_none_or(|n| n.is_match(&raw)) {
+        let line = raw.strip_suffix(b"\n").unwrap_or(&raw);
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if needle.is_none_or(|n| n.is_match(line)) {
+            if count > 0 && used + raw.len() as i64 > max_bytes {
+                pos = at;
+                break;
+            }
             // Contiguous lines share one fragment: per-line framing cost a third more tokens than the text.
-            let text = String::from_utf8_lossy(&raw);
             let joined = fragments.last().is_some_and(|last| last.end == at);
             match fragments.last_mut() {
-                Some(last) if joined => last.text.push_str(&text),
-                _ => fragments.push(Fragment { offset: at, end: at, text: text.into_owned() }),
+                Some(last) if joined => last.text.extend_from_slice(&raw),
+                _ => fragments.push(Fragment { offset: at, end: at, text: raw.clone() }),
             }
             if encode(directory, stream, offset, next, &fragments, false, note).len() > cap {
                 let last = fragments.last_mut().expect("just extended");
-                last.text.truncate(last.text.len() - String::from_utf8_lossy(&raw).len());
+                last.text.truncate(last.text.len() - raw.len());
                 if !joined {
                     fragments.pop();
                 }
@@ -156,10 +163,10 @@ pub fn inspect(p: &Parsed) -> Result<Vec<u8>, String> {
     let lines = clamp("--lines", p.int("lines"), DEFAULT_LINES, MAX_LINES);
     let max_bytes = clamp("--max-bytes", p.int("max_bytes"), DEFAULT_MAX_BYTES, MAX_BYTES);
     let needle = p.string("search");
-    if let Some(n) = &needle {
-        if !(1..=512).contains(&n.len()) {
-            return Err("--search must contain 1..512 UTF-8 bytes".into());
-        }
+    if let Some(n) = &needle
+        && !(1..=512).contains(&n.len())
+    {
+        return Err("--search must contain 1..512 UTF-8 bytes".into());
     }
     let (directory, implied) = locate(&p.string("evidence").unwrap_or_default());
     let requested = String::from_utf8_lossy(&p.string("stream").unwrap_or_else(|| b"auto".to_vec())).into_owned();

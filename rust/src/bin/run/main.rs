@@ -118,18 +118,14 @@ fn native_config(args: &[Arg]) -> Option<Config> {
         if arg.first() != Some(&b'-') || arg == b"-" {
             break;
         }
-        if arg == b"--shell-keep-going" {
-            shell_keep_going = true;
-            pos += 1;
-            continue;
-        }
-        if arg == b"--fail-fast" {
-            fail_fast = true;
-            pos += 1;
-            continue;
-        }
-        if arg == b"--validation" {
-            validation = true;
+        let flag = match arg {
+            b"--shell-keep-going" => Some(&mut shell_keep_going),
+            b"--fail-fast" => Some(&mut fail_fast),
+            b"--validation" => Some(&mut validation),
+            _ => None,
+        };
+        if let Some(flag) = flag {
+            *flag = true;
             pos += 1;
             continue;
         }
@@ -217,12 +213,12 @@ fn python_run(p: &argparse::Parsed) -> Config {
         fail("A command is required after --");
     }
     let timeout = p.float("timeout");
-    if timeout.is_some_and(|t| t <= 0.0) {
+    if timeout.is_some_and(|t| !(t > 0.0 && t.is_finite())) {
         fail("--timeout must be positive");
     }
     let grace = p.float("kill_after").unwrap_or(10.0);
     let max_log_bytes = p.int("max_log_bytes").unwrap_or(2 << 30);
-    if grace <= 0.0 || max_log_bytes <= 0 {
+    if !(grace > 0.0 && grace.is_finite()) || max_log_bytes <= 0 {
         fail("--kill-after and --max-log-bytes must be positive");
     }
     let Some(home) = home() else { fail("Cannot determine home directory") };
@@ -252,7 +248,7 @@ fn dispatch(args: &[Arg]) -> i32 {
         }
     }
     PYTHON_ERRORS.store(true, Ordering::Relaxed);
-    let (label, _, parsed) = match argparse::parse_command(args) {
+    let (label, parsed) = match argparse::parse_command(args) {
         Ok(v) => v,
         Err(exit) => {
             write_stdout(&exit.out);

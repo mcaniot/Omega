@@ -23,7 +23,7 @@ every push, pull request or manual dispatch.
 
 Tests drive the binaries and replay golden fixtures recorded from the original implementations.
 Some default to the **deployed** binary, so to test a change before installing it, point the
-overrides at `rust/target/release/<name>`:
+overrides at the absolute path of `rust/target/release/<name>` (tests change directory, so a relative path fails):
 
 | Test | Default binary (override) |
 | --- | --- |

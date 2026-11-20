@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Local, synthetic before/after replay. No model calls, installs or network access.
+"""Local, synthetic before/after replay. No model calls or installs.
 
 Optional token measurement uses an already installed tokenizers and a local JSON
-tokenizer. These are tokenizer counts, not provider billing/context telemetry.
+tokenizer (the pinned default is downloaded once, then cached). These are tokenizer counts, not provider billing/context telemetry.
 """
 import argparse
 import hashlib
@@ -36,7 +36,7 @@ def replay(run, optimize, home, count_tokens):
         try:
             return json.loads(done.stdout)
         except ValueError:  # Ω-run prints a clean PASS that fits inline as plain output
-            return {'status': 'PASS', 'stdout': done.stdout}
+            return {'status': 'PASS', 'exit_code': done.returncode, 'stdout': done.stdout}
 
     def metrics(begin):
         sample = calls[begin:]
@@ -79,7 +79,8 @@ def replay(run, optimize, home, count_tokens):
     transcript.write_text('historical irrelevant record\n' * 4000 + task.read_text())
     begin = len(calls)
     # Explicit policy replay, not a claim about autonomous agent behavior.
-    if optimize.name == 'before-optimize':
+    baseline = optimize.name == 'before-optimize'
+    if baseline:
         old = command([run, 'run', '--', 'cat', transcript], read=True)
         command([run, 'inspect', old['evidence'], '--stream', 'stdout',
                  '--search', 'Current:', '--lines', '1'], read=True)
@@ -91,10 +92,9 @@ def replay(run, optimize, home, count_tokens):
     resume = metrics(begin)
 
     begin = len(calls)
-    strict = optimize.name != 'before-optimize'
     # Strict shell is opt-in (`--fail-fast`) since validation runs were split from keep-going scripts.
-    result = command([run, 'run', *(['--fail-fast'] if strict else []), '--shell', 'printf stage1; false; printf masked'],
-                     expected=1 if strict else 0)
+    result = command([run, 'run', *([] if baseline else ['--fail-fast']), '--shell', 'printf stage1; false; printf masked'],
+                     expected=0 if baseline else 1)
     validation = metrics(begin)
     validation['masked_failure'] = result['exit_code'] == 0
 
@@ -231,7 +231,7 @@ def native_vs_omega(run, guard, home, count_tokens):
     second, allowed = omega_read(source, 101, 200)
     if not allowed:  # a partial overlap is never refused: the model asked for new lines too
         raise RuntimeError('overlapping Read was refused')
-    out['reread_overlap'] =result([numbered(source, 1, 200), numbered(source, 101, 200)], [first, second])
+    out['reread_overlap'] = result([numbered(source, 1, 200), numbered(source, 101, 200)], [first, second])
 
     new_session()
     first, _ = omega_read(small)
@@ -246,8 +246,7 @@ def native_vs_omega(run, guard, home, count_tokens):
     lines = [f'[{i:04}/4000] Compiling crate_{i} v0.{i % 10}.0 (/work/crates/crate_{i})' for i in range(4000)]
     lines[2100] = 'error[E0308]: mismatched types in crates/crate_2100/src/lib.rs:42:17'
     log.write_text('\n'.join(lines) + '\n')
-    native_out = log.read_text()
-    native_out = native_out[:NATIVE_BASH_CHARS]
+    native_out = log.read_text()[:NATIVE_BASH_CHARS]
     ran = subprocess.run([str(run), 'run', '--', 'cat', str(log)], env=env, capture_output=True, text=True, check=True)
     found = subprocess.run([str(run), 'inspect', json.loads(ran.stdout)['evidence'], '--stream', 'stdout',
                             '--search', 'error[E0308]', '--lines', '1'], env=env, capture_output=True, text=True,
@@ -286,7 +285,7 @@ def guard_table(rows):
         if 'native_error_visible' in row and not row['native_error_visible']:
             note = ' (plain: failure not shown)'
         lines.append(f'| {label}{note} | {native:,}{unit} | {omega:,}{unit} | {(omega - native) / native:+.0%} |')
-    lines.append(f'| **Total** | **{total_native:,}** | **{total_omega:,}** | '
+    lines.append(f'| **Total** | **{total_native:,}{unit}** | **{total_omega:,}{unit}** | '
                  f'**{(total_omega - total_native) / total_native:+.0%}** |')
     return '\n'.join(lines)
 
@@ -312,8 +311,8 @@ def table(medians):
             '| --- | ---: | ---: | ---: |']
     for key, label in WORKLOADS.items():
         b, a = medians['before'][key], medians['after'][key]
-        cell = lambda name, fmt='{:g}': (f'{fmt.format(b[name])} → {fmt.format(a[name])}'
-                                         if b.get(name) is not None else 'n/a')
+        def cell(name, fmt='{:g}'):
+            return f'{fmt.format(b[name])} → {fmt.format(a[name])}' if b.get(name) is not None else 'n/a'
         rows.append(f'| {label} | {cell("returned_tokens")} | {cell("reads")} | {cell("latency_ms", "{:.2f}")} |')
     if medians['before']['preview'].get('returned_tokens') is not None:
         before = sum(medians['before'][k]['returned_tokens'] for k in WORKLOADS)
@@ -341,7 +340,9 @@ def main():
     if args.output is None:
         stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
         args.output = Path.home() / f'.agents/tasks/reports/omega-benchmark/{stamp}.json'
-        args.output.parent.mkdir(parents=True, exist_ok=True)
+    if args.output.exists():
+        parser.error(f'--output {args.output} already exists')
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     tokenizer = None
     if not args.no_tokens:
         try:
@@ -355,12 +356,12 @@ def main():
         return len(tokenizer.encode(text, add_special_tokens=False).ids) if tokenizer else None
 
     report: dict = {'method': 'synthetic local replay; medians, no model calls or automatic read suppression',
-              'benchmark_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-              'platform': platform.platform(), 'python': sys.version,
-              'tokenizer_sha256': (hashlib.sha256(args.tokenizer_json.read_bytes()).hexdigest()
-                                   if tokenizer else None),
-              'token_scope': 'local tokenizer counts of returned JSON and commands, not provider telemetry',
-              'repeats': args.repeats, 'refs': {}, 'binaries': {}, 'samples': {}}
+                    'benchmark_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                    'platform': platform.platform(), 'python': sys.version,
+                    'tokenizer_sha256': (hashlib.sha256(args.tokenizer_json.read_bytes()).hexdigest()
+                                         if tokenizer else None),
+                    'token_scope': 'local tokenizer counts of returned JSON and commands, not provider telemetry',
+                    'repeats': args.repeats, 'refs': {}, 'binaries': {}, 'samples': {}}
     with tempfile.TemporaryDirectory(prefix='omega-context-bench-') as temp:
         root = Path(temp)
         for label in ('before', 'after'):

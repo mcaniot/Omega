@@ -39,8 +39,8 @@
 [Raw samples and binary/tokenizer fingerprints](context-reliability-benchmark.json).
 Baseline source: `4c612c4a794058619df6d2dec38a75573a73091e`, independently built
 offline with the same release toolchain as the modified source. Deterministic
-synthetic data, seven replays per version, local CPU, medians below. No model calls,
-network access or installation are performed by the benchmark.
+synthetic data, seven replays per version, local CPU, medians below. No model calls or
+installation; network only for the one-time tokenizer download.
 
 | Workload | Returned tokens before → after | Reads before → after | Local latency ms before → after |
 | --- | ---: | ---: | ---: |
@@ -70,17 +70,7 @@ into a throwaway `uv` environment):
 uv run --no-project --with tokenizers python3 tools/benchmark_context.py
 ```
 
-- It builds `run` and `optimize` from the baseline commit (`--before-ref`, default the commit
-  above) and from `HEAD` (`--after-ref`) in throwaway trees, with `git archive` and
-  `cargo build --locked`; the checkout and Git state are untouched. `--before-run`,
-  `--after-run`, `--before-optimize`, `--after-optimize` use prebuilt binaries instead.
-- Tokens are counted with the GPT-2 tokenizer pinned by sha256, downloaded once into
-  `~/.cache/omega/gpt2-tokenizer.json` (or `--tokenizer-json FILE`; `--no-tokens` skips counts).
-- It prints the table above and writes the full report to
-  `~/.agents/tasks/reports/omega-benchmark/<UTC>.json` (or `--output NEW.json`). Reports use
-  exclusive creation and never overwrite existing evidence; they record the refs, script hash,
-  binaries, platform, Python version and tokenizer hash.
-- `--repeats N` (default 7) sets the number of replays per version.
+Options, outputs and report contents: [Benchmark](benchmark.md#options).
 
 ## Validation
 

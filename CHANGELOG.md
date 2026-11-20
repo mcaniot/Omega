@@ -21,8 +21,27 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
   Async hooks (`make_page.py --activity` on SessionStart, Stop, StopFailure, Notification and
   SessionEnd; `--answered` also records UserPromptSubmit) append to `~/.agents/activity/*.jsonl`
   (no prompt text, 7 days kept); liveness comes from Claude Code's session registry.
+- `progress-page`: result tables. A section takes `table: {columns, rows}` beside or instead of
+  `items`; `--section 'TITLE::JSON'` adds or replaces one by title. The skill puts the requested
+  result (table, verdict, artifact paths) on the page before the final answer.
+- `shell_guard` asks before `git stash` (except `list` and `show`).
 
 ### Fixed
+
+- Whole-repository review (4 rounds). `shell_guard`: the command after wrapper options, every
+  `--shell`/`--shell=` value, the text after `--` and `--native-only` are all checked; a `git` mask
+  no longer hides a following `rm` (`git --no-pager log; rm f`); filters piped after `Ω-inspect`
+  may not name a file, read `-f FILE` or recurse, and `--pre`/`--hostname-bin` are refused; nested
+  or abbreviated `prune --apply` asks; an invalid policy regex aborts instead of passing; the
+  evidence-read rewrite keeps every operand and expands `~`. `run`: `inspect --search` chunking,
+  multibyte text and `$` anchors; `prune` keeps live runs; invalid UTF-8 keeps `result.json` valid;
+  `nan`/`inf` timeouts refused; `|&`, a trailing separator and a newline after `|`/`&&` parse as
+  bash does; exit 141 is no longer a PASS when an earlier pipeline (`head`, `grep -q`, `grep -m`)
+  may have stopped the script. `optimize`: no report left behind on failure, buffered JSON
+  writes, aligned tables, UTF-8 prefixes, `NotebookEdit`. `install.py`: dotfile differences and
+  build errors are conflicts, hooks are not written over a conflict, atomic writes.
+  `make_page.py`, `context_guard`, `context_budget`, `session_name` and `benchmark_context.py`:
+  edge cases that crashed or misreported.
 
 - `progress-page`: a question no longer stays "À toi" after the user answers. `--ask` records the
   Claude Code session, and a `UserPromptSubmit` hook (`make_page.py --answered`, registered by

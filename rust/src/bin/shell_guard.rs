@@ -3,8 +3,8 @@
 //! With `--allow-clean` (Claude only), a wrapper call that passes every check and matches no
 //! deny/ask policy returns `allow` instead of deferring to native permission prompts.
 //!
-//! Only the native `run` executor (run/inspect/prune) passes; every other
-//! shell command is denied. Stdout is the compact JSON of Python's
+//! Only the native executor (`run`, `inspect`, `prune` or the `omega` CLI) passes; every other
+//! shell command is denied or auto-wrapped in `Ω-run --shell`. Stdout is the compact JSON of Python's
 //! `json.dumps(result, separators=(',', ':'))`. The JSON reader, `shlex` and `str.strip`
 //! follow CPython 3.12 so that fail-closed reasons stay stable
 //! (see `tools/test_shell_guard.py` and its recorded fixture).
@@ -33,7 +33,7 @@ const MAX_INT_DIGITS: usize = 4300;
 
 // ---------------------------------------------------------------- policy
 
-const GIT: &str = r"\bgit(?:\s+-[Cc]\s+\S+|\s+--[\w-]+(?:=\S+)?)*\s+";
+const GIT: &str = r"\bgit(?:\s+-[Cc]\s+\S+|\s+-[pP]|\s+--[\w-]+(?:=\S+|\s+[^\s-]\S*)?)*\s+";
 const ARGS: &str = r"(?:[^\s;&|]+\s+)*";
 
 fn deny_patterns() -> Vec<String> {
@@ -60,9 +60,9 @@ const DENY_HINTS: [&str; 5] = [
 
 fn ask_patterns() -> Vec<String> {
     vec![
-        r#"(?:^|[\s'"/])(?:\.ssh|\.aws|\.gnupg)(?:/|[\s'"$])|(?:^|[\s'"/])\.env(?:[.\s'"/]|$)|(?:^|[\s'"/])(?:id_rsa|id_ed25519|credentials)(?:[.\s'"/]|$)"#.to_string(),
+        r#"(?:^|[\s'"/])(?:\.ssh|\.aws|\.gnupg)(?:/|[\s'"$]|$)|(?:^|[\s'"/])\.env(?:[.\s'"/]|$)|(?:^|[\s'"/])(?:id_rsa|id_ed25519|credentials)(?:[.\s'"/]|$)"#.to_string(),
         format!(r"{GIT}(?:push|commit|rebase|filter-branch)\b"),
-        format!(r"{GIT}(?:reset\s+--hard|clean\s+-\w*f|branch\s+-D|checkout\s+--\s|restore\b)"),
+        format!(r#"{GIT}(?:reset\s+--hard|clean\s+-\w*f|branch\s+-D|checkout\s+--\s|restore\b|stash(?:\s+(?:-|push|save|pop|apply|drop|clear)|\s*(?:$|[;&|'"])))"#),
         format!(r"\brm\s+{ARGS}(?:-[a-zA-Z]*[rR]|--recursive)\b"),
         r"\b(?:ssh|scp|sftp|rsync)\b".to_string(),
         format!(
@@ -70,10 +70,13 @@ fn ask_patterns() -> Vec<String> {
         ),
         r"\bros2\s+(?:topic\s+pub|service\s+call|action\s+send_goal|param\s+set|lifecycle\s+set|launch|run|bag\s+play)\b|\bz_(?:put|pub|delete|queryable)\b".to_string(),
         r#"(?:^|[\s;&|(`])(?:env|printenv|set)\s*(?:$|[;&|)`])|\bprintenv\b|\bexport\s+-p\b|(?:^|[\s/'"=])(?:\.env(?:\.\w+)?|auth\.json|[\w.-]*\.key|id_(?:rsa|ed25519))\b"#.to_string(),
+        // Nested `Ω-prune --apply` / `NATIVE prune --apply` (any `--a…` prefix); also matches a
+        // hypothetical `git prune --apply`, which does not exist.
+        format!(r#"\bprune['"]?\s+{ARGS}--a(?:p(?:p(?:ly?)?)?)?(?:[\s='"]|$)"#),
     ]
 }
 
-const ASK_LABELS: [&str; 8] = [
+const ASK_LABELS: [&str; 9] = [
     "sensitive credential access",
     "git history or remote change",
     "git destructive change",
@@ -82,6 +85,7 @@ const ASK_LABELS: [&str; 8] = [
     "network upload",
     "possible robot actuation",
     "possible secret exposure",
+    "evidence deletion",
 ];
 
 /// Python 3.12's non-ASCII `\w` (`str.isalnum()`): letters and numbers assigned as of Unicode 15.0
@@ -120,16 +124,19 @@ fn normalize(text: &str) -> Vec<u8> {
 
 fn first_match(patterns: &[String], text: &[u8]) -> Option<usize> {
     let patterns: Vec<String> = patterns.iter().map(|p| format!("(?m-u){p}")).collect();
-    let set = RegexSet::new(&patterns).ok()?;
+    let set = RegexSet::new(&patterns).unwrap_or_else(|_| std::process::abort());
     set.matches(text).iter().next()
 }
 
-/// `(kind, reason)` of a policy hit, or `None` for pass.
+/// The deny or ask `Decision` of a policy hit, or `None` for pass.
 fn policy(text: &str) -> Option<Decision> {
     let text = normalize(text);
     // `git rm` is versioned (recoverable); keep it out of the rm deny rule only.
     let git_rm = ByteRegex::new(&format!(r"(?-u){GIT}rm\b")).unwrap_or_else(|_| std::process::abort());
-    let masked = git_rm.replace_all(&text, &b"git x"[..]);
+    // A newline or separator ends the git command: what follows is not its subcommand.
+    let masked = git_rm.replace_all(&text, |m: &regex::bytes::Captures| {
+        if m[0].iter().any(|b| b"\n;&|".contains(b)) { m[0].to_vec() } else { b"git x".to_vec() }
+    });
     if let Some(index) = first_match(&deny_patterns(), &masked) {
         return Some(Decision::new(
             "deny",
@@ -229,7 +236,6 @@ fn shlex_split(text: &str) -> Option<Vec<String>> {
     }
 }
 
-/// `shlex.quote`: safe set is `[A-Za-z0-9_@%+=:,./-]`.
 /// The command without its heredoc bodies and their delimiter lines; `None` without a heredoc or
 /// when a body is not terminated. `<<EOF`, `<<-EOF` (leading tabs), `<<'EOF'`, `<<"EOF"`, `<<\EOF`.
 fn strip_heredoc_bodies(command: &str) -> Option<String> {
@@ -253,6 +259,7 @@ fn strip_heredoc_bodies(command: &str) -> Option<String> {
     (found && pending.is_empty()).then_some(out)
 }
 
+/// `shlex.quote`: safe set is `[A-Za-z0-9_@%+=:,./-]`.
 fn shlex_quote(arg: &str) -> String {
     if arg.is_empty() {
         return "''".to_string();
@@ -800,11 +807,7 @@ impl Guard {
             if payload["tool_name"] != "Bash" || !payload["tool_input"]["command"].is_string() {
                 return None;
             }
-            let probe = Json::Object(vec![
-                ("tool_name".to_string(), Json::Str("Bash".to_string())),
-                ("tool_input".to_string(), Json::Object(vec![("command".to_string(), Json::Str(wrapped.clone()))])),
-            ]);
-            if !self.evaluate(&probe).is_some_and(|d| d.kind == "allow") {
+            if !self.check(&wrapped).is_some_and(|d| d.kind == "allow") {
                 return None;
             }
             payload["tool_input"]["command"] = serde_json::Value::String(wrapped);
@@ -825,20 +828,32 @@ impl Guard {
     /// wrapped in `Ω-run --shell` unless the policy would still deny or ask for it.
     fn rewrite(command: &str, argv: &[String]) -> Option<String> {
         const EVIDENCE: &str = ".agents/tasks/evidence/";
-        if matches!(argv.first().map(String::as_str), Some("cat" | "head" | "tail")) {
-            if let Some(path) = argv.iter().skip(1).find(|a| a.contains(EVIDENCE)) {
-                let path = path.trim_end_matches('/');
-                // A glob file name (`stdout*`) names a file of the directory, never the directory.
-                let glob = |name: &str| name.contains(['*', '?', '[']);
-                let (dir, stream) = match path.rsplit_once('/') {
-                    Some((dir, "stdout.log" | "stdout")) => (dir, "stdout"),
-                    Some((dir, "stderr.log" | "stderr")) => (dir, "stderr"),
-                    Some((dir, "result.json")) => (dir, "auto"),
-                    Some((dir, name)) if glob(name) && name.starts_with("stdout") => (dir, "stdout"),
-                    Some((dir, name)) if glob(name) && name.starts_with("stderr") => (dir, "stderr"),
-                    Some((dir, name)) if glob(name) => (dir, "auto"),
-                    _ => (path, "auto"),
-                };
+        // Chaining, redirection or a consumer other than head/tail/sed would be dropped by the
+        // rewrite: leave it to the generic wrap.
+        let plain = !command.contains('\n')
+            && argv.iter().all(|a| matches!(a.as_str(), "|" | "2>&1" | "2>/dev/null") || !a.contains([';', '&', '>', '|']))
+            && argv.split(|a| a == "|").skip(1).all(|s| matches!(s.first().map(String::as_str), Some("head" | "tail" | "sed")));
+        // Exactly one path operand, so no other file is dropped; `~/` and `$HOME/` are expanded
+        // because the rewrite quotes the path.
+        let mut paths = argv.iter().skip(1).filter(|a| a.contains('/') && !a.starts_with("2>"));
+        let path = paths.next().filter(|a| a.contains(EVIDENCE) && paths.next().is_none());
+        let reader = plain && matches!(argv.first().map(String::as_str), Some("cat" | "head" | "tail"));
+        if let Some(path) = path.filter(|_| reader) {
+            let path = path.strip_prefix("~/").or_else(|| path.strip_prefix("$HOME/")).map_or(path.clone(), |rest| expanduser(&format!("/{rest}")));
+            let path = path.trim_end_matches('/');
+            // A glob file name (`stdout*`) names a file of the directory, never the directory.
+            let glob = |name: &str| name.contains(['*', '?', '[']);
+            let (dir, stream) = match path.rsplit_once('/') {
+                Some((dir, "stdout.log" | "stdout")) => (dir, "stdout"),
+                Some((dir, "stderr.log" | "stderr")) => (dir, "stderr"),
+                Some((dir, "result.json")) => (dir, "auto"),
+                Some((dir, name)) if glob(name) && name.starts_with("stdout") => (dir, "stdout"),
+                Some((dir, name)) if glob(name) && name.starts_with("stderr") => (dir, "stderr"),
+                Some((dir, name)) if glob(name) => (dir, "auto"),
+                _ => (path, "auto"),
+            };
+            // A directory that only the shell can resolve stays with the generic wrap.
+            if !dir.contains(['~', '$', '*', '?', '[']) {
                 let args = ["\u{3a9}-inspect", "--stream", stream, "--lines", "40", "--max-bytes", "7000", dir];
                 return Some(shlex_join(&args.map(String::from)));
             }
@@ -1037,7 +1052,7 @@ impl Guard {
                 // `'Ω-run' --shell-keep-going 2>/dev/null; CALL`: options and no command, a call that
                 // only fails (recorded 8 times as if it set a mode for the next call).
                 let bare = segment.split(['>', '|']).next().unwrap_or_default().trim_end().trim_end_matches(['1', '2']);
-                inert_split(bare).is_some_and(|a| a[1..].iter().all(|o| o.starts_with("--") && o != "--shell" && o != "--"))
+                inert_split(bare).is_some_and(|a| a[1..].iter().all(|o| o.starts_with("--") && o != "--shell" && !o.starts_with("--shell=") && o != "--"))
             } {
                 changed = true;
                 continue;
@@ -1099,7 +1114,7 @@ impl Guard {
                 out.push(' ');
             }
         }
-        changed.then(|| out.trim_end_matches(py_isspace).to_string())
+        (changed && !out.is_empty()).then(|| out.trim_end_matches(py_isspace).to_string())
     }
 
     /// `cd DIR && 'Ω-run' ARGS` written with inert quoting becomes `'Ω-run' --cwd DIR ARGS`:
@@ -1116,8 +1131,8 @@ impl Guard {
         Some(shlex_join(&rest))
     }
 
-    /// `CALL; CALL && CALL` where every call is a wrapper call: the calls, split at the unquoted
-    /// `;` and `&&`. Each is then checked as if written alone.
+    /// `CALL; CALL && CALL || CALL` where every call is a wrapper call: the calls, split at the unquoted
+    /// `;`, `&&` and `||`. Each is then checked as if written alone.
     fn wrapper_chain(command: &str) -> Option<Vec<String>> {
         let (mut quote, mut calls, mut start) = (None::<char>, Vec::new(), 0);
         let mut chars = command.char_indices().peekable();
@@ -1129,7 +1144,7 @@ impl Guard {
                     calls.push(&command[start..at]);
                     start = at + 1;
                 }
-                (None, '&') if chars.peek().map(|&(_, c)| c) == Some('&') => {
+                (None, '&' | '|') if chars.peek().map(|&(_, next)| next) == Some(c) => {
                     chars.next();
                     calls.push(&command[start..at]);
                     start = at + 2;
@@ -1152,19 +1167,69 @@ impl Guard {
         if argv[1] != "run" {
             return String::new();
         }
-        if let Some(index) = argv.iter().position(|a| a == "--shell") {
-            if let Some(script) = argv.get(index + 1) {
-                return script.clone();
+        // Every text the executor may run (it stops option parsing at `--` or the first word and
+        // accepts `--shell=V`): deny beats ask across the `\n`-joined texts.
+        let mut texts: Vec<String> = Vec::new();
+        for (index, arg) in argv.iter().enumerate().skip(2) {
+            if arg == "--shell" {
+                texts.extend(argv.get(index + 1).cloned());
+            } else if let Some(script) = arg.strip_prefix("--shell=") {
+                texts.push(script.to_string());
             }
         }
-        match argv.iter().position(|a| a == "--") {
-            Some(index) => shlex_join(&argv[index + 1..]),
-            None => shlex_join(&argv[2..]),
+        texts.push(shlex_join(&argv[2..]));
+        // Command start as the executor finds it: the first word that is neither an option nor its value.
+        let mut start = if argv.get(2).is_some_and(|a| a == "--native-only") { 3 } else { 2 };
+        while let Some(arg) = argv.get(start).filter(|a| a.len() > 1 && a.starts_with('-') && *a != "--") {
+            let flag = arg.contains('=')
+                || (arg != "--shell" && ["--validation", "--fail-fast", "--shell-keep-going"].iter().any(|f| f.starts_with(arg.as_str())));
+            start += if flag { 1 } else { 2 };
         }
+        if argv.get(start).is_some_and(|a| a == "--") {
+            start += 1;
+        }
+        texts.push(shlex_join(argv.get(start..).unwrap_or_default()));
+        if let Some(index) = argv.iter().position(|a| a == "--") {
+            texts.push(shlex_join(&argv[index + 1..]));
+        }
+        texts.join("\n")
     }
 
-    /// `Ω-inspect ARGS [2>&1] | head|tail|grep|rg|wc ARGS` written in canonical quoting: returns the
-    /// `Ω-inspect` call alone. Anything else (other consumers, chains, redirections) stays denied.
+    /// A filter stage that names no file: a file operand, `-f FILE` or a recursive search would read
+    /// outside the bounded reader. Options whose separate value is not listed count that value as an
+    /// operand, which refuses the stage (safe side).
+    fn reads_only_stdin(stage: &[String]) -> bool {
+        let search = matches!(stage[0].as_str(), "grep" | "rg");
+        let values: &[&str] = match stage[0].as_str() {
+            "head" | "tail" => &["-n", "-c"],
+            "cut" => &["-b", "-c", "-d", "-f"],
+            "grep" | "rg" => &["-e", "-m", "-A", "-B", "-C"],
+            _ => &[],
+        };
+        let (mut operands, mut pattern, mut ended) = (0, false, false);
+        let mut args = stage[1..].iter();
+        while let Some(arg) = args.next() {
+            if ended || !arg.starts_with('-') {
+                operands += 1;
+            } else if arg == "--" {
+                ended = true;
+            } else if search
+                && (["--file", "--recursive", "--dereference"].iter().any(|o| arg.starts_with(o))
+                    || (!arg.starts_with("--") && arg.contains(['f', 'r', 'R'])))
+            {
+                return false;
+            } else if values.contains(&arg.as_str()) {
+                pattern |= arg == "-e";
+                args.next();
+            } else {
+                pattern |= search && (arg.starts_with("-e") || arg.starts_with("--regexp"));
+            }
+        }
+        operands <= usize::from(search && !pattern)
+    }
+
+    /// `Ω-inspect|Ω-resume|Ω-optimize ARGS [2>&1] | head|tail|grep|rg|wc|cut ARGS` written in canonical
+    /// quoting: returns the reader call alone. Anything else (other consumers, chains, redirections) stays denied.
     fn inspect_pipe(command: &str, argv: &[String]) -> Option<String> {
         let stages: Vec<&[String]> = argv.split(|a| a == "|").collect();
         let (left, filters) = stages.split_first()?;
@@ -1180,7 +1245,9 @@ impl Guard {
         // Read-only filters; `cut -c1-200` is the most common recorded one.
         let filter = |stage: &&[String]| {
             matches!(stage.first().map(String::as_str), Some("head" | "tail" | "grep" | "rg" | "wc" | "cut"))
-                && !stage.iter().any(|a| a.starts_with("--pre"))
+                && !stage.iter().any(|a| a.starts_with("--pre") || a.starts_with("--hostname-bin"))
+                && Self::reads_only_stdin(stage)
+                && policy(&shlex_join(stage)).is_none()
         };
         if !inspect || filters.is_empty() || !filters.iter().all(filter) {
             return None;
@@ -1229,10 +1296,14 @@ impl Guard {
             Some(input @ Json::Object(_)) => input.get("command").or_else(|| input.get("cmd")),
             _ => None,
         };
-        let command = match command {
-            Some(Json::Str(command)) if !command.trim_matches(py_isspace).is_empty() => command,
-            _ => return self.denied("Missing shell command."),
-        };
+        match command {
+            Some(Json::Str(command)) if !command.trim_matches(py_isspace).is_empty() => self.check(command),
+            _ => self.denied("Missing shell command."),
+        }
+    }
+
+    /// The decision for one shell command string.
+    fn check(&self, command: &str) -> Option<Decision> {
         let Some(mut argv) = shlex_split(command) else {
             let command = command.trim_matches(py_isspace);
             // A heredoc body is data to the shell (`dataset's` in a Python script): only the lines
@@ -1248,22 +1319,14 @@ impl Guard {
             return self.denied_unwrapped("Unwrapped or noncanonical shell command.", command, &argv);
         }
         if let Some(inspect) = Self::inspect_pipe(command, &argv) {
-            // Same policy as the bare call; the read-only filter after it adds nothing to check.
-            let probe = Json::Object(vec![
-                ("tool_name".to_string(), Json::Str("Bash".to_string())),
-                ("tool_input".to_string(), Json::Object(vec![("command".to_string(), Json::Str(inspect))])),
-            ]);
-            return self.evaluate(&probe);
+            // The reader is checked like the bare call; the filters were policy-checked in `inspect_pipe`.
+            return self.check(&inspect);
         }
         if let Some(calls) = Self::wrapper_chain(command) {
             // Batched wrapper calls: each is checked alone and keeps its own bounded result.
             let clean = self.clean().map(|d| d.kind);
             let all_clean = calls.into_iter().all(|call| {
-                let probe = Json::Object(vec![
-                    ("tool_name".to_string(), Json::Str("Bash".to_string())),
-                    ("tool_input".to_string(), Json::Object(vec![("command".to_string(), Json::Str(call))])),
-                ]);
-                self.evaluate(&probe).map(|d| d.kind) == clean
+                self.check(&call).map(|d| d.kind) == clean
             });
             if all_clean {
                 return self.clean();
@@ -1317,7 +1380,10 @@ impl Guard {
         if unquoted_equals && argv.iter().any(|arg| arg.starts_with('=')) {
             return self.denied("Argument starting with \"=\" is expanded by zsh.");
         }
-        if argv[1] == "prune" && argv.iter().any(|a| a == "--apply") {
+        if argv[1] == "prune" && argv.iter().any(|a| {
+            let name = a.split('=').next().unwrap_or_default();
+            name.len() > 2 && "--apply".starts_with(name)
+        }) {
             return Some(Decision::new("ask", "Deleting old evidence requires explicit user approval.".to_string()));
         }
         policy(&Self::inner_text(&argv)).or_else(|| self.clean())

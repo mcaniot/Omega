@@ -229,3 +229,50 @@ class ResponseSettingsTest(unittest.TestCase):
             self.assertEqual(fields['name'], name)
             self.assertTrue(fields['description'].startswith('Use when '), name)
             self.assertLessEqual(len(fields['description']), 1024, name)
+
+
+class InstallerSafetyTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.tmp = Path(temporary.name)
+        spec = importlib.util.spec_from_file_location('omega_safety_install', ROOT / 'install.py')
+        self.installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.installer)
+
+    def test_directory_copy_with_extra_dotfiles_is_a_conflict_not_deleted(self):
+        source, dest = self.tmp / 'source', self.tmp / 'dest'
+        for root in (source, dest):
+            root.mkdir()
+            (root / 'a.txt').write_text('a')
+        (dest / '.notes').write_text('mine')
+        (dest / '.git').mkdir()
+        (dest / '.git/HEAD').write_text('ref')
+        self.assertFalse(self.installer.same(dest, source))
+        self.assertTrue(self.installer.link(dest, source, True).startswith('CONFLICT'))
+        self.assertTrue((dest / '.notes').exists() and not dest.is_symlink())
+
+    def test_failed_build_is_a_conflict_and_registers_no_hooks(self):
+        self.installer.BINARIES = {'run': self.tmp / 'bin/run'}
+        with patch.object(self.installer.subprocess, 'run', side_effect=FileNotFoundError('cargo')):
+            rows = list(self.installer.install_binaries(True))
+        self.assertTrue(rows and all(status.startswith('CONFLICT') for _, status in rows))
+        self.assertFalse((self.tmp / 'bin/run').exists())
+        self.installer.CLAUDE = self.tmp / '.claude'
+        self.installer.CODEX = self.tmp / '.codex'
+        self.installer.HOME = self.tmp
+        self.installer.AGENTS = self.tmp / '.agents'
+        with patch.object(self.installer, 'install_binaries', return_value=iter(rows)), \
+                patch.object(self.installer, 'link', return_value='ok'), \
+                patch.object(self.installer, 'write_response_settings', return_value=iter(())), \
+                patch.object(self.installer, 'remove_stale_links', return_value=iter(())), \
+                patch.object(self.installer, 'remove_retired_read', return_value=iter(())), \
+                patch.object(self.installer, 'install_commands', return_value=iter(())), \
+                patch.object(self.installer, 'write_codex_agents', return_value=iter(())), \
+                patch.object(self.installer, 'write_context_settings') as claude_hooks, \
+                patch.object(self.installer, 'write_codex_hooks') as codex_hooks, \
+                patch.object(self.installer.sys, 'argv', ['install.py', '--apply']), \
+                patch('builtins.print'):
+            self.assertEqual(self.installer.main(), 1)
+        claude_hooks.assert_not_called()
+        codex_hooks.assert_not_called()

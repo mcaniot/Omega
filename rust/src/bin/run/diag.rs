@@ -21,6 +21,7 @@ pub struct Item {
     pub text: String,
 }
 
+#[derive(Default)]
 pub struct Summary {
     pub status: String,
     pub exit_code: i32,
@@ -76,21 +77,21 @@ impl Summary {
             py::json_str(&mut b, self.note.as_bytes(), style);
         }
         for (key, items) in [("diagnostics", &self.diagnostics), ("preview", &self.preview)] {
-        if items.is_empty() { continue; }
-        b.extend_from_slice(format!(",\"{key}\":[").as_bytes());
-        for (i, item) in items.iter().enumerate() {
-            if i > 0 {
-                b.push(b',');
+            if items.is_empty() { continue; }
+            b.extend_from_slice(format!(",\"{key}\":[").as_bytes());
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    b.push(b',');
+                }
+                b.extend_from_slice(format!("{{\"stream\":\"{}\",\"line\":{},\"offset\":{},\"text\":", item.stream, item.line, item.offset).as_bytes());
+                py::json_str(&mut b, item.text.as_bytes(), style);
+                b.push(b'}');
             }
-            b.extend_from_slice(format!("{{\"stream\":\"{}\",\"line\":{},\"offset\":{},\"text\":", item.stream, item.line, item.offset).as_bytes());
-            py::json_str(&mut b, item.text.as_bytes(), style);
-            b.push(b'}');
-        }
-        b.push(b']');
-        // Says whether the list is exhaustive: an equal count spares a confirming search.
-        if key == "diagnostics" && self.matched > 0 {
-            b.extend_from_slice(format!(",\"diagnostics_total\":{}", self.matched).as_bytes());
-        }
+            b.push(b']');
+            // Says whether the list is exhaustive: an equal count spares a confirming search.
+            if key == "diagnostics" && self.matched > 0 {
+                b.extend_from_slice(format!(",\"diagnostics_total\":{}", self.matched).as_bytes());
+            }
         }
         b.push(b'}');
         b
@@ -105,7 +106,7 @@ struct Patterns {
     unprintable: Regex,
 }
 
-fn patterns() -> Patterns {
+static PATTERNS: std::sync::LazyLock<Patterns> = std::sync::LazyLock::new(|| {
     let compile = |p: &str| Regex::new(p).expect("static pattern");
     Patterns {
         tiers: [
@@ -129,11 +130,11 @@ fn patterns() -> Patterns {
         ansi: compile(r"\x1b\[[0-?]*[ -/]*[@-~]"),
         unprintable: compile(r"[\p{C}\p{Z}--[ ]]"),
     }
-}
+});
 
 /// Removes ANSI escapes from lossily decoded output.
 pub fn strip_ansi(bytes: &[u8]) -> String {
-    let p = patterns();
+    let p = &*PATTERNS;
     p.ansi.replace_all(&String::from_utf8_lossy(bytes), "").into_owned()
 }
 
@@ -208,7 +209,7 @@ pub fn read_line(reader: &mut impl BufRead, buf: &mut Vec<u8>, limit: usize) -> 
 /// Diagnostics ordered by importance (callers drop from the end). Streams are
 /// read through pinned descriptors, never through mutable evidence names.
 fn excerpts(stdout_fd: i32, stderr_fd: i32, preview: bool) -> (Vec<Item>, Vec<Item>, u64) {
-    let p = patterns();
+    let p = &*PATTERNS;
     let mut tiers: [Edges; 5] = Default::default();
     let mut tail: VecDeque<Item> = VecDeque::new();
     let mut boundaries = Vec::new();
@@ -295,12 +296,11 @@ pub fn read_fd(fd: i32) -> Vec<u8> {
 pub fn finalize(mut s: Summary, inline_bytes: i64, stdout_fd: i32, stderr_fd: i32) -> Summary {
     let encoded = |s: &Summary| s.encode(Style::Py).len();
     let mut inlined = false;
-    if s.bytes.0 + s.bytes.1 <= inline_bytes {
+    if s.bytes.0 + s.bytes.1 <= inline_bytes && s.bytes.0 + s.bytes.1 <= 8 * INLINE_BUDGET as i64 {
         let out = strip_ansi(&read_fd(stdout_fd));
         let err = strip_ansi(&read_fd(stderr_fd));
         s.stdout = (!out.is_empty()).then_some(out);
         s.stderr = (!err.is_empty()).then_some(err);
-        s.diagnostics = Vec::new();
         inlined = true;
     }
     if encoded(&s) > INLINE_BUDGET || !inlined {

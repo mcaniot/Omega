@@ -7,7 +7,7 @@ description: Use when the user asks to review their own code in a loop, fixing b
 
 Goals, in priority order: fix bugs > fewer lines > easier reading. Behaviour stays identical except for bug fixes. For reviewing someone else's MR/PR or drafting comments, use `code-review` instead.
 
-1. Scope: `git status --short --branch`; target = diff against the base branch plus uncommitted changes, or the files the user names. Record the baseline line count of the target files and the test/lint status. No tests covering the target: write characterization tests first, or limit the loop to bugs.
+1. Scope: `git status --short --branch`; target = diff against the base branch plus uncommitted changes, or the files the user names; a named branch that is the base or the current branch means its whole tree. Record the baseline line count of the target files and the test/lint status. No tests covering the target: write characterization tests first, or limit the loop to bugs.
 2. Each round, one fresh `Plan` agent with `model: fable`, read-only. Brief: target paths, test/lint commands, findings already rejected (do not re-raise). Role: senior engineer who finds
    - bugs: logic, edge cases, error handling, resources, concurrency, units/frames/shapes;
    - reductions: dead code, duplication, needless abstraction, wrappers or variables, reimplemented stdlib or dependency features, deep nesting (early return, guard clauses);

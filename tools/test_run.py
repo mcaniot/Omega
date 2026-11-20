@@ -604,5 +604,103 @@ class PlainPassTests(unittest.TestCase):
         self.assertEqual(json.loads(forced.stdout)['stdout'], 'hi\n')
 
 
+class RegressionTests(unittest.TestCase):
+    def evidence(self, **logs):
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ['rm', '-rf', str(directory)])
+        for name, data in logs.items():
+            (directory / f'{name}.log').write_bytes(data)
+        return directory
+
+    def inspect(self, *arguments):
+        process = subprocess.run([*RUNNER, 'inspect', *arguments], capture_output=True)
+        self.assertEqual(process.returncode, 0, process.stdout)
+        return json.loads(process.stdout)
+
+    def test_search_stops_before_a_match_over_budget(self):
+        directory = self.evidence(stdout=b'needle 12345\n' + b'xx needle yy\n' * 1000)
+        result = self.inspect(str(directory), '--stream', 'stdout', '--search', 'needle', '--max-bytes', '20')
+        self.assertEqual((len(result['fragments']), result['next_offset'], result['eof']), (1, 13, False))
+
+    def test_inspect_decodes_multibyte_text_across_read_chunks(self):
+        directory = self.evidence(stdout=('a' * 2047 + 'é' + 'b' * 10 + '\n').encode())
+        text = self.inspect(str(directory), '--stream', 'stdout')['fragments'][0]['text']
+        self.assertNotIn('\ufffd', text)
+        self.assertIn('é', text)
+
+    def test_prune_keeps_live_run_older_than_days(self):
+        with tempfile.TemporaryDirectory() as home:
+            env = {**os.environ, 'HOME': home}
+            Path(home, '.agents/tasks').mkdir(parents=True)
+            run = subprocess.Popen([*RUNNER, 'run', '--', 'sh', '-c', 'echo start; sleep 3; echo end'],
+                                   stdout=subprocess.PIPE, env=env)
+            evidence = Path(home, '.agents/tasks/evidence')
+            deadline = time.time() + 5
+            while time.time() < deadline and not any(evidence.glob('*/result.json')):
+                time.sleep(0.05)
+            time.sleep(1.2)  # older than --days
+            process = subprocess.run([*RUNNER, 'prune', '--days', '0.00001', '--apply'], capture_output=True, env=env)
+            result = json.loads(process.stdout)
+            output = json.loads(run.communicate()[0])
+            self.assertEqual((process.returncode, result['runs']), (0, 0), process.stdout)
+            self.assertEqual(output['status'], 'PASS')
+
+    def test_inline_bytes_cannot_load_oversized_logs(self):
+        probe = ("import resource,subprocess,sys;"
+                 "subprocess.run(sys.argv[1:],stdout=subprocess.DEVNULL);"
+                 "print(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)")
+        process = subprocess.run([sys.executable, '-c', probe, *RUNNER, 'run', '--inline-bytes', '1000000000',
+                                  '--shell', 'yes | head -c 60000000'], capture_output=True, text=True)
+        self.assertLess(int(process.stdout), 40000, process.stdout)  # KiB; loading the log costs over 60 MB
+
+    def test_invalid_utf8_command_keeps_result_json_valid(self):
+        process = subprocess.run([*RUNNER, 'run', '--', 'echo', b'ab\xffcd'], capture_output=True)
+        result = json.loads(process.stdout.decode('utf-8', 'replace'))
+        (Path(result['evidence']) / 'result.json').read_bytes().decode('utf-8')
+
+    def test_non_finite_timeouts_are_rejected(self):
+        for option in ('--timeout', '--kill-after'):
+            for value in ('nan', 'inf'):
+                with self.subTest(option=option, value=value):
+                    process = subprocess.run([*RUNNER, 'run', f'{option}={value}', '--', 'true'], capture_output=True)
+                    self.assertEqual(process.returncode, 2, process.stdout)
+                    json.loads(process.stdout)
+
+    def test_pipe_ampersand_is_one_pipe(self):
+        process = subprocess.run([*RUNNER, 'run', '--fail-fast', '--shell', 'ls /nonexistent |& cat'], capture_output=True)
+        result = json.loads(process.stdout)
+        self.assertNotIn('did not run', json.dumps(result))
+
+
+    def test_sigpipe_not_forgiven_when_an_earlier_pipeline_skipped_the_rest(self):
+        for script, options in (('yes | head -1; echo second | cat', ('--fail-fast',)),
+                                ('yes | head -1 && echo second | cat', ()),
+                                ('yes | /usr/bin/head -1; echo second | cat', ('--fail-fast',)),
+                                ('yes | grep -q y; echo second | cat', ('--fail-fast',)),
+                                ('yes | head -1 | cat && echo second | cat', ())):
+            with self.subTest(script=script):
+                self.assertNotEqual(run_shell(script, *options)[1]['status'], 'PASS')
+        for script in ('echo a | cat; yes | head -1', 'cd / && yes | head -1', 'echo a | cat && yes | head -1'):
+            with self.subTest(script=script):
+                self.assertEqual(run_shell(script, '--fail-fast')[1]['status'], 'PASS')
+
+    def test_trailing_newline_or_semicolon_is_not_another_command(self):
+        self.assertNotIn('note', run_shell('false\n', '--fail-fast')[1])
+        self.assertEqual(run_shell('grep zzzz /etc/hostname\n')[1]['status'], 'NO_MATCH')
+        self.assertEqual(run_shell('yes | head -1\n', '--fail-fast')[1]['status'], 'PASS')
+
+    def test_newline_after_pipe_continues_the_pipeline(self):
+        self.assertEqual(run_shell('yes |\nhead -1')[1]['status'], 'PASS')
+        self.assertEqual(run_shell('grep zzzz /etc/hostname |\n head')[1]['status'], 'NO_MATCH')
+        self.assertNotEqual(run_shell('yes | head -1 &&\n echo done')[1]['status'], 'PASS')
+
+    def test_search_anchors_match_newline_terminated_lines(self):
+        directory = self.evidence(stdout=b'alpha error\nbeta\r\ngamma\n')
+        for pattern, expected in (('error$', 'alpha error'), ('^beta$', 'beta')):
+            with self.subTest(pattern=pattern):
+                result = self.inspect(str(directory), '--stream', 'stdout', '--search', pattern)
+                self.assertIn(expected, result['fragments'][0]['text'])
+
+
 if __name__ == '__main__':
     unittest.main()

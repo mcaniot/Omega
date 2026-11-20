@@ -1,4 +1,5 @@
 """progress-page skill: page rendering, input validation and the multi-page hub."""
+import base64
 import json
 import re
 import os
@@ -35,6 +36,8 @@ def test_invalid_state_fails_with_a_readable_message(tmp_path):
     result = render(tmp_path, {'title': 'T', 'steps': [{'step': 'a', 'status': 'done'}]})
     assert result.returncode == 1 and 'steps[0]' in result.stderr and 'Traceback' not in result.stderr
     assert not (tmp_path / 'page/index.html').exists()
+    result = render(tmp_path, {'title': 'T', 'steps': [{'step': 'a', 'status': []}]})
+    assert result.returncode == 1 and 'steps[0]' in result.stderr and 'Traceback' not in result.stderr
     assert render(tmp_path, {'title': 'T', 'steps': []}, '--refresh', '0').returncode == 2
 
 
@@ -124,6 +127,8 @@ def test_update_flags_edit_state_and_ask_ranks_first_in_hub(tmp_path):
     assert 'ask' not in json.loads((tmp_path / 'other/state.json').read_text())
     bad = run(tmp_path, state, '--step', '9=fait')
     assert bad.returncode == 1 and 'N in 1..2' in bad.stderr
+    sup = run(tmp_path, state, '--step', '²=fait')  # isdigit() would accept it and int() crash
+    assert sup.returncode == 1 and 'expected N=STATUS' in sup.stderr and 'Traceback' not in sup.stderr
     assert run(tmp_path, state, '--step', '2=en cours').returncode == 0  # keeps the note
     assert json.loads((tmp_path / 'other/state.json').read_text())['steps'][1]['note'] == 'vérifié : ok'
     assert run(tmp_path, state, '--step', '2=fait::', '--add-step', 'c', '--warn', 'GPU').returncode == 0
@@ -287,9 +292,8 @@ def test_serve_follows_relative_links_and_serves_only_listed_files(tmp_path):
         assert urllib.parse.urljoin(headers['Location'], link) == page + 'index.html'
         html_page = server.get(page + 'index.html')[2].decode()
         assert 'href="../hub/index.html"' in html_page
-        # Embedded copies are dropped only for files the server serves; the escaping ones stay embedded.
-        assert '<img src="img/a.png"' in html_page
-        assert '<img src="img/link.png"' not in html_page and '<img src="../outside/o.png"' not in html_page
+        # Served files link relatively; escaping ones are never embedded, so their bytes are not in the page.
+        assert '<img src="img/a.png"' in html_page and 'data:image/png;base64,' not in html_page.split('<main', 1)[1]
         assert server.get(page + 'img/a.png')[0] == 200
         for path in (page + 'state.json', page + '.state.lock', page + '.env', page + 'notes.txt',
                      page + 'img/link.png', f'/tok/fs{tmp_path}/outside/o.png', f'/tok/fs{tmp_path}/hub/pages.json',
@@ -475,3 +479,78 @@ def test_activity_hook_logs_events_and_hub_shows_agents(tmp_path):
     assert hub.index('main — Aube') < hub.index('dead'[:8])
     bad = script(tmp_path, '--activity', stdin='not json')
     assert bad.returncode == 0 and bad.stdout == bad.stderr == ''
+
+
+def test_broken_page_never_borrows_the_state_of_its_neighbour(tmp_path):
+    good = make(tmp_path, 'good', {'title': 'Good', 'agent': 'alpha', 'steps': [{'step': 'a', 'status': 'en cours'}]})
+    bad = make(tmp_path, 'bad', {'title': 'Bad', 'agent': 'beta', 'steps': None})
+    for order in ([bad, good], [good, bad]):
+        (tmp_path / 'hub').mkdir(exist_ok=True)
+        (tmp_path / 'hub/pages.json').write_text(json.dumps(order))
+        result = script(tmp_path, '--all')
+        assert result.returncode == 0 and 'Traceback' not in result.stderr
+        hub = (tmp_path / 'hub/index.html').read_text()
+        assert 'Good' in hub and 'beta' not in hub
+        assert hub.count('bad/index.html') <= 1  # listed as a missing card at most, never under alpha's title
+
+
+def test_open_question_on_a_finished_page_without_task_does_not_crash(tmp_path):
+    state = {'title': 'Q', 'ask': 'Valider ?', 'steps': [{'step': 'a', 'status': 'fait'}]}
+    result = render(tmp_path, state)
+    assert result.returncode == 0 and 'Traceback' not in result.stderr
+    assert 'Valider ?' in (tmp_path / 'hub/index.html').read_text()
+
+
+def test_figure_outside_the_page_is_not_embedded(tmp_path):
+    png = b"\x89PNG\r\n\x1a\n" + b"\0\0\0\rIHDR\0\0\0\x02\0\0\0\x01" + b"\0" * 20
+    (tmp_path / 'secret.png').write_bytes(png)
+    state = {'title': 'T', 'steps': [], 'figures': [{'file': '../secret.png', 'title': 'x'}]}
+    assert render(tmp_path, state).returncode == 0
+    assert base64.b64encode(png).decode() not in (tmp_path / 'page/index.html').read_text()
+
+
+def test_wrongly_typed_figure_and_section_fields_are_readable_errors(tmp_path):
+    for key, entry in (('figures', {'file': 3, 'title': 't'}), ('figures', {'file': 'a.png', 'title': 't', 'full': 5}),
+                       ('sections', {'title': 't', 'items': 5})):
+        result = render(tmp_path, {'title': 'T', 'steps': [], key: [entry]})
+        assert result.returncode == 1 and 'Traceback' not in result.stderr and key in result.stderr
+
+
+def test_serve_skips_malformed_registered_states(tmp_path):
+    page = served_page(tmp_path)
+    for name, text in (('list', '[1]'), ('nofig', '{"figures": null}')):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / 'state.json').write_text(text)
+    pages = tmp_path / 'hub/pages.json'
+    pages.write_text(json.dumps([str(tmp_path / n / 'state.json') for n in ('list', 'nofig')] + json.loads(pages.read_text())))
+    server = Served(tmp_path)
+    try:
+        assert server.get(page + 'index.html')[0] == 200
+        assert server.get(f'/tok/fs{tmp_path}/hub/index.html')[0] == 200
+    finally:
+        server.stop()
+
+
+def test_all_excludes_forget_and_show(tmp_path):
+    for flag in ('--forget', '--show'):
+        result = run(tmp_path, '--all', flag)
+        assert result.returncode == 2 and 'Traceback' not in result.stderr and '--all excludes' in result.stderr
+
+
+def test_section_table_renders_and_section_flag_replaces_by_title(tmp_path):
+    state = {'title': 'T', 'steps': [], 'sections': [{'title': 'Notes', 'items': ['a']}]}
+    assert render(tmp_path, state).returncode == 0
+    table = json.dumps({'columns': ['seed', 'succès'], 'rows': [[1, '<b>90 %</b>'], [2, '85 %']]})
+    for value in (table, '["x"]', table):
+        result = render(tmp_path, json.loads((tmp_path / 'page/state.json').read_text()), '--section', f'Résultats::{value}')
+        assert result.returncode == 0, result.stderr
+    saved = json.loads((tmp_path / 'page/state.json').read_text())
+    assert [s['title'] for s in saved['sections']] == ['Notes', 'Résultats'] and 'items' not in saved['sections'][1]
+    page = (tmp_path / 'page/index.html').read_text()
+    assert '<th>succès</th>' in page and '<td>1</td>' in page and '&lt;b&gt;90 %&lt;/b&gt;' in page
+    for value in ('{"columns": ["a"], "rows": [[1, 2]]}', 'nope', '3'):
+        result = render(tmp_path, saved, '--section', f'R::{value}')
+        assert result.returncode == 1 and 'Traceback' not in result.stderr and '--section' in result.stderr
+    bad = {'title': 'T', 'steps': [], 'sections': [{'title': 'R', 'table': {'columns': ['a'], 'rows': [[]]}}]}
+    result = render(tmp_path, bad)
+    assert result.returncode == 1 and 'sections' in result.stderr

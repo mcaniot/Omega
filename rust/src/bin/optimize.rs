@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -14,6 +14,22 @@ mod ingest;
 mod prefix;
 #[path = "optimize/replay.rs"]
 mod replay;
+
+const HELP: &str = "\
+omega --version\n\
+omega resume [TASK]\n\
+Read bounded task state first; never opens transcripts or logs.\n\
+omega optimize prefix [--json] [--report NEW.json]\n\
+Read-only per-project fixed context (min first-request context, instruction chain, skill descriptions) of Claude transcripts from the last 30 days; never loads or saves checkpoint state, never touches settings. Estimates 4 bytes/token.\n\
+omega optimize replay [--sessions 1..50] [--json] [--report NEW.json] [--handoff-tokens N]\n\
+Read-only counterfactual token replay of recent Claude transcripts; never loads or saves checkpoint state, never touches settings. Baseline = sum(context_i + output_i) per deduplicated request. Tool-result tokens = bytes / calibrated bytes-per-token (median over single-result context deltas, fallback 3.5). R1: fully avoidable Read re-reads become a 40-token deny. R2: sigpipe/no_match/wrapper_usage errors followed by another call of the same tool are removed with their request. R3: at context >= 130000 (or --handoff-tokens N; alias --soft-reset-tokens) an automatic handoff restarts the session at first-request context + 3000 resume tokens and charges the first post-cut Read/Edit of each file read earlier (largest earlier Read result plus one request); baseline compactions are kept.\n\
+omega optimize [--sessions 1..50] [--json] [--report NEW.json] [--apply | --check] [--force] [--compare BASE.json]\n\
+Analyze new Claude and Codex records since the last successful checkpoint.\n\
+Always saves a private report with findings and fix statuses before advancing checkpoints.\n\
+Default: enable the installed Claude Read guard when findings justify it.\n\
+--check disables automatic fixes; --apply explicitly enables the guard.\n\
+--force audits full sessions. --compare prints OK/KO gates against a BASE.json report produced by this version (rerun base sessions with --force); exit status stays 0.\n\
+Never deletes, rewrites or compacts conversations.";
 
 fn audit(
     path: &Path,
@@ -87,26 +103,17 @@ fn audit(
         }
         if row["type"] == "assistant" && row["message"]["usage"].is_object() {
             let usage = &row["message"]["usage"];
-            let context: u64 = [
-                "input_tokens",
-                "cache_creation_input_tokens",
-                "cache_read_input_tokens",
-            ]
-            .iter()
-            .map(|k| usage[k].as_u64().unwrap_or(0))
-            .sum();
+            let tokens = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]
+                .map(|k| usage[k].as_u64().unwrap_or(0));
+            // The first three counters are the request context; output is not part of it.
+            let context: u64 = tokens[..3].iter().sum();
             let id = row["message"]["id"]
                 .as_str()
                 .or_else(|| row["uuid"].as_str())
                 .map(str::to_owned)
                 .unwrap_or_else(|| index.to_string());
-            let tokens = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]
-                .map(|k| usage[k].as_u64().unwrap_or(0));
             // Transcripts repeat assistant records per message id: the last record wins, counted once.
             messages.insert(id, (index, context, row["timestamp"].clone(), tokens));
-            if let Some(cwd) = row["cwd"].as_str() {
-                project = cwd.to_owned();
-            }
         }
         if !matches!(row["type"].as_str(), Some("assistant" | "user")) {
             continue;
@@ -118,10 +125,10 @@ fn audit(
                         calls.insert(id.to_owned(), block.clone());
                         call_order.entry(id.to_owned()).or_insert(index);
                     }
-                } else if block["type"] == "tool_result" {
-                    if let Some(id) = block["tool_use_id"].as_str() {
-                        results.insert(id.to_owned(), block.clone());
-                    }
+                } else if block["type"] == "tool_result"
+                    && let Some(id) = block["tool_use_id"].as_str()
+                {
+                    results.insert(id.to_owned(), block.clone());
                 }
             }
         }
@@ -179,23 +186,15 @@ fn audit(
                 if seen_reads.insert(fingerprint.clone(), (Some(order), path.clone())).is_none() {
                     read_history.push_back(fingerprint);
                 }
-                if read_history.len() > 2048 {
-                    if let Some(old) = read_history.pop_front() { seen_reads.remove(&old); }
+                if read_history.len() > 2048
+                    && let Some(old) = read_history.pop_front()
+                {
+                    seen_reads.remove(&old);
                 }
             }
         }
         // Images are not text: never turn their serialized bytes into a token estimate.
-        let text_bytes = match &result["content"] {
-            Value::String(s) => s.len(),
-            Value::Array(blocks) => blocks
-                .iter()
-                .filter(|b| b["type"] == "text")
-                .filter_map(|b| b["text"].as_str())
-                .map(str::len)
-                .sum(),
-            _ => 0,
-        };
-        if text_bytes > 8192 {
+        if ingest::result_bytes(result) > 8192 {
             large_tool_outputs += 1;
             if call["name"] != "Read" {
                 continue;
@@ -222,6 +221,7 @@ fn audit(
                 "file_path": call["input"]["file_path"], "limit": call["input"]["limit"]}});
         }
     }
+    let new_calls = calls.keys().filter(|id| !carried.contains(*id)).count();
     let token_sum = |i: usize| ordered.iter().map(|v| v.3[i]).sum::<u64>();
     let tokens_total = (0..4).map(token_sum).sum::<u64>();
     Ok((
@@ -238,9 +238,9 @@ fn audit(
             "context_last": ordered.last().map(|v| v.1).unwrap_or(0),
             "context_peak": ordered.iter().map(|v| v.1).max().unwrap_or(0),
             "compactions": compactions.len(),
-            "tool_calls": calls.keys().filter(|id| !carried.contains(*id)).count(),
+            "tool_calls": new_calls,
             // Batching: every request re-reads the whole context, so ~1.0 means no parallel calls.
-            "tool_calls_per_request": calls.keys().filter(|id| !carried.contains(*id)).count() as f64 / ordered.len().max(1) as f64,
+            "tool_calls_per_request": new_calls as f64 / ordered.len().max(1) as f64,
             "tool_errors": results.values().filter(|r| r["is_error"] == true).count(),
             "error_classes": error_classes.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
             "workflow_errors": error_classes[..4].iter().map(|(_, v)| v).sum::<u64>(),
@@ -337,23 +337,14 @@ fn save_state(path: &Path, state: &Value) -> Result<(), String> {
         path.to_owned()
     };
     let temp = target.with_file_name(format!(".omega-optimize-{}.tmp", std::process::id()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)
-        .map_err(|e| e.to_string())?;
-    let result = (|| -> Result<(), String> {
-        serde_json::to_writer_pretty(&mut file, state).map_err(|e| e.to_string())?;
-        file.write_all(b"\n")
-            .and_then(|_| file.sync_all())
-            .map_err(|e| e.to_string())?;
+    let mut file = ingest::create_new(&temp)?;
+    (|| -> Result<(), String> {
+        ingest::write_json(&mut file, state)?;
         fs::rename(&temp, &target).map_err(|e| e.to_string())
-    })();
-    if result.is_err() {
+    })()
+    .inspect_err(|_| {
         let _ = fs::remove_file(&temp);
-    }
-    result
+    })
 }
 
 struct SessionBatch {
@@ -380,17 +371,13 @@ fn sessions(
         ("claude", home.join(".claude/projects")),
         ("codex", home.join(".codex/sessions")),
     ] {
-        let mut paths = Vec::new();
-        if provider == "claude" && root.exists() {
-            for directory in fs::read_dir(&root).map_err(|e| e.to_string())? {
-                let directory = directory.map_err(|e| e.to_string())?;
-                if directory.file_type().map_err(|e| e.to_string())?.is_dir() {
-                    ingest::discover(&directory.path(), false, &mut paths)?;
-                }
-            }
+        let paths = if provider == "claude" {
+            ingest::claude_transcripts(home)?
         } else {
+            let mut paths = Vec::new();
             ingest::discover(&root, true, &mut paths)?;
-        }
+            paths
+        };
         for path in paths {
             let relative = path
                 .strip_prefix(&root)
@@ -422,12 +409,14 @@ fn sessions(
         }
         let previous = &state["sessions"][&key];
         let previous_offset = previous["offset"].as_u64().unwrap_or(0);
-        let append_only = previous_offset <= before["size"].as_u64().unwrap_or(0)
+        // Under --force the prefix is discarded, so it is not hashed.
+        let append_only = !force
+            && previous_offset <= before["size"].as_u64().unwrap_or(0)
             && previous["fingerprint"]["device"] == before["device"]
             && previous["fingerprint"]["inode"] == before["inode"]
             && previous["prefix_sha256"].as_str().is_some()
             && previous["prefix_sha256"] == prefix_digest(&path, previous_offset)?;
-        let start = if !force && append_only {
+        let start = if append_only {
             previous_offset
         } else {
             0
@@ -554,14 +543,10 @@ fn configure(home: &Path, apply: bool) -> Result<&'static str, String> {
         .mode(mode)
         .open(&temp)
         .map_err(|e| e.to_string())?;
-    let result = (|| -> Result<(), String> {
+    (|| -> Result<(), String> {
         file.set_permissions(fs::Permissions::from_mode(mode))
             .map_err(|e| e.to_string())?;
-        let mut bytes = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
-        bytes.push(b'\n');
-        file.write_all(&bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(|e| e.to_string())?;
+        ingest::write_json(&mut file, &settings)?;
         let current = match fs::read(&dest) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => b"{}".to_vec(),
@@ -571,12 +556,17 @@ fn configure(home: &Path, apply: bool) -> Result<&'static str, String> {
             return Err("Claude settings changed concurrently; retry the audit".to_owned());
         }
         fs::rename(&temp, &target).map_err(|e| e.to_string())
-    })();
-    if result.is_err() {
+    })()
+    .inspect_err(|_| {
         let _ = fs::remove_file(&temp);
-    }
-    result?;
+    })?;
     Ok("enabled (updated)")
+}
+
+fn is_task_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 128
+        && slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Task-only entry point: never opens transcripts, evidence logs or task-supplied paths.
@@ -597,8 +587,7 @@ fn resume(args: Vec<String>) -> Result<(), String> {
                 let entry = entry.map_err(|e| e.to_string())?;
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if entry.file_type().map_err(|e| e.to_string())?.is_file()
-                    && name.strip_suffix(".md").is_some_and(|s| !s.is_empty() && s.len() <= 128
-                        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')) {
+                    && name.strip_suffix(".md").is_some_and(is_task_slug) {
                     let modified = entry.metadata().and_then(|m| m.modified())
                         .map_err(|e| e.to_string())?;
                     tasks.push((modified, state, name));
@@ -626,7 +615,7 @@ fn resume(args: Vec<String>) -> Result<(), String> {
         return Ok(());
     };
     let slug = task.strip_suffix(".md").unwrap_or(task);
-    if slug.is_empty() || slug.len() > 128 || !slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+    if !is_task_slug(slug) {
         return Err("TASK must be a task basename (letters, digits, hyphens, underscores)".into());
     }
     for state in ["active", "completed"] {
@@ -661,15 +650,6 @@ fn resume(args: Vec<String>) -> Result<(), String> {
     Err(format!("Task not found in active/ or completed/: {slug}"))
 }
 
-fn median(mut values: Vec<f64>) -> f64 {
-    values.sort_by(f64::total_cmp);
-    match values.len() {
-        0 => 0.0,
-        n if n % 2 == 1 => values[n / 2],
-        n => (values[n / 2 - 1] + values[n / 2]) / 2.0,
-    }
-}
-
 /// Only reads data already in the base report; older reports lack tokens_total.
 fn base_median_tokens(path: &Path) -> Result<f64, String> {
     let base: Value = serde_json::from_slice(&fs::read(path).map_err(|e| format!("--compare: {e}"))?)
@@ -677,7 +657,7 @@ fn base_median_tokens(path: &Path) -> Result<f64, String> {
     let rows = base["sessions"].as_array().filter(|rows| !rows.is_empty())
         .ok_or("--compare: base report has no sessions")?;
     let tokens: Option<Vec<f64>> = rows.iter().map(|r| r["tokens_total"].as_u64().map(|t| t as f64)).collect();
-    tokens.map(median).ok_or_else(|| "--compare: base lacks tokens_total; rerun the base sessions with --force using this version".to_owned())
+    tokens.map(ingest::median).ok_or_else(|| "--compare: base lacks tokens_total; rerun the base sessions with --force using this version".to_owned())
 }
 
 fn gates(rows: &[Value], base_median: f64) -> Value {
@@ -685,15 +665,17 @@ fn gates(rows: &[Value], base_median: f64) -> Value {
     let peak = rows.iter().map(|r| r["context_peak"].as_u64().unwrap_or(0)).max().unwrap_or(0);
     let calls = sum("tool_calls");
     let ratio = if calls == 0 { 0.0 } else { sum("workflow_errors") as f64 / calls as f64 };
-    let tokens = median(rows.iter().map(|r| r["tokens_total"].as_u64().unwrap_or(0) as f64).collect());
+    let tokens = ingest::median(rows.iter().map(|r| r["tokens_total"].as_u64().unwrap_or(0) as f64).collect());
     let compactions = sum("compactions");
+    let avoidable = sum("avoidable_reread_lines");
+    let repeated = sum("repeated_exact_calls_extra");
     let data_loss = rows.iter().map(|r| r["error_classes"]["data_loss"].as_u64().unwrap_or(0)).sum::<u64>();
     json!({
-        "avoidable_reread_lines": {"value": sum("avoidable_reread_lines"), "limit": "== 0", "ok": sum("avoidable_reread_lines") == 0},
+        "avoidable_reread_lines": {"value": avoidable, "limit": "== 0", "ok": avoidable == 0},
         "compactions": {"value": compactions, "limit": "== 0", "ok": compactions == 0},
         "context_peak": {"value": peak, "limit": "< 180000", "ok": peak < 180_000},
         "data_loss": {"value": data_loss, "limit": "== 0", "ok": data_loss == 0},
-        "repeated_exact_calls": {"value": sum("repeated_exact_calls_extra"), "limit": "== 0", "ok": sum("repeated_exact_calls_extra") == 0},
+        "repeated_exact_calls": {"value": repeated, "limit": "== 0", "ok": repeated == 0},
         "workflow_error_ratio": {"value": ratio, "limit": "< 0.02", "ok": ratio < 0.02},
         "median_tokens_per_session": {"value": tokens, "limit": base_median / 3.0, "ok": tokens <= base_median / 3.0},
     })
@@ -708,7 +690,11 @@ fn invoked_as_resume() -> bool {
 }
 
 fn run() -> Result<(), String> {
-    let mut args = std::env::args().skip(1).peekable();
+    let args = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.into_string().map_err(|_| "Invalid UTF-8 argument".to_owned()))
+        .collect::<Result<Vec<String>, String>>()?;
+    let mut args = args.into_iter().peekable();
     if invoked_as_resume() {
         return resume(args.collect());
     }
@@ -716,19 +702,14 @@ fn run() -> Result<(), String> {
         println!("omega {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    if args.peek().is_some_and(|a| a == "resume") {
-        args.next();
+    if args.next_if_eq("resume").is_some() {
         return resume(args.collect());
     }
-    if args.peek().is_some_and(|a| a == "optimize") {
-        args.next();
-    }
-    if args.peek().is_some_and(|a| a == "prefix") {
-        args.next();
+    args.next_if_eq("optimize");
+    if args.next_if_eq("prefix").is_some() {
         return prefix::run(args.collect());
     }
-    if args.peek().is_some_and(|a| a == "replay") {
-        args.next();
+    if args.next_if_eq("replay").is_some() {
         return replay::run(args.collect());
     }
     let mut apply = false;
@@ -764,9 +745,7 @@ fn run() -> Result<(), String> {
                 ))
             }
             "--help" | "-h" => {
-                println!(
-                    "omega --version\nomega resume [TASK]\nRead bounded task state first; never opens transcripts or logs.\nomega optimize prefix [--json] [--report NEW.json]\nRead-only per-project fixed context (min first-request context, instruction chain, skill descriptions) of Claude transcripts from the last 30 days; never loads or saves checkpoint state, never touches settings. Estimates 4 bytes/token.\nomega optimize replay [--sessions 1..50] [--json] [--report NEW.json] [--handoff-tokens N]\nRead-only counterfactual token replay of recent Claude transcripts; never loads or saves checkpoint state, never touches settings. Baseline = sum(context_i + output_i) per deduplicated request. Tool-result tokens = bytes / calibrated bytes-per-token (median over single-result context deltas, fallback 3.5). R1: fully avoidable Read re-reads become a 40-token deny. R2: sigpipe/no_match/wrapper_usage errors followed by another call of the same tool are removed with their request. R3: at context >= 130000 (or --handoff-tokens N; alias --soft-reset-tokens) an automatic handoff restarts the session at first-request context + 3000 resume tokens and charges the first post-cut Read/Edit of each file read earlier (largest earlier Read result plus one request); baseline compactions are kept.\nomega optimize [--sessions 1..50] [--json] [--report NEW.json] [--apply | --check] [--force] [--compare BASE.json]\nAnalyze new Claude and Codex records since the last successful checkpoint.\nAlways saves a private report with findings and fix statuses before advancing checkpoints.\nDefault: enable the installed Claude Read guard when findings justify it.\n--check disables automatic fixes; --apply explicitly enables the guard.\n--force audits full sessions. --compare prints OK/KO gates against a BASE.json report produced by this version (rerun base sessions with --force); exit status stays 0.\nNever deletes, rewrites or compacts conversations."
-                );
+                println!("{HELP}");
                 return Ok(());
             }
             _ => return Err(format!("Unknown argument: {arg}")),
@@ -788,99 +767,94 @@ fn run() -> Result<(), String> {
             directory.join(format!("{}-{}.json", timestamp()?, std::process::id()))
         }
     };
-    // Reserve the report before changing configuration; never overwrite existing evidence.
-    let mut report_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&report_path)
-        .map_err(|e| e.to_string())?;
     let current_guard = configure(&home, false)?;
     let needs_guard = batch.rows.iter().any(|row| {
         row["provider"] == "claude" && row["large_unbounded_text_reads"].as_u64().unwrap_or(0) > 0
     });
     let auto_fix = !check && needs_guard && current_guard.starts_with("missing;");
-    let guard = configure(&home, apply || auto_fix)?;
-    let findings = ingest::findings(&batch.rows, guard);
     let gates = base_median.map(|base| gates(&batch.rows, base));
-    let mut output = json!({
-        "snapshot_unix_seconds": timestamp()?,
-        "selection": "most recently modified top-level transcripts; not proof of live sessions",
-        "context_measure": "Claude: input + cache creation + cache read; Codex: last_token_usage.input_tokens (cached tokens already included); never byte estimates or cumulative cost",
-        "read_guard": guard,
-        "report_file": report_path,
-        "findings": findings,
-        "fixes_applied": if guard == "enabled (updated)" { 1 } else { 0 },
-        "automatic_fixes": !check,
-        "state_file": state_path,
-        "sessions_skipped_unchanged": batch.unchanged,
-        "sessions_changed_during_audit": batch.unstable,
-        "sessions": batch.rows,
-    });
-    if let Some(gates) = &gates {
-        output["gates"] = gates.clone();
-    }
-    serde_json::to_writer_pretty(&mut report_file, &output).map_err(|e| e.to_string())?;
-    report_file
-        .write_all(b"\n")
-        .and_then(|_| report_file.sync_all())
-        .map_err(|e| e.to_string())?;
+    // Reserve the report before changing configuration; never overwrite existing evidence.
+    let mut report_file = ingest::create_new(&report_path)?;
+    let (guard, output) = (|| -> Result<(&str, Value), String> {
+        let guard = configure(&home, apply || auto_fix)?;
+        let findings = ingest::findings(&batch.rows, guard);
+        let mut output = json!({
+            "snapshot_unix_seconds": timestamp()?,
+            "selection": "most recently modified top-level transcripts; not proof of live sessions",
+            "context_measure": "Claude: input + cache creation + cache read; Codex: last_token_usage.input_tokens (cached tokens already included); never byte estimates or cumulative cost",
+            "read_guard": guard,
+            "report_file": report_path,
+            "findings": findings,
+            "fixes_applied": if guard == "enabled (updated)" { 1 } else { 0 },
+            "automatic_fixes": !check,
+            "state_file": state_path,
+            "sessions_skipped_unchanged": batch.unchanged,
+            "sessions_changed_during_audit": batch.unstable,
+            "sessions": batch.rows,
+        });
+        if let Some(gates) = &gates {
+            output["gates"] = gates.clone();
+        }
+        ingest::write_json(&mut report_file, &output)?;
+        Ok((guard, output))
+    })()
+    .inspect_err(|_| {
+        // A failed run must not leave an empty or partial report that blocks the retry.
+        let _ = fs::remove_file(&report_path);
+    })?;
     state["last_report"] = json!(report_path);
     if json_output {
         println!("{output}");
-        if batch.recorded > 0 {
-            save_state(&state_path, &state)?;
-        }
-        return Ok(());
-    }
-    println!(
-        "Claude + Codex incremental context analysis (not live-process detection)\nRead guard: {guard}\nPROVIDER SESSION   CONTEXT    PEAK       COMPACT  ERRORS/CALLS  LARGE OUTPUTS  UNBOUNDED/EVIDENCE READS  TOKENS     TOK/REQ    WORKFLOW-ERR  REREAD AVOID/LEGIT"
-    );
-    for row in output["sessions"].as_array().unwrap() {
-        let stem = row["session"].as_str().unwrap_or("?");
-        // Codex stems are rollout-<timestamp>-<uuid>; the uuid identifies the session.
-        let stem = match stem.strip_prefix("rollout-") {
-            Some(rest) if rest.len() >= 36 && rest.is_char_boundary(rest.len() - 36) => {
-                &rest[rest.len() - 36..]
-            }
-            _ => stem,
-        };
-        let id: String = stem.chars().take(8).collect();
-        // serde_json::Value ignores width specifiers; format plain integers.
-        let n = |key: &str| row[key].as_u64().unwrap_or(0);
+    } else {
         println!(
-            "{:8} {id:8}  {:<9}  {:<9}  {:<7}  {:<12}  {:<13}  {:<25} {:<10} {:<10} {:<13} {}/{}",
-            row["provider"].as_str().unwrap_or("?"),
-            n("context_last"),
-            n("context_peak"),
-            n("compactions"),
-            format!("{}/{}", n("tool_errors"), n("tool_calls")),
-            n("large_tool_outputs"),
-            format!("{}/{}", n("large_unbounded_text_reads"), n("large_evidence_text_reads")),
-            n("tokens_total"),
-            n("tokens_per_request"),
-            n("workflow_errors"),
-            n("avoidable_reread_lines"),
-            n("legit_reread_lines")
+            "Claude + Codex incremental context analysis (not live-process detection)\nRead guard: {guard}\nPROVIDER SESSION   CONTEXT    PEAK       COMPACT  ERRORS/CALLS  LARGE OUTPUTS  UNBOUNDED/EVIDENCE READS  TOKENS     TOK/REQ    WORKFLOW-ERR  REREAD AVOID/LEGIT"
+        );
+        for row in output["sessions"].as_array().unwrap() {
+            let stem = row["session"].as_str().unwrap_or("?");
+            // Codex stems are rollout-<timestamp>-<uuid>; the uuid identifies the session.
+            let stem = match stem.strip_prefix("rollout-") {
+                Some(rest) if rest.len() >= 36 && rest.is_char_boundary(rest.len() - 36) => {
+                    &rest[rest.len() - 36..]
+                }
+                _ => stem,
+            };
+            let id: String = stem.chars().take(8).collect();
+            // serde_json::Value ignores width specifiers; format plain integers.
+            let n = |key: &str| row[key].as_u64().unwrap_or(0);
+            println!(
+                "{:8} {id:8}  {:<9}  {:<9}  {:<7}  {:<12}  {:<13}  {:<25} {:<10} {:<10} {:<13} {}/{}",
+                row["provider"].as_str().unwrap_or("?"),
+                n("context_last"),
+                n("context_peak"),
+                n("compactions"),
+                format!("{}/{}", n("tool_errors"), n("tool_calls")),
+                n("large_tool_outputs"),
+                format!("{}/{}", n("large_unbounded_text_reads"), n("large_evidence_text_reads")),
+                n("tokens_total"),
+                n("tokens_per_request"),
+                n("workflow_errors"),
+                n("avoidable_reread_lines"),
+                n("legit_reread_lines")
+            );
+        }
+        if let Some(gates) = &gates {
+            println!("GATE                      VALUE        LIMIT        STATUS");
+            for (name, gate) in gates.as_object().unwrap() {
+                let limit = gate["limit"].as_str().map_or_else(|| gate["limit"].to_string(), str::to_owned);
+                println!("{name:25} {:<12} {limit:<12} {}", gate["value"].to_string(), if gate["ok"] == true { "OK" } else { "KO" });
+            }
+        }
+        println!(
+            "Unchanged skipped: {}; changed during audit (not marked): {}.\nPriorities: inspect evidence slices; bound code reads; checkpoint at phase changes.\nCounts indicate review targets, not proof of context rot. No transcript was modified.",
+            batch.unchanged, batch.unstable
+        );
+        println!(
+            "Report: {}\nFindings: {}; fixes applied: {}.",
+            report_path.display(),
+            output["findings"].as_array().unwrap().len(),
+            output["fixes_applied"]
         );
     }
-    if let Some(gates) = &gates {
-        println!("GATE                      VALUE        LIMIT        STATUS");
-        for (name, gate) in gates.as_object().unwrap() {
-            let limit = gate["limit"].as_str().map_or_else(|| gate["limit"].to_string(), str::to_owned);
-            println!("{name:25} {:<12} {limit:<12} {}", gate["value"], if gate["ok"] == true { "OK" } else { "KO" });
-        }
-    }
-    println!(
-        "Unchanged skipped: {}; changed during audit (not marked): {}.\nPriorities: inspect evidence slices; bound code reads; checkpoint at phase changes.\nCounts indicate review targets, not proof of context rot. No transcript was modified.",
-        batch.unchanged, batch.unstable
-    );
-    println!(
-        "Report: {}\nFindings: {}; fixes applied: {}.",
-        report_path.display(),
-        output["findings"].as_array().unwrap().len(),
-        output["fixes_applied"]
-    );
     // A failed audit/configuration/report/output must not hide sessions on the next run.
     if batch.recorded > 0 {
         save_state(&state_path, &state)?;
@@ -893,11 +867,8 @@ fn main() {
     // SAFETY: restoring the default handler is always valid.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     if let Err(error) = run() {
-        let command = match std::env::args().nth(1).as_deref() {
-            _ if invoked_as_resume() => "omega resume",
-            Some("resume") => "omega resume",
-            _ => "omega optimize",
-        };
+        let resume = invoked_as_resume() || std::env::args_os().nth(1).is_some_and(|arg| arg == "resume");
+        let command = if resume { "omega resume" } else { "omega optimize" };
         eprintln!("{command}: {error}");
         std::process::exit(1);
     }

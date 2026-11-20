@@ -13,7 +13,7 @@ mod json;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -64,7 +64,7 @@ fn now() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
 }
 
-fn read_registry(path: &PathBuf) -> Result<Vec<(String, J)>, Abort> {
+fn read_registry(path: &Path) -> Result<Vec<(String, J)>, Abort> {
     let parsed = fs::read(path)
         .ok()
         .and_then(|b| String::from_utf8(b).ok())
@@ -83,15 +83,14 @@ fn hashed_start(session: &str, count: usize) -> usize {
 }
 
 /// (name, title last told to the agent): kept from the title or registry, else hashed and probed past live names.
-/// With `assign` false an unknown session gets (None, None) and nothing is written. The stored "told" becomes
-/// the title for `br`, unless `keep_told` (SessionStart, which asks for no rename).
+/// At SessionStart an unknown session gets (None, None) and nothing is written, and the stored "told" is kept
+/// (no rename is asked). Otherwise "told" becomes the title for `br`.
 fn claim(
     session: &str,
     current: &str,
     now: f64,
-    assign: bool,
     br: &str,
-    keep_told: bool,
+    is_start: bool,
 ) -> Result<(Option<String>, Option<J>), Abort> {
     let path = registry_path()?;
     let lock = OpenOptions::new()
@@ -133,7 +132,7 @@ fn claim(
     let name = if current.is_empty() { registered } else { Some(current.to_owned()) };
     let name = match name {
         Some(n) => n,
-        None if !assign => return Ok((None, None)),
+        None if is_start => return Ok((None, None)),
         None => {
             let mut taken = Vec::new();
             for (_, v) in reg.iter().filter(|(s, _)| s != session) {
@@ -157,7 +156,7 @@ fn claim(
     let entry = J::Obj(vec![
         ("name".into(), J::str(&name)),
         ("seen".into(), J::Float(now)),
-        ("told".into(), if keep_told { told.clone().unwrap_or(J::Null) } else { J::str(&title_for(&name, br)) }),
+        ("told".into(), if is_start { told.clone().unwrap_or(J::Null) } else { J::str(&title_for(&name, br)) }),
     ]);
     match reg.iter_mut().find(|(s, _)| s == session) {
         Some(slot) => slot.1 = entry,
@@ -226,7 +225,7 @@ fn answer(event: &J) -> Result<Option<J>, Abort> {
     };
     // SessionStart carries no title: a fresh session may reuse an app row already
     // named by an earlier session, so leave naming to the first UserPromptSubmit.
-    let (name, told) = claim(&session, current, now(), !is_start, &br, is_start)?;
+    let (name, told) = claim(&session, current, now(), &br, is_start)?;
     let Some(name) = name else {
         return Ok(None);
     };

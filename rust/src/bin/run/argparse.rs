@@ -145,10 +145,10 @@ impl Parser {
         if arg.len() == 1 {
             return Ok(None);
         }
-        if let Some(eq) = arg.iter().position(|&b| b == b'=') {
-            if let Some(i) = self.exact(&arg[..eq]) {
-                return Ok(Some(Tok { opt: Some(i), name: arg[..eq].to_vec(), explicit: Some(arg[eq + 1..].to_vec()) }));
-            }
+        if let Some(eq) = arg.iter().position(|&b| b == b'=')
+            && let Some(i) = self.exact(&arg[..eq])
+        {
+            return Ok(Some(Tok { opt: Some(i), name: arg[..eq].to_vec(), explicit: Some(arg[eq + 1..].to_vec()) }));
         }
         let mut matches: Vec<(usize, &'static str, Option<Arg>)> = Vec::new();
         if arg.starts_with(b"--") {
@@ -347,20 +347,11 @@ impl Parser {
                 if single_dash && !e.is_empty() {
                     actions.push((opt, None));
                     let next = [b'-', e[0]];
-                    match self.exact(&next) {
-                        Some(i) => {
-                            opt = i;
-                            name = next.to_vec();
-                            explicit = (e.len() > 1).then(|| e[1..].to_vec());
-                            continue;
-                        }
-                        None => {
-                            return Err(self.error(&format!(
-                                "argument {}: ignored explicit argument {}",
-                                self.label(opt),
-                                py::repr(&e)
-                            )));
-                        }
+                    if let Some(i) = self.exact(&next) {
+                        opt = i;
+                        name = next.to_vec();
+                        explicit = (e.len() > 1).then(|| e[1..].to_vec());
+                        continue;
                     }
                 }
                 return Err(self.error(&format!(
@@ -541,7 +532,7 @@ pub static PRUNE: Parser = Parser {
 };
 
 /// Parses a full argv (after the program name), dispatching the subcommand.
-pub fn parse_command(args: &[Arg]) -> Result<(&'static str, &'static Parser, Parsed), Exit> {
+pub fn parse_command(args: &[Arg]) -> Result<(&'static str, Parsed), Exit> {
     let top = TOP.parse(args)?;
     let (name, rest) = top.command.clone().expect("command is required");
     let (label, parser): (&'static str, &'static Parser) = match name.as_slice() {
@@ -558,5 +549,5 @@ pub fn parse_command(args: &[Arg]) -> Result<(&'static str, &'static Parser, Par
         let joined: Vec<String> = extras.iter().map(|e| String::from_utf8_lossy(e).into_owned()).collect();
         return Err(reporter.error(&format!("unrecognized arguments: {}", joined.join(" "))));
     }
-    Ok((label, parser, sub))
+    Ok((label, sub))
 }

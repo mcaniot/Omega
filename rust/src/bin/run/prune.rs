@@ -44,18 +44,17 @@ pub fn prune(p: &Parsed, home: &[u8]) -> Result<Vec<u8>, String> {
     for entry in std::fs::read_dir(&root).map_err(io(&root))? {
         let path = entry.map_err(io(&root))?.path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let link = std::fs::symlink_metadata(&path).map_err(io(&path))?;
-        let Ok(meta) = std::fs::metadata(&path) else { continue };
-        if !meta.is_dir() || link.file_type().is_symlink() || referenced.contains(&name) || !exact.is_match(&name) {
+        let meta = std::fs::symlink_metadata(&path).map_err(io(&path))?;
+        if !meta.is_dir() || referenced.contains(&name) || !exact.is_match(&name) {
             continue;
         }
-        if (meta.mtime() as f64 + meta.mtime_nsec() as f64 / 1e9) < cutoff {
+        if (meta.mtime() as f64 + meta.mtime_nsec() as f64 / 1e9) < cutoff && !is_live(&path) {
             for file in std::fs::read_dir(&path).map_err(io(&path))? {
                 let file = file.map_err(io(&path))?.path();
-                if let Ok(m) = std::fs::metadata(&file) {
-                    if m.is_file() {
-                        size += m.len();
-                    }
+                if let Ok(m) = std::fs::metadata(&file)
+                    && m.is_file()
+                {
+                    size += m.len();
                 }
             }
             candidates.push(path);
@@ -74,4 +73,12 @@ pub fn prune(p: &Parsed, home: &[u8]) -> Result<Vec<u8>, String> {
         referenced.len()
     )
     .into_bytes())
+}
+
+/// True while the run's wrapper is alive: its result.json says RUNNING and the pid still exists.
+fn is_live(directory: &Path) -> bool {
+    let Ok(text) = std::fs::read(directory.join("result.json")) else { return false };
+    let Ok(result) = serde_json::from_slice::<serde_json::Value>(&text) else { return false };
+    result["status"] == "RUNNING"
+        && result["wrapper_pid"].as_i64().is_some_and(|pid| pid > 0 && unsafe { libc::kill(pid as i32, 0) } == 0)
 }

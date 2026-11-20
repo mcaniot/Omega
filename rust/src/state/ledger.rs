@@ -54,13 +54,6 @@ pub struct Entry {
     pub ranges: Vec<(u64, u64)>,
 }
 
-pub enum Coverage {
-    Full,
-    /// First uncovered inclusive gap of a partially covered request.
-    Partial(u64, u64),
-    Missing,
-}
-
 #[derive(Default, Serialize, Deserialize)]
 pub struct Ledger(BTreeMap<String, Entry>);
 
@@ -100,34 +93,22 @@ impl Ledger {
         entry
     }
 
-    pub fn check(&mut self, key: &str, stamp: (u64, u64), start: u64, end: u64) -> Coverage {
-        let entry = self.entry(key, stamp);
-        let (mut cursor, mut overlap, mut gap) = (start, false, None);
-        for &(s, e) in &entry.ranges {
+    /// Whether every line of `start..=end` is already covered for this file version.
+    pub fn covers(&mut self, key: &str, stamp: (u64, u64), start: u64, end: u64) -> bool {
+        let mut cursor = start;
+        for &(s, e) in &self.entry(key, stamp).ranges {
             if e < cursor {
                 continue;
             }
-            if s > end {
-                break;
-            }
-            overlap = true;
             if s > cursor {
-                gap = Some((cursor, s - 1));
-                break;
+                return false;
             }
-            cursor = e + 1;
-            if cursor > end {
-                break;
+            if e >= end {
+                return true;
             }
+            cursor = e.saturating_add(1);
         }
-        if gap.is_none() && cursor <= end {
-            gap = Some((cursor, end));
-        }
-        match (gap, overlap) {
-            (None, _) => Coverage::Full,
-            (Some((a, b)), true) => Coverage::Partial(a, b),
-            (Some(_), false) => Coverage::Missing,
-        }
+        false
     }
 
     pub fn record(&mut self, key: &str, stamp: (u64, u64), start: u64, end: u64) {

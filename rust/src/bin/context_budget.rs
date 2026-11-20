@@ -62,25 +62,24 @@ fn epoch_seconds(stamp: &str) -> Option<i64> {
     Some((era * 146_097 + doe - 719_468) * 86_400 + hh * 3600 + mm * 60 + ss)
 }
 
-/// Context tokens of the newest main-thread assistant message in the transcript tail.
-fn context_tokens(transcript: &Path) -> Option<u64> {
-    newest_usage(transcript).map(|(tokens, _)| tokens)
+/// The last `max` bytes of the file.
+fn read_tail(path: &Path, max: u64) -> Option<(Vec<u8>, bool)> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let start = file.metadata().ok()?.len().saturating_sub(max);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = Vec::new();
+    file.take(max).read_to_end(&mut tail).ok()?;
+    Some((tail, start > 0))
 }
 
 /// Context tokens and timestamp of the newest main-thread assistant message in the transcript tail.
 fn newest_usage(transcript: &Path) -> Option<(u64, Option<String>)> {
-    let mut file = std::fs::File::open(transcript).ok()?;
-    let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut tail = Vec::new();
-    file.take(TAIL_BYTES).read_to_end(&mut tail).ok()?;
+    let (tail, cut) = read_tail(transcript, TAIL_BYTES)?;
     let mut lines = tail.split(|&b| b == b'\n');
-    if start > 0 {
+    if cut {
         lines.next(); // First line is probably cut.
     }
-    let lines: Vec<&[u8]> = lines.collect();
-    for line in lines.iter().rev() {
+    for line in lines.rev() {
         // Older usage predates the compaction: the transcript lags behind the first tool calls.
         if line.windows(COMPACT_MARK.len()).any(|w| w == COMPACT_MARK)
             && serde_json::from_slice::<Value>(line).is_ok_and(|e| e["isCompactSummary"] == true)
@@ -110,10 +109,10 @@ fn evaluate(payload: &Value) -> Value {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let state = home
         .as_deref()
-        .zip(payload.get("session_id").and_then(Value::as_str))
+        .zip(payload["session_id"].as_str())
         .and_then(|(h, s)| ledger::state_file(h, "budget", s));
-    let event = payload.get("hook_event_name").and_then(Value::as_str).unwrap_or("");
-    let tokens = || payload.get("transcript_path").and_then(Value::as_str).and_then(|p| context_tokens(Path::new(p)));
+    let event = payload["hook_event_name"].as_str().unwrap_or("");
+    let tokens = || payload["transcript_path"].as_str().and_then(|p| newest_usage(Path::new(p))).map(|(tokens, _)| tokens);
     if event == "PreCompact" {
         // The newest usage is the context that triggered compaction: calibrate later sessions.
         if payload["trigger"] == "auto" && payload.get("agent_id").is_none() {
@@ -123,11 +122,11 @@ fn evaluate(payload: &Value) -> Value {
         }
         // Claude Code uses PreCompact stdout as instructions for the summary. Subagents have no
         // task file; instructions the user typed after /compact are left alone.
-        let custom = payload.get("custom_instructions").and_then(Value::as_str).is_some_and(|c| !c.trim().is_empty());
+        let custom = payload["custom_instructions"].as_str().is_some_and(|c| !c.trim().is_empty());
         return if payload.get("agent_id").is_some() || custom { Value::Null } else { Value::from(COMPACT_INSTRUCTIONS) };
     }
     let is_reset = event == "PostCompact"
-        || (event == "SessionStart" && matches!(payload.get("source").and_then(Value::as_str), Some("compact" | "clear")));
+        || (event == "SessionStart" && matches!(payload["source"].as_str(), Some("compact" | "clear")));
     if is_reset {
         if let Some(state) = &state {
             ledger::remove(state);
@@ -183,9 +182,10 @@ fn cold_resume(payload: &Value, home: Option<&Path>) -> Option<Value> {
     if std::env::var("CLAUDE_CODE_ENTRYPOINT").is_ok_and(|e| e != "cli") {
         return None;
     }
-    let session = payload.get("session_id").and_then(Value::as_str)?;
+    let session = payload["session_id"].as_str()?;
     let state = ledger::state_file(home?, "budget", &format!("cold-{session}"))?;
-    let (tokens, stamp) = newest_usage(Path::new(payload.get("transcript_path").and_then(Value::as_str)?))?;
+    let transcript = Path::new(payload["transcript_path"].as_str()?);
+    let (tokens, stamp) = newest_usage(transcript)?;
     let stamp = stamp?;
     let last = epoch_seconds(&stamp)?;
     let now = i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()).ok()?;
@@ -198,7 +198,7 @@ fn cold_resume(payload: &Value, home: Option<&Path>) -> Option<Value> {
         return None; // Resent after the warning: continue in this session.
     }
     // Without a task file there is no cheap restart: /clear would lose the session's state.
-    let task = session_task(Path::new(payload["transcript_path"].as_str()?), home?)?;
+    let task = session_task(transcript, home?)?;
     let _ = ledger::write_private(&state, json!({"cold_warned_for": stamp}).to_string().as_bytes());
     Some(json!({"decision": "block", "reason": format!(
         "Session idle {}h{:02} with {}k tokens of context: the prompt cache has expired, so this prompt would \
@@ -210,11 +210,7 @@ fn cold_resume(payload: &Value, home: Option<&Path>) -> Option<Value> {
 
 /// Newest active task file named in the transcript (last TASK_SCAN_BYTES) that still exists.
 fn session_task(transcript: &Path, home: &Path) -> Option<String> {
-    let mut file = std::fs::File::open(transcript).ok()?;
-    let len = file.metadata().ok()?.len();
-    file.seek(SeekFrom::Start(len.saturating_sub(TASK_SCAN_BYTES))).ok()?;
-    let mut tail = Vec::new();
-    file.take(TASK_SCAN_BYTES).read_to_end(&mut tail).ok()?;
+    let (tail, _) = read_tail(transcript, TASK_SCAN_BYTES)?;
     let pattern = regex::bytes::Regex::new(r"tasks/active/([A-Za-z0-9][A-Za-z0-9._-]{0,100})\.md").ok()?;
     let names: Vec<String> = pattern
         .captures_iter(&tail)

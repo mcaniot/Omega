@@ -8,6 +8,7 @@ What each omega hook does, when it runs and what happens if it fails.
 | [`context_guard`](#context_guard) | Read, Edit/Write, session start, compaction (Claude) | Bounds large reads, refuses re-reads | The call goes through |
 | [`context_budget`](#context_budget) | Every tool call, prompt, compaction (Claude) | Checkpoint reminder, compaction instructions, cold-resume notice | The call goes through |
 | `session_name` | Session start, prompt (Claude) | Names the session | The call goes through |
+| `make_page.py --answered` / `--activity` | Prompt; session start, stop, notification, end (Claude) | Clears the asking session's pending question; records session activity for the progress hub (async) | The call goes through |
 
 ## `shell_guard`
 
