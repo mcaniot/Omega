@@ -6,6 +6,47 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 
 ## [Unreleased]
 
+### Added
+
+- `progress-page`: the hub closes and cleans missions by itself. A mission is finished when its task
+  file moves to `completed/`; every step done with the task still active for a day shows "À clôturer";
+  finished missions leave the hub after 7 days and unreadable states after 14 (files are kept).
+- `progress-page`: Agents section in the hub, one row per session seen in 24 h with its state
+  (travaille, attend ta réponse, à son invite, fermée, perdue), a 24 h timeline and its missions.
+  Async hooks (`make_page.py --activity` on SessionStart, Stop, StopFailure, Notification and
+  SessionEnd; `--answered` also records UserPromptSubmit) append to `~/.agents/activity/*.jsonl`
+  (no prompt text, 7 days kept); liveness comes from Claude Code's session registry.
+
+### Fixed
+
+- `progress-page`: a question no longer stays "À toi" after the user answers. `--ask` records the
+  Claude Code session, and a `UserPromptSubmit` hook (`make_page.py --answered`, registered by
+  `install.py`) clears it on that session's next prompt, logs it and re-renders the page and hub.
+  Without a session (Codex), the next `--step`, `--add-step`, `--fig`, `--log` or `--warn` update
+  clears it. Waiting for the user (decision, authorization) uses `--ask`, never the `bloqué` step
+  status, which nothing clears on the answer.
+- `progress-page`: images show when only the HTML reaches the viewer (Orca remote connection, copied
+  file). Images up to 2 MB, the logo and hub thumbnails up to 500 KB are embedded as `data:` URIs;
+  larger files and videos stay links. Hub thumbnails are reduced JPEGs when Pillow is installed.
+  Links between pages and the hub are relative instead of `file://`.
+- `progress-page`: `omega-progress [HOST:]PORT` (`make_page.py --serve`) serves the hub and every
+  registered page read-only over HTTP, behind a random token, for viewers without `file://` access
+  (remote device). Default `127.0.0.1:8765`; only the hub and registered page directories are served.
+  Off loopback it publishes `http://omega.local:PORT` on the local network (mDNS via avahi, `--name`);
+  `--open` drops the token. Optional user service `systemd/omega-progress.service` keeps it running.
+  Served pages load their images over HTTP instead of the embedded copies, and byte ranges are
+  honoured so videos play in Safari and iOS.
+  Hardened after review: only each page's `index.html` and its figure files are served (no state,
+  lock, registry or hidden files, nothing outside the page directory); requests naming another host
+  get 421 (DNS rebinding); files and byte ranges are streamed, not read whole; non-HTML files carry
+  `ETag`/`Last-Modified` and answer 304; idle connections time out and malformed requests get 400;
+  the server exits when the mDNS publisher dies, republishes on a new address, stops it on SIGTERM;
+  the user unit is capped at 512 MB.
+- `progress-page`: a finished page whose task file is active again (follow-up task linked with
+  `--task`) shows "En cours" on the hub ("Reprise") instead of "Terminée". `--task` alone on a finished
+  page is refused: the follow-up adds its steps with `--add-step` in the same command, or creates a
+  new page.
+
 ## [1.1.0] - 2026-11-18
 
 ### Added

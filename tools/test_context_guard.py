@@ -263,7 +263,7 @@ class ContextSettingsTest(unittest.TestCase):
         for key, value in self.installer.CONTEXT_ENV.items():
             self.assertEqual(actual['env'][key], value)
         self.assertEqual(actual['permissions'], {'deny': ['keep', *self.installer.DENIED_AGENTS]})
-        self.assertEqual(hooks['Stop'], self.original['hooks']['Stop'])
+        self.assertEqual(hooks['Stop'][0], self.original['hooks']['Stop'][0])  # third-party hook kept first
         self.assertEqual(hooks['PreToolUse'][0], self.original['hooks']['PreToolUse'][0])
         self.assertEqual(target.stat().st_mode & 0o777, 0o600)
         self.assertEqual(list(self.installer.write_context_settings(True)), [])

@@ -31,6 +31,7 @@ class OmegaCommandsTest(unittest.TestCase):
         installer.COMMANDS = {
             name: self.home / '.agents/tools' / target.relative_to(installer.AGENTS / 'tools')
             for name, target in installer.COMMANDS.items()
+            if target.is_relative_to(installer.AGENTS / 'tools')  # Rust binaries; skill scripts are tested apart
         }
         for target in set(installer.COMMANDS.values()):
             target.parent.mkdir(parents=True, exist_ok=True)

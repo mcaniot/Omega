@@ -8,16 +8,22 @@ Usage:
   make_page.py --find TASK                print the registered state of a task (after /clear or handoff)
   make_page.py STATE.json --forget        remove the page from the hub
   make_page.py --all                      re-render every registered page and the hub
+  make_page.py --serve [HOST:]PORT        (or omega-progress [HOST:]PORT) read-only HTTP view of the hub and pages (default 127.0.0.1:8765;
+                                          URL printed with a random token, or $PROGRESS_TOKEN)
+  make_page.py --answered < HOOK.json     UserPromptSubmit hook: clear the questions of that session
 
 Update flags change STATE.json (dated, validated, written atomically under a lock) before rendering;
 steps are numbered from 1 as on the page. N=STATUS keeps the note, N=STATUS:: clears it, N=STATUS::x
-sets it. --ask '' and --warn '' clear. --fig FILE is relative to the state directory and must exist. Each render also registers the page in
+sets it. --ask '' and --warn '' clear. --ask records $CLAUDE_CODE_SESSION_ID: the next prompt of that
+session clears the question (--answered); without it, any update except --task/--agent clears it.
+--fig FILE is relative to the state directory and must exist. Each render also registers the page in
 one hub, $PROGRESS_HUB/index.html (default ~/.agents/progress), which lists every tracked page in a
 single tab: tasks waiting for the user first, then blocked, active and finished ones.
 
 The page opens from file:// without a server; its labels are French. State keys (all text is plain;
 `x` renders as code):
   title, subtitle?, summary?, warning?, ask? (text or list: a question waiting for the user),
+  ask_session? (session that asked; set by --ask),
   task? (basename of ~/.agents/tasks/active/<task>.md), agent? (session currently in charge),
   steps: [{step, status: fait|en cours|à faire|bloqué, note?, date?}],
   figures: [{file, title, note?, full?, date?}]  (relative to the state directory, oldest first;
@@ -26,12 +32,17 @@ The page opens from file:// without a server; its labels are French. State keys 
   sections?: [{title, items: [text]}].
 """
 import argparse
+import base64
 import fcntl
 import html
+import ipaddress
 import json
 import os
 import pathlib
 import re
+import secrets
+import shutil
+import socket
 import struct
 import sys
 import tempfile
@@ -49,7 +60,45 @@ VIDEO = ('.mp4', '.webm')
 MIN_REFRESH = 5
 HUB_REFRESH = 60
 STALE_SECONDS = 2 * 3600
-LOGO = (pathlib.Path(__file__).resolve().parents[1] / 'assets/omega.png').as_uri()
+DAY = 86400
+CLOSE_AFTER = DAY  # every step done but the task still active: "à clôturer" after this
+FINISHED_KEPT = 7 * DAY  # a finished mission leaves the hub (not the disk) after this
+MISSING_KEPT = 14 * DAY  # a state that cannot be read (deleted, disk unmounted) leaves the hub after this
+# Images are embedded in the page (data: URIs) so it also shows where only the HTML reaches the
+# viewer (Orca remote preview, a copied file). Larger files stay relative links.
+INLINE_MAX = 2_000_000
+THUMB_MAX = 500_000  # the hub reloads in the background: keep its thumbnails light
+IMAGE_TYPES = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+               '.webp': 'image/webp', '.svg': 'image/svg+xml'}
+
+
+def inline(path, limit=INLINE_MAX):
+    """data: URI of an image file up to `limit` bytes, else None."""
+    kind = IMAGE_TYPES.get(os.path.splitext(str(path))[1].lower())
+    try:
+        if not kind or os.path.getsize(path) > limit:
+            return None
+        with open(path, 'rb') as f:
+            return f'data:{kind};base64,' + base64.b64encode(f.read()).decode('ascii')
+    except OSError:
+        return None
+
+
+def thumbnail(path):
+    """Small embedded JPEG of an image for the hub (Pillow when installed), else the image itself."""
+    try:
+        import io
+        from PIL import Image
+        with Image.open(path) as im:
+            im.thumbnail((480, 270))
+            out = io.BytesIO()
+            im.convert('RGB').save(out, 'JPEG', quality=80)
+        return 'data:image/jpeg;base64,' + base64.b64encode(out.getvalue()).decode('ascii')
+    except Exception:  # noqa: BLE001 - no Pillow, or a file still being written
+        return inline(path, THUMB_MAX)
+
+
+LOGO = inline(pathlib.Path(__file__).resolve().parents[1] / 'assets/omega.png') or ''
 # Icons are inlined once per page and referenced with <use>: the page stays one offline file.
 SPRITE = (
     '<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>'
@@ -234,6 +283,16 @@ aside details{margin-top:14px} aside details .journal{margin-top:14px}
  .task{grid-template-columns:minmax(0,1fr) 84px} .thumb{grid-column:2;grid-row:1} .body{grid-column:1;grid-row:1}
  .gone .body{grid-column:1/-1} .gone .thumb{display:none} .meta{flex-wrap:wrap} .meta .bar{flex:0 0 100%} .who{margin-left:auto}
  .step{grid-template-columns:16px minmax(0,1fr) auto;padding:10px 12px} .step .n{display:none} .card{padding:14px}}
+.agents{display:grid;gap:6px;margin:10px 0 0;padding:0;list-style:none}
+.agent{display:grid;grid-template-columns:minmax(0,16em) 13em minmax(0,1fr);gap:4px 12px;align-items:center;font-size:13px}
+.agent .nm{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent .st{display:inline-flex;align-items:center;gap:5px;color:var(--text-2);white-space:nowrap;overflow:hidden} .agent .ms{grid-column:1/-1;color:var(--text-2)}
+.tl{position:relative;height:10px;border-radius:4px;background:var(--todo-tint);overflow:hidden}
+.tl i{position:absolute;top:0;bottom:0;min-width:1px} .tl .work{background:var(--run-fill)} .tl .wait{background:var(--accent)}
+.tl .idle{background:var(--todo);opacity:.3} .tl .error{background:var(--bad-fill)}
+.agent.off .nm,.agent.off .tl{opacity:.55}
+.tlaxis{display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);grid-column:3}
+@media (max-width:720px){.agent{grid-template-columns:minmax(0,1fr) auto} .tl,.tlaxis{grid-column:1/-1}}
 """
 # Reload while not paused, no video plays and the image viewer is closed (WCAG 2.2.1: the user can stop
 # it). Task pages reload only while visible; the hub also reloads in the background so its tab title
@@ -267,7 +326,7 @@ if(BG){addEventListener('visibilitychange',()=>{if(document.visibilityState==='h
 const lb=document.getElementById('lb');
 if(lb){const zs=[...document.querySelectorAll('a.zoom')],im=lb.querySelector('img'),raw=lb.querySelector('.cap a');
   let k=0;
-  const go=i=>{k=(i+zs.length)%zs.length;im.src=raw.href=zs[k].href;
+  const go=i=>{k=(i+zs.length)%zs.length;im.src=zs[k].querySelector('img').src;raw.href=zs[k].href;
     im.alt=lb.querySelector('.cap b').textContent=zs[k].dataset.title;};
   lb.classList.toggle('one',zs.length<2);
   zs.forEach((a,i)=>a.onclick=e=>{if(e.ctrlKey||e.metaKey||e.shiftKey)return;e.preventDefault();go(i);lb.showModal();});
@@ -371,7 +430,8 @@ def figure(root, fig, eager, lead=False):
         lazy = '' if eager else ' loading="lazy"'
         title = html.escape(fig['title'], quote=True)
         # The viewer script opens .zoom links in the <dialog>; without script the link opens the file.
-        media = f'<a class="m zoom" href="{src}" data-title="{title}"><img src="{src}" alt="{title}"{dims}{lazy}></a>'
+        img = inline(os.path.join(root, fig['file'])) or src
+        media = f'<a class="m zoom" href="{src}" data-title="{title}"><img src="{img}" alt="{title}"{dims}{lazy}></a>'
     note = f'<span>{text(fig["note"])}</span>' if fig.get('note') else ''
     extra = [f'<a href="{url(fig["full"])}">rendu complet</a>'] if fig.get('full') else []
     if fig.get('date'):
@@ -385,9 +445,15 @@ def hub_dir():
     return pathlib.Path(os.environ.get('PROGRESS_HUB') or pathlib.Path.home() / '.agents/progress').expanduser().resolve()
 
 
-def document(title, body, refresh, background=False, crumb=''):
-    """Page shell; `background` marks the hub, `crumb` is the escaped title shown after the hub link."""
-    hub = html.escape((hub_dir() / 'index.html').as_uri(), quote=True)
+def rel(target, base):
+    """Relative link from directory `base`: works from file://, the HTTP view and Orca previews."""
+    return url(os.path.relpath(target, base))
+
+
+def document(title, body, refresh, base, background=False, crumb=''):
+    """Page shell written in directory `base`; `background` marks the hub, `crumb` is the escaped
+    title shown after the hub link."""
+    hub = rel(hub_dir() / 'index.html', base)
     return ('<!doctype html><html lang="fr"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<meta name="color-scheme" content="light dark">'
@@ -465,7 +531,7 @@ def render(state, root, refresh, mtime):
     parts.append(f'<div class="layout"><main>{"".join(main)}</main><aside>{aside}</aside></div>')
     if any(not is_video(f['file']) for f in figures):
         parts.append(VIEWER)
-    return document(state['title'], '\n'.join(parts), refresh, crumb=text(state['title']))
+    return document(state['title'], '\n'.join(parts), refresh, root, crumb=text(state['title']))
 
 
 def write_atomic(path, content):
@@ -484,7 +550,31 @@ def rank(state):
         return 0
     if any(s['status'] == 'bloqué' for s in steps):
         return 1
-    return 3 if steps and all(s['status'] == 'fait' for s in steps) else 2
+    # Closing the task (active/ → completed/) is what finishes a mission, whatever its steps say.
+    if task_file(state, 'completed'):
+        return 3
+    done = steps and all(s['status'] == 'fait' for s in steps)
+    # A finished page whose task file is still active was resumed: in progress until new steps say otherwise.
+    return 3 if done and not task_active(state) else 2
+
+
+def task_file(state, folder):
+    """True when ~/.agents/tasks/<folder>/<task>.md exists ($PROGRESS_TASKS is the active folder)."""
+    active = pathlib.Path(os.environ.get('PROGRESS_TASKS') or pathlib.Path.home() / '.agents/tasks/active')
+    task = state.get('task')
+    base = active if folder == 'active' else active.parent / folder
+    return isinstance(task, str) and '/' not in task and (base / f'{task}.md').is_file()
+
+
+def task_active(state):
+    return task_file(state, 'active')
+
+
+def to_close(state, mtime):
+    """Every step done, task still active and nothing new for a day: the agent forgot to close it."""
+    steps = state['steps']
+    return (bool(steps) and all(s['status'] == 'fait' for s in steps) and task_active(state)
+            and time.time() - mtime > CLOSE_AFTER)
 
 
 def hub_line(cls, name, content, extra=''):
@@ -510,6 +600,11 @@ def hub_card(state_path):
         lines = [hub_line('cur', STATUS[step['status']], f'Étape {i} · {text(step["step"])}', more)]
     elif level == 3:
         lines = [hub_line('cur', 'ok', 'Toutes les étapes sont faites')]
+    elif to_close(state, mtime):
+        lines = [hub_line('cur', 'warn', f'À clôturer : tout est fait, la tâche <code>{text(state["task"])}</code> '
+                          'est encore active (la déplacer dans completed/)')]
+    elif steps and all(s['status'] == 'fait' for s in steps):
+        lines = [hub_line('cur', 'run', f'Reprise (tâche <code>{text(state["task"])}</code>), pas encore de nouvelle étape')]
     elif steps:
         i, step = next(e for e in numbered if e[1]['status'] == 'à faire')
         lines = [hub_line('cur', 'todo', f'À venir : étape {i} · {text(step["step"])}')]
@@ -522,10 +617,12 @@ def hub_card(state_path):
         lines.append(hub_line('line', 'warn', text(state['warning'])))
     if asks(state):
         lines.append(f'<p class="q">{icon("ask")}<span>{ask_text(state)}</span></p>')
-    page = html.escape((root / 'index.html').as_uri(), quote=True)
-    images = [f for f in state.get('figures', []) if not is_video(f['file'])]
+    page = rel(root / 'index.html', hub_dir())
+    # Only images inside the page directory: the hub must not expose what the HTTP view refuses.
+    images = [f for f in state.get('figures', []) if not is_video(f['file']) and inside(root / f['file'], root)]
     thumb = (f'<a class="thumb" href="{page}#visuels" tabindex="-1" aria-hidden="true">'
-             f'<img src="{html.escape((root / images[-1]["file"]).as_uri(), quote=True)}" alt="" loading="lazy"></a>'
+             f'<img src="{thumbnail(root / images[-1]["file"]) or rel(root / images[-1]["file"], hub_dir())}" '
+             'alt="" loading="lazy"></a>'
              if images else f'<span class="thumb">{icon("img")}</span>')
     bar, count = progress(steps)
     agent = f'<span class="who">{text(state["agent"])}</span>' if state.get('agent') else ''
@@ -560,6 +657,159 @@ def missing_card(path, error):
                   f'<p class="line">Retirer du hub : <code>{text(forget)}</code></p></div></article>')
 
 
+# Session activity: hooks append one line per event to $PROGRESS_ACTIVITY/YYYY-MM-DD.jsonl (no prompt
+# text); the hub folds it into the current state and a 24 h timeline of each agent.
+ACTIVITY_DAYS = 7
+EVENT_STATE = {'SessionStart': 'idle', 'UserPromptSubmit': 'work', 'Stop': 'idle', 'StopFailure': 'error',
+               'SessionEnd': 'end'}
+# Notifications that wait for the user; idle_prompt only repeats that the turn ended.
+WAITING = ('permission_prompt', 'elicitation_dialog', 'agent_needs_input')
+AGENT_STATES = {'work': ('run', 'travaille'), 'wait': ('ask', 'attend ta réponse'), 'idle': ('todo', 'à son invite'),
+                'error': ('bad', 'erreur API'), 'end': ('ok', 'fermée'), 'lost': ('warn', 'perdue (sans fin propre)')}
+
+
+def activity_dir():
+    return pathlib.Path(os.environ.get('PROGRESS_ACTIVITY') or pathlib.Path.home() / '.agents/activity').expanduser()
+
+
+def live_sessions():
+    """Claude Code's registry (~/.claude/sessions/<pid>.json, undocumented): sessionId -> entry, live pids only."""
+    root = pathlib.Path(os.environ.get('PROGRESS_SESSIONS') or pathlib.Path.home() / '.claude/sessions')
+    live = {}
+    for path in root.glob('*.json'):
+        try:
+            entry = json.loads(path.read_text())
+            os.kill(int(entry['pid']), 0)  # a crashed session leaves its file behind
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+        if isinstance(entry.get('sessionId'), str):
+            live[entry['sessionId']] = entry
+    return live
+
+
+def record(payload):
+    """Hook: append the event to today's activity log. Returns True when something was written."""
+    try:
+        data = json.loads(payload)
+        event, session = data.get('hook_event_name'), data.get('session_id')
+    except (ValueError, AttributeError):
+        return False
+    if not isinstance(session, str) or (event not in EVENT_STATE and event != 'Notification'):
+        return False
+    entry = {'t': int(time.time() * 1000), 'sid': session, 'ev': event}
+    if event == 'Notification':
+        if data.get('notification_type') not in WAITING:
+            return False
+        entry['kind'] = data['notification_type']
+    if event == 'SessionEnd':
+        entry['reason'] = str(data.get('reason', ''))
+    if isinstance(data.get('cwd'), str):
+        entry['cwd'] = data['cwd']
+    name = live_sessions().get(session, {}).get('name')
+    if isinstance(name, str):
+        entry['name'] = name
+    root = activity_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    # One write under PIPE_BUF with O_APPEND: concurrent sessions never interleave lines.
+    fd = os.open(root / f'{time.strftime("%Y-%m-%d")}.jsonl', os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, (json.dumps(entry, ensure_ascii=False) + '\n').encode())
+    finally:
+        os.close(fd)
+    for old in root.glob('*.jsonl'):
+        if time.time() - old.stat().st_mtime > ACTIVITY_DAYS * DAY:
+            old.unlink(missing_ok=True)
+    return True
+
+
+def read_activity(since):
+    events = []
+    for day in sorted({time.strftime('%Y-%m-%d', time.localtime(t)) for t in (since - DAY, since, time.time())}):
+        try:
+            lines = (activity_dir() / f'{day}.jsonl').read_text(encoding='utf-8').splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                e = json.loads(line)
+                if isinstance(e, dict) and isinstance(e.get('sid'), str) and e.get('ev') in (*EVENT_STATE, 'Notification'):
+                    events.append({**e, 't': float(e['t']) / 1000})
+            except (ValueError, TypeError, KeyError):
+                continue
+    return sorted(events, key=lambda e: e['t'])
+
+
+def agent_rows(now):
+    """One row per agent name (a /clear keeps the name, not the session id): current state and 24 h segments."""
+    start, live = now - DAY, live_sessions()
+    by_sid = {}
+    for e in read_activity(start):
+        by_sid.setdefault(e['sid'], []).append(e)
+    for sid in live:
+        by_sid.setdefault(sid, [])
+    rows = {}
+    for sid, events in by_sid.items():
+        reg = live.get(sid, {})
+        name = reg.get('name') or next((e['name'] for e in reversed(events) if e.get('name')), None) or sid[:8]
+        states = [('wait' if e['ev'] == 'Notification' else EVENT_STATE[e['ev']], e['t']) for e in events]
+        changed = float(reg.get('statusUpdatedAt') or 0) / 1000
+        if sid in live and changed > (states[-1][1] if states else 0):
+            # Covers what hooks miss (an interrupted turn fires no Stop): the registry is newer.
+            states.append(('work' if reg.get('status') == 'busy' else 'idle', changed))
+        if not states:
+            continue
+        current, since = states[-1]
+        if sid not in live and current != 'end':
+            current = 'lost'
+        end = now if sid in live else states[-1][1]
+        segments = [(s, t, (states[i + 1][1] if i + 1 < len(states) else end)) for i, (s, t) in enumerate(states)]
+        if sid not in live and end < start:
+            continue
+        row = rows.setdefault(name, {'name': name, 'segments': [], 'last': 0, 'live': False})
+        row['segments'] += [seg for seg in segments if seg[0] != 'end' and seg[2] > start]
+        if since >= row['last'] or sid in live:
+            row.update(state=current, since=since, last=max(since, row['last']), live=row['live'] or sid in live)
+    # Online first, those waiting for the user on top; then by latest change.
+    order = ('wait', 'error', 'work', 'idle')
+    return sorted(rows.values(), key=lambda r: (not r['live'], order.index(r['state']) if r['state'] in order else 9,
+                                                -r['last']))
+
+
+def agents_section(missions, now=None):
+    """Hub block: every agent seen in the last 24 h. `missions` maps an agent name to (title, link) pairs."""
+    now = now or time.time()
+    rows = agent_rows(now)
+    if not rows:
+        return ''
+    items = []
+    for row in rows:
+        cls, label = AGENT_STATES[row['state']]
+        bars = ''.join(f'<i class="{s}" style="left:{max(a - now + DAY, 0) / DAY * 100:.2f}%;'
+                       f'width:{(min(b, now) - max(a, now - DAY)) / DAY * 100:.2f}%"></i>'
+                       for s, a, b in row['segments'] if b > a)
+        short = row['name'].rsplit(' — ', 1)[-1]
+        linked = missions.get(short, [])
+        mission = ('<span class="ms">' + ' · '.join(f'<a href="{href}">{text(title)}</a>' for title, href in linked)
+                   + '</span>') if linked else ''
+        items.append(f'<li class="agent{"" if row["live"] else " off"}"><span class="nm" title="{html.escape(row["name"], quote=True)}">'
+                     f'{html.escape(row["name"])}</span><span class="st">{icon(cls)}{label} '
+                     f'<time data-t="{int(row["since"])}"></time></span>'
+                     f'<div class="tl" role="img" aria-label="activité des dernières 24 h">{bars}</div>{mission}</li>')
+    live = sum(r['live'] for r in rows)
+    return (f'<section id="agents" class="group"><h2 class="gh">Agents<span>{live} en ligne · {len(rows)} sur 24 h</span></h2>'
+            '<ul class="agents">' + ''.join(items) + '<li class="agent"><span></span><span></span><span class="tlaxis">'
+            '<span>il y a 24 h</span><span>12 h</span><span>maintenant</span></span></li></ul></section>')
+
+
+def activity(payload):
+    """Hook entry (async): record the event, then refresh the hub so the agent's state shows. Silent, fail-open."""
+    try:
+        if record(payload):
+            update_hub()
+    except Exception:  # noqa: BLE001 - a hook must never disturb the session
+        pass
+
+
 def update_hub(add=None, forget=None):
     """Register `add`, drop `forget`, and re-render the hub from every registered page."""
     hub = hub_dir()
@@ -569,13 +819,32 @@ def update_hub(add=None, forget=None):
         registry = hub / 'pages.json'
         paths = [p for p in dict.fromkeys(([add] if add else []) + read_registry(registry))
                  if p != forget and reachable(p)]
-        write_atomic(str(registry), json.dumps(paths, indent=1) + '\n')
-        cards = []
+        # Unreadable states (disk unmounted) stay listed for MISSING_KEPT from when they were first missed.
+        now, missed = time.time(), hub / 'missing.json'
+        try:
+            since = {p: t for p, t in json.loads(missed.read_text()).items() if isinstance(t, (int, float))}
+        except (OSError, ValueError, AttributeError):
+            since = {}
+        since = {p: since.get(p, now) for p in paths if not os.path.exists(p)}
+        cards, kept, missions = [], [], {}
         for p in paths:
             try:
-                cards.append(hub_card(p))
+                card = hub_card(p)
+                state = load(p)
             except Exception as error:  # noqa: BLE001 - one broken page must not hide the others
-                cards.append(missing_card(p, error))
+                if now - since.get(p, now) > MISSING_KEPT:
+                    continue
+                card = missing_card(p, error)
+            # A finished mission leaves the hub after FINISHED_KEPT; its files stay where they are.
+            if card[0] == 3 and p != add and now - card[1] > FINISHED_KEPT:
+                continue
+            cards.append(card)
+            kept.append(p)
+            if card[0] != 3 and isinstance(state.get('agent'), str):
+                missions.setdefault(state['agent'], []).append((state['title'], rel(pathlib.Path(p).parent / 'index.html', hub)))
+        paths = kept
+        write_atomic(str(registry), json.dumps(paths, indent=1) + '\n')
+        write_atomic(str(missed), json.dumps({p: t for p, t in since.items() if p in paths}) + '\n')
         cards.sort(key=lambda c: (c[0], -c[1]))
         counts = [sum(c[0] == level for c in cards) for level in range(len(LEVELS))]
         waiting = counts[0]
@@ -598,9 +867,9 @@ def update_hub(add=None, forget=None):
         if not any(counts[:3]):
             groups.insert(0, '<p class="empty group">Aucune tâche en cours.</p>')
         body = (f'<div class="head"><h1>Missions</h1><div class="stats">{"".join(chips)}</div></div>{lead}'
-                + ''.join(groups))
+                + agents_section(missions) + ''.join(groups))
         title = (f'({waiting}) ' if waiting else '') + 'Suivi des tâches'
-        write_atomic(str(hub / 'index.html'), document(title, body, HUB_REFRESH, background=True))
+        write_atomic(str(hub / 'index.html'), document(title, body, HUB_REFRESH, hub, background=True))
     return hub / 'index.html', paths
 
 
@@ -615,6 +884,10 @@ def apply_updates(state, args, root):
         state['steps'].append({'step': label, 'status': 'à faire'})
         changes.append(f'étape {len(state["steps"])} « {label} » ajoutée')
     if args.task and args.task != state.get('task'):
+        if state.get('task') and state['steps'] and all(s['status'] == 'fait' for s in state['steps']):
+            # A follow-up task on a finished page would show nothing to do: it brings its own steps.
+            raise ValueError(f'--task {args.task}: every step of this page is done; add the new objectives '
+                             "with --add-step in the same command, or create a new page for the new task")
         state['task'] = args.task
         changes.append(f'tâche {args.task}')
     if args.agent and args.agent != state.get('agent'):
@@ -647,13 +920,25 @@ def apply_updates(state, args, root):
         state.setdefault('figures', []).append({'file': file, 'title': title, **({'note': note} if note else {}),
                                                 'date': stamp()})
         changes.append(f'visuel {file}')
-    for key, value, name in (('ask', args.ask, 'question'), ('warning', args.warn, 'alerte')):
+    ask = args.ask
+    if ask is None and state.get('ask') and not state.get('ask_session') and (args.step or args.add_step or args.fig or args.log or args.warn is not None):
+        # Without a hook-tracked session (Codex, plain shell): the agent stops after asking, so its
+        # next progress update comes after the user's answer.
+        ask = ''
+    for key, value, name in (('ask', ask, 'question'), ('warning', args.warn, 'alerte')):
         if value is not None:
             if value:
                 state[key] = value
             else:
                 state.pop(key, None)
             changes.append(name + (' posée' if value else ' retirée'))
+    if ask is not None:
+        # The asking session: its next user prompt clears the question (--answered hook).
+        session = os.environ.get('CLAUDE_CODE_SESSION_ID')
+        if ask and session:
+            state['ask_session'] = session
+        else:
+            state.pop('ask_session', None)
     if args.log:
         state.setdefault('log', []).append({'date': stamp(), 'text': args.log})
         changes.append('journal')
@@ -693,7 +978,302 @@ def render_page(state_path, state, refresh):
     return os.path.join(root, 'index.html')
 
 
+def answered(payload):
+    """UserPromptSubmit hook: the user replied, so clear the questions this session asked.
+
+    Silent and fail-open: the hook's stdout would reach the agent's context, and a broken page
+    must never block the user's prompt.
+    """
+    try:
+        session = json.loads(payload).get('session_id')
+        paths = read_registry(hub_dir() / 'pages.json') if session else []
+    except Exception:  # noqa: BLE001
+        return
+    cleared = False
+    for path in paths:
+        try:
+            with open(path, encoding='utf-8') as f:
+                if session not in f.read():  # cheap filter before taking the lock
+                    continue
+            with open(os.path.join(os.path.dirname(path), '.state.lock'), 'w') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                state = load(path)
+                if not state.get('ask') or state.get('ask_session') != session:
+                    continue
+                state.pop('ask', None)
+                state.pop('ask_session', None)
+                state.setdefault('log', []).append({'date': stamp(), 'text': 'réponse reçue : question retirée'})
+                write_atomic(path, json.dumps(state, indent=1, ensure_ascii=False) + '\n')
+            render_page(path, state, 60)
+            cleared = True
+        except Exception:  # noqa: BLE001 - one bad page must not stop the others
+            continue
+    if cleared:
+        try:
+            update_hub()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# A figure link and its embedded image: <a class="m zoom" href="FILE" ...><img src="data:...">
+EMBEDDED = re.compile(r'(<a class="m zoom" href="([^"]+)"[^>]*><img src=")data:[^"]*"')
+RANGE = re.compile(r'bytes=(\d{0,18})-(\d{0,18})')  # one range; more digits are not a real offset
+CHUNK = 1 << 16
+
+
+def lan_ip():
+    """Source address of the default route: the machine's address on the local network."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(('192.0.2.1', 9))  # TEST-NET address: no packet is sent for a UDP connect
+        return s.getsockname()[0]
+
+
+def is_loopback(host):
+    if host == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(host.strip('[]')).is_loopback
+    except ValueError:
+        return False
+
+
+def inside(path, root):
+    """True when `path` (resolved) lies in `root` (resolved) and no part below `root` is hidden."""
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    if not path.startswith(root + os.sep):
+        return False
+    return not any(part.startswith('.') for part in os.path.relpath(path, root).split(os.sep))
+
+
+_SERVED = {}
+
+
+def served_files():
+    """Files the HTTP view may serve: the hub page, and per registered page its index.html and the
+    `file`/`full` targets of its figures, when they stay inside the page directory (no dotfiles)."""
+    hub = hub_dir()
+    files = {os.path.realpath(hub / 'index.html')}
+    for path in read_registry(hub / 'pages.json'):
+        if not os.path.isabs(path):
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+            cached = _SERVED.get(path)
+            if not cached or cached[0] != mtime:
+                with open(path, encoding='utf-8') as f:
+                    state = json.load(f)
+                root = os.path.dirname(path)
+                names = ['index.html'] + [fig[key] for fig in state.get('figures', []) for key in ('file', 'full')
+                                          if isinstance(fig, dict) and isinstance(fig.get(key), str)]
+                cached = (mtime, {os.path.realpath(os.path.join(root, n)) for n in names
+                                  if inside(os.path.join(root, n), root)})
+                _SERVED[path] = cached
+            files |= cached[1]
+        except (OSError, ValueError):
+            continue
+    return files
+
+
+def serve(host, port, token, name=None):
+    """Read-only HTTP view of the hub and the registered pages, for viewers without file:// access.
+
+    /TOKEN/fs/<absolute path> mirrors the file system so the relative links of the pages resolve
+    unchanged; only the files listed by served_files() are served, to clients that address this
+    machine by an IP, its host name, localhost or NAME.local (no DNS rebinding).
+    """
+    import email.utils
+    import http.server
+    import mimetypes
+    import signal
+    import subprocess
+    import threading
+    prefix = f'/{token}' if token else ''
+    names = {'localhost', socket.gethostname().lower(), socket.gethostname().lower() + '.local'}
+    if name:
+        names.add(f'{name.lower()}.local')
+
+    def known_host(value):
+        value = value.strip().lower()
+        hostname = value.rsplit(':', 1)[0] if value.count(':') == 1 else value  # strip the port, not IPv6
+        if hostname in names:
+            return True
+        try:
+            ipaddress.ip_address(hostname.strip('[]'))
+            return True  # a literal address cannot be rebound to another site's name
+        except ValueError:
+            return False
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        timeout = 30  # idle connections release their thread
+
+        def headers_only(self, code, kind='text/plain; charset=utf-8', length=0, extra=()):
+            self.send_response(code)
+            self.send_header('Content-Type', kind)
+            self.send_header('Content-Length', str(length))
+            for header in extra:
+                self.send_header(*header)
+            self.end_headers()
+
+        def send(self, code, body, kind='text/plain; charset=utf-8', extra=(('Cache-Control', 'no-store'),)):
+            self.headers_only(code, kind, len(body), extra)
+            if self.command == 'GET':
+                self.wfile.write(body)
+
+        def do_GET(self):
+            try:
+                self.answer()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception:  # noqa: BLE001 - a malformed request gets 400, never a traceback
+                try:
+                    self.send(400, b'bad request')
+                except OSError:
+                    pass
+
+        do_HEAD = do_GET
+
+        def answer(self):
+            if not known_host(self.headers.get('Host', '')):
+                return self.send(421, b'unknown host')
+            path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+            if path in (prefix, prefix + '/'):
+                return self.send(302, b'', extra=[('Location', urllib.parse.quote(f'{prefix}/fs{hub_dir() / "index.html"}'))])
+            if not path.startswith(prefix + '/fs/') or '\0' in path:
+                return self.send(404, b'not found')
+            file = os.path.realpath(path[len(prefix) + 3:])
+            allowed = served_files()
+            if file not in allowed:
+                return self.send(404, b'not found')
+            kind = mimetypes.guess_type(file)[0] or 'application/octet-stream'
+            with open(file, 'rb') as f:
+                if kind == 'text/html':
+                    base = os.path.dirname(file)
+
+                    def strip(m):
+                        # Served pages load their images over HTTP: drop the embedded copy when the
+                        # file is served (a page with many renders weighs tens of MB, reloaded every minute).
+                        target = os.path.realpath(os.path.join(base, urllib.parse.unquote(html.unescape(m.group(2)))))
+                        return m.group(1) + m.group(2) + '"' if target in allowed else m.group(0)
+                    page = EMBEDDED.sub(strip, f.read().decode('utf-8', errors='replace'))
+                    return self.send(200, page.encode('utf-8'), 'text/html; charset=utf-8')
+                info = os.fstat(f.fileno())
+                tag = f'"{info.st_mtime_ns:x}-{info.st_size:x}"'
+                cache = [('Cache-Control', 'no-cache'), ('ETag', tag), ('Accept-Ranges', 'bytes'),
+                         ('Last-Modified', email.utils.formatdate(info.st_mtime, usegmt=True))]
+                if self.fresh(tag, info.st_mtime):
+                    self.send_response(304)
+                    for header in cache:
+                        self.send_header(*header)
+                    self.end_headers()
+                    return None
+                size, start, end, code = info.st_size, 0, info.st_size - 1, 200
+                match = RANGE.fullmatch(self.headers.get('Range', ''))
+                if match and (match[1] or match[2]):  # Safari and iOS play a video only with byte ranges
+                    if match[1]:
+                        start, end = int(match[1]), min(int(match[2] or size - 1), size - 1)
+                    else:
+                        start, end = max(size - int(match[2]), 0), size - 1
+                    if start > end or start >= size:
+                        return self.send(416, b'', kind, [('Content-Range', f'bytes */{size}')])
+                    code = 206
+                    cache.append(('Content-Range', f'bytes {start}-{end}/{size}'))
+                self.headers_only(code, kind, end - start + 1, cache)
+                if self.command == 'GET':
+                    f.seek(start)
+                    left = end - start + 1
+                    while left > 0:
+                        chunk = f.read(min(CHUNK, left))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        left -= len(chunk)
+            return None
+
+        def fresh(self, tag, mtime):
+            match = self.headers.get('If-None-Match')
+            if match is not None:
+                return tag in [t.strip() for t in match.split(',')] or match.strip() == '*'
+            since = self.headers.get('If-Modified-Since')
+            if since:
+                try:
+                    return int(mtime) <= email.utils.parsedate_to_datetime(since).timestamp()
+                except (TypeError, ValueError):
+                    return False
+            return False
+
+        def log_message(self, format, *args):  # noqa: A002 - base signature
+            pass
+
+    server = http.server.ThreadingHTTPServer((host, port), Handler)
+    server.daemon_threads = True
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def publish():
+        # mDNS alias NAME.local -> this machine; stderr goes to the journal.
+        address = lan_ip() if host in ('0.0.0.0', '') else host
+        return address, subprocess.Popen(['avahi-publish', '-a', '-R', f'{name}.local', address],
+                                         stdout=subprocess.DEVNULL)
+
+    address, publisher = publish() if name else (None, None)
+    shown = f'{name}.local' if name else socket.gethostname() if host in ('0.0.0.0', '') else host
+    port_part = '' if server.server_address[1] == 80 else f':{server.server_address[1]}'
+    print(f'http://{shown}{port_part}{prefix}/', flush=True)
+    code = 0
+    try:
+        while not stop.wait(5):
+            if publisher is None:
+                continue
+            if publisher.poll() is not None:
+                # Name lost (avahi restarted, name taken): exit so systemd restarts and republishes.
+                print(f'avahi-publish exited ({publisher.returncode}): {name}.local is no longer published',
+                      file=sys.stderr, flush=True)
+                code = 1
+                break
+            if host in ('0.0.0.0', '') and lan_ip() != address:  # new DHCP address: republish
+                publisher.terminate()
+                publisher.wait()
+                address, publisher = publish()
+    except KeyboardInterrupt:
+        pass
+    except OSError as error:  # no network left for lan_ip()
+        print(f'network lost: {error}', file=sys.stderr, flush=True)
+        code = 1
+    finally:
+        server.shutdown()
+        if publisher and publisher.poll() is None:
+            publisher.terminate()
+            publisher.wait()
+    sys.exit(code)
+
 def main():
+    # `omega-progress [HOST:]PORT` (installed link) is `make_page.py --serve [HOST:]PORT`.
+    served = os.path.basename(sys.argv[0]) == 'omega-progress'
+    if served or sys.argv[1:2] == ['--serve']:
+        cli = argparse.ArgumentParser(prog='omega-progress', description='read-only HTTP view of the progress pages')
+        cli.add_argument('address', nargs='?', default='127.0.0.1:8765', metavar='[HOST:]PORT')
+        cli.add_argument('--name', help='name published on the local network (mDNS, avahi): http://NAME.local:PORT; '
+                                        'default omega when HOST is not loopback')
+        cli.add_argument('--open', action='store_true', help='no token in the URL (anyone reaching the port reads the pages)')
+        opts = cli.parse_args(sys.argv[1:] if served else sys.argv[2:])
+        host, _, port = opts.address.rpartition(':')
+        host = host or ('0.0.0.0' if opts.name else '127.0.0.1')
+        if not port.isdigit() or not 0 <= int(port) < 65536:  # 0: any free port (tests)
+            cli.error(f'invalid port {port!r}')
+        if opts.name and is_loopback(host):
+            cli.error('--name needs a network address (0.0.0.0 or a LAN IP), not loopback')
+        if not is_loopback(host) and not opts.name and shutil.which('avahi-publish'):
+            opts.name = 'omega'
+        token = '' if opts.open else os.environ.get('PROGRESS_TOKEN') or secrets.token_urlsafe(9)
+        serve(host, int(port), token, opts.name)
+        return
+    if sys.argv[1:] in (['--answered'], ['--activity']):
+        payload = sys.stdin.read()
+        if sys.argv[1] == '--answered':
+            answered(payload)
+        activity(payload)
+        return
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('state', nargs='?')
     parser.add_argument('--refresh', type=int, default=60, help=f'auto-reload period in seconds (>= {MIN_REFRESH})')

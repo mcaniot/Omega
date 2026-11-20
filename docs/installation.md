@@ -57,3 +57,11 @@ systemctl --user link "$PWD"/systemd/omega-{optimize,prune}.{service,timer}
 systemctl --user enable --now omega-optimize.timer omega-prune.timer
 systemctl --user list-timers 'omega-*'   # check
 ```
+
+Optional: serve the progress pages to other devices on the local network at
+`http://omega.local:8765` (read-only, no token: anyone on the network can read them):
+
+```sh
+systemctl --user link "$PWD"/systemd/omega-progress.service
+systemctl --user enable --now omega-progress.service
+```

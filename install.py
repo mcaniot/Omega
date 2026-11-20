@@ -51,6 +51,11 @@ BINARIES = {
     'optimize': AGENTS / 'tools/optimize',
     'session_name': CLAUDE / 'hooks/session_name',
 }
+# Hook scripts run from the linked skills (not built): name -> path.
+HOOK_SCRIPTS = {
+    'progress_answered': AGENTS / 'skills/progress-page/scripts/make_page.py',
+}
+HOOK_COMMANDS = {**BINARIES, **HOOK_SCRIPTS}
 # Every Omega hook is registered here, never by hand. Claude: (event, matcher or None, binary,
 # arguments, extra hook fields). The shell guard is a safety control, so a crash or timeout
 # blocks the call (`onFailure`, Claude Code >= 2.1.295); context hooks stay fail-open.
@@ -58,6 +63,10 @@ GUARD_HOOKS = (
     ('PreToolUse', 'Bash', 'shell_guard', ' --allow-clean', {'timeout': 5, 'onFailure': 'block'}),
     ('SessionStart', None, 'session_name', '', {'timeout': 5}),
     ('UserPromptSubmit', None, 'session_name', '', {'timeout': 5}),
+    ('UserPromptSubmit', None, 'progress_answered', ' --answered', {'timeout': 5}),
+    # Session activity for the progress hub (make_page.py --activity): background, never blocks the session.
+    *((event, None, 'progress_answered', ' --activity', {'timeout': 10, 'async': True})
+      for event in ('SessionStart', 'Stop', 'StopFailure', 'Notification', 'SessionEnd')),
 )
 # Codex hook groups (~/.codex/hooks.json): added when absent, never moved, because Codex keys
 # hook trust by position.
@@ -100,6 +109,7 @@ COMMANDS = {
     'Ω-run': BINARIES['run'],
     'Ω-inspect': BINARIES['run'],
     'Ω-prune': BINARIES['run'],
+    'omega-progress': HOOK_SCRIPTS['progress_answered'],  # make_page.py --serve
 }
 # Codex scans ~/.agents/skills natively; Claude sees only skills linked here.
 CLAUDE_SKIP_SKILLS = {'orchestration'}
@@ -448,8 +458,8 @@ def write_context_settings(apply):
     changed = False
     managed = [(event, matcher, binary, '', {}) for event, matcher, binary in CONTEXT_HOOKS] + list(GUARD_HOOKS)
     for event, matcher, binary, arguments, extra in managed:
-        wanted = {'type': 'command', 'command': str(BINARIES[binary]) + arguments, **extra}
-        changed |= ensure_hook(hooks.setdefault(event, []), matcher, BINARIES[binary], wanted)
+        wanted = {'type': 'command', 'command': str(HOOK_COMMANDS[binary]) + arguments, **extra}
+        changed |= ensure_hook(hooks.setdefault(event, []), matcher, HOOK_COMMANDS[binary], wanted)
     # Retired: the budget hook no longer gates tools (PreToolUse) and has no hard limit.
     budget = [{'type': 'command', 'command': str(BINARIES['context_budget'])}]
     kept = [group for group in hooks.get('PreToolUse', []) if group.get('hooks') != budget]

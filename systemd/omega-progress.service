@@ -1,0 +1,14 @@
+[Unit]
+Description=Omega: read-only HTTP view of the progress pages at http://omega.local:8765 (no token)
+
+[Service]
+ExecStart=%h/.local/bin/omega-progress 0.0.0.0:8765 --open
+# Exits when the network or the mDNS name is lost; systemd restarts it and republishes.
+Restart=on-failure
+RestartSec=5
+Nice=10
+MemoryMax=512M
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
