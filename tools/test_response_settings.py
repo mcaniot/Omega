@@ -224,7 +224,7 @@ class ResponseSettingsTest(unittest.TestCase):
             for name in re.findall(r'[Ll]oad `([a-z][a-z-]*)`|and `([a-z][a-z-]*)` for', source.read_text()):
                 self.assertIn(''.join(name), skills, source)
         for name in ('systematic-debugging', 'cpp-quality', 'progress-page', 'robotics-learning',
-                     'robotics-performance', 'robotics-validation', 'tool-output'):
+                     'robotics-performance', 'robotics-validation', 'review-loop', 'tool-output'):
             fields, _ = self.installer.frontmatter(ROOT / 'skills' / name / 'SKILL.md')
             self.assertEqual(fields['name'], name)
             self.assertTrue(fields['description'].startswith('Use when '), name)

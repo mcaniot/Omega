@@ -8,6 +8,11 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 
 ### Added
 
+- `review-loop` skill: review-fix loop on the user's own code. Each round a fresh read-only `Plan`
+  agent on Fable reports bugs, line reductions and readability fixes with `file:line`, confidence
+  and patch; the main session verifies, applies (bugs first), runs formatter, lint and tests, and
+  measures net lines removed. Stops with no bug and under 5 lines gained, after 4 rounds, or on a
+  recurring finding.
 - `progress-page`: the hub closes and cleans missions by itself. A mission is finished when its task
   file moves to `completed/`; every step done with the task still active for a day shows "À clôturer";
   finished missions leave the hub after 7 days and unreadable states after 14 (files are kept).
