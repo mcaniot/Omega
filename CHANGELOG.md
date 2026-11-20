@@ -85,6 +85,10 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 
 ### Changed
 
+- Robotics skills, from a review of DeepMind's robotics-antigravity-plugin: `systematic-debugging` adds the blind
+  video second opinion (a fresh worker sees only the failure video before any code) and exporting the compiled model of
+  Newton's MuJoCo solver before a contact hypothesis; `robotics-learning` forbids improvement claims from one seed or
+  unpaired runs (paired McNemar test); `robotics-validation` pairs candidate and backend comparisons on identical inputs.
 - `coder` gets one bounded step per run (about 5 files; larger plan steps are split) with the known
   `file:line` map in its brief, returns `status: partial` when the work grows beyond that, and
   stops at `maxTurns: 120`. Recorded runs of 60+ requests (whole plan steps, ~11 files, contexts

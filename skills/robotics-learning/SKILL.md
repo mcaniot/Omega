@@ -17,10 +17,12 @@ Environments (Isaac Lab and similar):
 
 Training and evaluation:
 - Diagnose from logged metrics (per-term rewards, episode length, success rate, value/entropy/KL, action saturation), not intuition. Check rewards, terminations, seeding and shapes before blaming the algorithm.
-- Keep train/eval parity: same observation pipeline, normalization statistics, action scaling, control rate and checkpoint. Evaluate several seeds and report variance.
+- Keep train/eval parity: same observation pipeline, normalization statistics, action scaling, control rate and checkpoint. Evaluate several seeds and report variance. Never claim an improvement from one seed or unpaired runs: compare candidates on the same seeds with a paired test (exact McNemar on discordant episodes).
 
 Imitation and datasets: verify timestamp alignment, FPS, action horizon/chunking, observation/action ordering, normalization statistics and the frame convention between recording, training and deployment.
 
 Sim-to-real: ground domain-randomization ranges in measurements; model actuation latency, action delay, actuator limits, sensor noise and control-rate jitter; keep safety limits and e-stop semantics identical to hardware. Simulation success never certifies hardware behavior; hardware runs need explicit authorization.
 
 Validate with the cheapest discriminating check (config/shape assertions, single-env step, short headless rollout) before training; load `robotics-validation` to choose further checks and `systematic-debugging` for a concrete failure. Use repository-provided Isaac Lab skills when present instead of copying them.
+
+Read references/lessons.md before acting.

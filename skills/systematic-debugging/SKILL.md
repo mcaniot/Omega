@@ -14,12 +14,14 @@ No fix before the root cause is established.
 
 Flaky or timing-dependent: measure the failure rate over bounded repeated runs; replace arbitrary sleeps with waits on the actual condition, with a timeout.
 
+Repeated physical failure on video: give a fresh worker only the rollout video (a contact sheet if it cannot read video), without code or expectations, and ask what happened; only then give another worker the videos, code and measurements to ask what to change.
+
 Domain diagnostics:
 - C++/threads: lifetimes, races, lock ordering, callback ownership and shutdown; use an available sanitizer or debugger on a bounded reproduction.
 - QP: solver status, dimensions, finite inputs, residuals, feasibility, scaling and active constraints. Do not loosen safety limits to make it converge.
 - Zenoh: endpoint/session configuration, delivery semantics, sample age, callback scheduling and serialization.
-- Isaac Lab/PhysX/Newton: selected backend and imported source, timestep/substeps, contact configuration, joint axes/order and asset conversion. Load only the relevant repository skill, such as diagnosing-joint-poses or setup-troubleshooting.
+- Isaac Lab/PhysX/Newton: selected backend and imported source, timestep/substeps, contact configuration, joint axes/order and asset conversion; with Newton's MuJoCo solver, export the compiled model (`save_to_mjcf`) and read it before a hypothesis on contacts, masses or gains. Load only the relevant repository skill, such as diagnosing-joint-poses or setup-troubleshooting.
 
-Do not repeat an unchanged failure. After two distinct failed approaches, or when each fix reveals a new problem elsewhere, stop: checkpoint evidence and escalate the design question (architect) instead of a third patch. Never substitute a plausible explanation for reproduction evidence.
+Do not repeat an unchanged failure. After two distinct failed approaches, or when each fix reveals a new problem elsewhere, stop: checkpoint evidence and escalate the design question to `Plan` instead of a third patch. Never substitute a plausible explanation for reproduction evidence.
 
 Read references/lessons.md before acting.
