@@ -71,6 +71,12 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
   page is refused: the follow-up adds its steps with `--add-step` in the same command, or creates a
   new page.
 
+### Removed
+
+- `context_budget` no longer blocks the first prompt after 1 h idle (cold-resume notice): it
+  stopped agents driven by another session and cost a round trip for a 13–15 % saving that
+  `/clear` and Claude Code's `idleCompaction` already give on demand.
+
 ## [1.1.0] - 2026-11-18
 
 ### Added

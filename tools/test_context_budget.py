@@ -1,5 +1,4 @@
-"""Context budget hook contracts: one checkpoint reminder per crossing; the only block is the
-cold-resume notice, once per idle period."""
+"""Context budget hook contracts: one checkpoint reminder per crossing, never a block."""
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -162,40 +161,10 @@ class ContextBudgetTest(unittest.TestCase):
         self.assertIn('Context 185k:', self.run_hook('PostToolUse')['hookSpecificOutput']['additionalContext'])
 
 
-    def test_cold_resume_blocks_once_per_idle_period(self):
-        # Gain (capsim replay of recorded Opus sessions): a restart from the task file instead of
-        # rewriting a cold 100k context writes ~35k instead of 100k tokens at the cache-write price.
+    def test_idle_session_prompt_is_never_blocked(self):
+        # A blocked prompt stops an agent fed by another session; the cache rewrite is cheaper.
         self.set_tokens(100_000, idle=7300)
-        block = self.run_hook('UserPromptSubmit', prompt='continue the review')
-        self.assertEqual(block['decision'], 'block')
-        self.assertIn('idle 2h01 with 100k tokens', block['reason'])
-        self.assertIn("/clear, then `'Ω-resume' demo`", block['reason'])  # the user need not know the task name
-        self.assertNotIn('continue the review', block['reason'])  # Claude Code appends it itself
         self.assertEqual(self.run_hook('UserPromptSubmit', prompt='continue the review'), {})
-        self.assertEqual(self.run_hook('PostToolUse'), {})  # never blocks a tool
-        self.set_tokens(100_000, idle=7400)  # a new idle period warns again
-        self.assertEqual(self.run_hook('UserPromptSubmit', prompt='x')['decision'], 'block')
-
-    def test_cold_resume_ignores_warm_small_or_undated_sessions(self):
-        self.set_tokens(100_000, idle=1800)
-        self.assertEqual(self.run_hook('UserPromptSubmit', prompt='x'), {})
-        self.set_tokens(40_000, idle=7300)
-        self.assertEqual(self.run_hook('UserPromptSubmit', prompt='x'), {})
-        self.set_tokens(100_000)
-        self.assertEqual(self.run_hook('UserPromptSubmit', prompt='x'), {})
-        self.set_tokens(100_000, idle=7300)
-        self.assertEqual(self.run_hook('UserPromptSubmit', prompt='x', agent_id='a1'), {})
-        env = {'OMEGA_CONTEXT_COLD_SECONDS': '10000'}
-        self.assertEqual(self.run_hook('UserPromptSubmit', env=env, prompt='x'), {})
-        # No existing task file named in the session: /clear would lose its state, so no block.
-        for task in (None, 'gone'):
-            self.set_tokens(100_000, idle=7300, task=task)
-            self.assertEqual(self.run_hook('UserPromptSubmit', prompt='x'), {}, task)
-        self.set_tokens(100_000, idle=7300)
-        # `claude -p --resume` or SDK: a block would end the run unanswered.
-        self.assertEqual(self.run_hook('UserPromptSubmit', env={'CLAUDE_CODE_ENTRYPOINT': 'sdk-cli'}, prompt='x'), {})
-        self.assertEqual(self.run_hook('UserPromptSubmit', env={'CLAUDE_CODE_ENTRYPOINT': 'cli'}, prompt='x')['decision'],
-                         'block')
 
 
 if __name__ == '__main__':

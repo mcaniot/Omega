@@ -201,7 +201,8 @@ Replay of the user's recorded Claude Code sessions, main conversation and subage
   per unit of work, but delegation adds work.
 - Requests after more than 1 h idle rewrite the whole context at the cache-write price: 35 % of all
   cache writes. Restarting at those points from the task file would have cut cost by 13–15 % on
-  69 Opus sessions; the [cold resume](hooks.md) notice now offers it.
+  69 Opus sessions; a notice that blocked the first idle prompt to offer it was removed, since a
+  blocked prompt stops agents driven by another session.
 
 ### Limits
 

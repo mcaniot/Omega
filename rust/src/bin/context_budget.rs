@@ -1,7 +1,6 @@
-//! Context budget hook: one checkpoint reminder per crossing, never a forced handoff (it breaks the
-//! flow). The only block is the cold-resume notice, once per idle period; resending the prompt
-//! continues. Reads only the transcript tail and fails open on any error. On PreCompact it also
-//! tells the summary what must survive.
+//! Context budget hook: one checkpoint reminder per crossing, never a block or a forced handoff (it
+//! breaks the flow). Reads only the transcript tail and fails open on any error. On PreCompact it
+//! also tells the summary what must survive.
 use serde_json::{Value, json};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -18,11 +17,6 @@ const COMPACT_MARK: &[u8] = b"\"isCompactSummary\":true";
 const FLOOR_SOFT_PERCENT: u64 = 69;
 const FLOOR_MIN_TOKENS: u64 = 50_000;
 const FLOOR_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 3600);
-// Prompt cache TTL of the main conversation on a Claude subscription (1 h) and the smallest context
-// worth a restart: capsim replay on recorded sessions, 60k gave the best saving per restart.
-const COLD_SECONDS: u64 = 3600;
-const COLD_TOKENS: u64 = 60_000;
-const TASK_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 const COMPACTED_NOTE: &str = "Context was compacted: earlier details are lossy. Run `'Ω-resume' [TASK]`, then re-read only what the next action needs.";
 const COMPACT_INSTRUCTIONS: &str = "Keep in the summary: the user's requests and corrections in their own words; the path of the active task file under ~/.agents/tasks/active/ and its next action; decisions and facts verified in this session; files changed and not yet committed; evidence paths and validation commands with their exit status; approaches that failed, so they are not retried. Leave out tool output bodies and file contents: they can be read again.";
 
@@ -44,24 +38,6 @@ fn compact_floor(home: &Path) -> Option<u64> {
     value["tokens"].as_u64().filter(|t| *t >= FLOOR_MIN_TOKENS)
 }
 
-/// Seconds since the Unix epoch of an RFC 3339 UTC timestamp (`2026-11-16T14:30:06.807Z`).
-fn epoch_seconds(stamp: &str) -> Option<i64> {
-    let b = stamp.as_bytes();
-    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' || !stamp.ends_with('Z') {
-        return None;
-    }
-    let num = |r: std::ops::Range<usize>| stamp.get(r)?.parse::<i64>().ok();
-    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
-    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    // Days from civil (Howard Hinnant), proleptic Gregorian.
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some((era * 146_097 + doe - 719_468) * 86_400 + hh * 3600 + mm * 60 + ss)
-}
-
 /// The last `max` bytes of the file.
 fn read_tail(path: &Path, max: u64) -> Option<(Vec<u8>, bool)> {
     let mut file = std::fs::File::open(path).ok()?;
@@ -72,8 +48,8 @@ fn read_tail(path: &Path, max: u64) -> Option<(Vec<u8>, bool)> {
     Some((tail, start > 0))
 }
 
-/// Context tokens and timestamp of the newest main-thread assistant message in the transcript tail.
-fn newest_usage(transcript: &Path) -> Option<(u64, Option<String>)> {
+/// Context tokens of the newest main-thread assistant message in the transcript tail.
+fn newest_usage(transcript: &Path) -> Option<u64> {
     let (tail, cut) = read_tail(transcript, TAIL_BYTES)?;
     let mut lines = tail.split(|&b| b == b'\n');
     if cut {
@@ -99,7 +75,7 @@ fn newest_usage(transcript: &Path) -> Option<(u64, Option<String>)> {
                 .iter()
                 .map(|k| usage[k].as_u64().unwrap_or(0))
                 .sum();
-            return Some((tokens, entry["timestamp"].as_str().map(str::to_owned)));
+            return Some(tokens);
         }
     }
     None
@@ -112,13 +88,14 @@ fn evaluate(payload: &Value) -> Value {
         .zip(payload["session_id"].as_str())
         .and_then(|(h, s)| ledger::state_file(h, "budget", s));
     let event = payload["hook_event_name"].as_str().unwrap_or("");
-    let tokens = || payload["transcript_path"].as_str().and_then(|p| newest_usage(Path::new(p))).map(|(tokens, _)| tokens);
+    let tokens = || payload["transcript_path"].as_str().and_then(|p| newest_usage(Path::new(p)));
     if event == "PreCompact" {
         // The newest usage is the context that triggered compaction: calibrate later sessions.
-        if payload["trigger"] == "auto" && payload.get("agent_id").is_none() {
-            if let Some((tokens, path)) = tokens().filter(|t| *t >= FLOOR_MIN_TOKENS).zip(home.as_deref().and_then(floor_file)) {
-                let _ = ledger::write_private(&path, json!({"tokens": tokens}).to_string().as_bytes());
-            }
+        if payload["trigger"] == "auto"
+            && payload.get("agent_id").is_none()
+            && let Some((tokens, path)) = tokens().filter(|t| *t >= FLOOR_MIN_TOKENS).zip(home.as_deref().and_then(floor_file))
+        {
+            let _ = ledger::write_private(&path, json!({"tokens": tokens}).to_string().as_bytes());
         }
         // Claude Code uses PreCompact stdout as instructions for the summary. Subagents have no
         // task file; instructions the user typed after /compact are left alone.
@@ -140,11 +117,6 @@ fn evaluate(payload: &Value) -> Value {
     // PreToolUse is ignored: settings written by earlier versions may still register it.
     if payload.get("agent_id").is_some() || !matches!(event, "PostToolUse" | "UserPromptSubmit") {
         return json!({});
-    }
-    if event == "UserPromptSubmit" {
-        if let Some(block) = cold_resume(payload, home.as_deref()) {
-            return block;
-        }
     }
     let (Some(tokens), Some(state)) = (tokens(), state) else { return json!({}) };
     let soft = limit("OMEGA_CONTEXT_SOFT", DEFAULT_SOFT);
@@ -169,55 +141,6 @@ fn evaluate(payload: &Value) -> Value {
             tokens / 1000
         ),
     }})
-}
-
-/// Cold resume: after more than COLD_SECONDS idle the prompt cache (1 h TTL) has expired, so the next
-/// request rewrites the whole context at the cache-write price (1 h write: 2x input; read: 0.05x on
-/// Opus/Sonnet 5.5, 0.1x elsewhere). Recorded Opus sessions: restarting from the task file instead
-/// saved 13-15 % of the cost (capsim replay). Blocks the first prompt of each idle period once;
-/// Claude Code appends the blocked prompt to the notice (`Original prompt:`); resending it continues.
-/// Built-in `idleCompaction` (100k+ tokens, compacts before expiry) is the automatic alternative.
-fn cold_resume(payload: &Value, home: Option<&Path>) -> Option<Value> {
-    // Interactive CLI only: a blocked `claude -p --resume` or SDK prompt would end the run unanswered.
-    if std::env::var("CLAUDE_CODE_ENTRYPOINT").is_ok_and(|e| e != "cli") {
-        return None;
-    }
-    let session = payload["session_id"].as_str()?;
-    let state = ledger::state_file(home?, "budget", &format!("cold-{session}"))?;
-    let transcript = Path::new(payload["transcript_path"].as_str()?);
-    let (tokens, stamp) = newest_usage(transcript)?;
-    let stamp = stamp?;
-    let last = epoch_seconds(&stamp)?;
-    let now = i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()).ok()?;
-    let idle = now - last;
-    if idle < limit("OMEGA_CONTEXT_COLD_SECONDS", COLD_SECONDS) as i64 || tokens < limit("OMEGA_CONTEXT_COLD_TOKENS", COLD_TOKENS) {
-        return None;
-    }
-    let warned = ledger::read_bounded(&state).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
-    if warned.is_some_and(|v| v["cold_warned_for"] == stamp.as_str()) {
-        return None; // Resent after the warning: continue in this session.
-    }
-    // Without a task file there is no cheap restart: /clear would lose the session's state.
-    let task = session_task(transcript, home?)?;
-    let _ = ledger::write_private(&state, json!({"cold_warned_for": stamp}).to_string().as_bytes());
-    Some(json!({"decision": "block", "reason": format!(
-        "Session idle {}h{:02} with {}k tokens of context: the prompt cache has expired, so this prompt would \
-         rewrite all {}k tokens to cache. Cheaper: /clear, then `'Ω-resume' {task}` and your prompt (check that \
-         ~/.agents/tasks/active/{task}.md is current). To continue here anyway, send the prompt again.",
-        idle / 3600, idle % 3600 / 60, tokens / 1000, tokens / 1000
-    )}))
-}
-
-/// Newest active task file named in the transcript (last TASK_SCAN_BYTES) that still exists.
-fn session_task(transcript: &Path, home: &Path) -> Option<String> {
-    let (tail, _) = read_tail(transcript, TASK_SCAN_BYTES)?;
-    let pattern = regex::bytes::Regex::new(r"tasks/active/([A-Za-z0-9][A-Za-z0-9._-]{0,100})\.md").ok()?;
-    let names: Vec<String> = pattern
-        .captures_iter(&tail)
-        .filter_map(|c| std::str::from_utf8(&c[1]).ok().map(str::to_owned))
-        .collect();
-    let active = home.join(".agents/tasks/active");
-    names.into_iter().rev().find(|name| active.join(format!("{name}.md")).is_file())
 }
 
 fn main() {
