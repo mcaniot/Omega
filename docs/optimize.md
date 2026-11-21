@@ -58,6 +58,8 @@ need a person or an agent to follow up.
 | Context size | Claude: input + cache creation + cache read tokens, deduplicated by message ID. Codex: recorded `last_token_usage.input_tokens` (cached input included; cumulative totals are not context size) |
 | Tool calls / results | Deduplicated by tool-use ID |
 | `tool_calls_per_request` | Per session; about 1.0 means no batching |
+| `shell_run_requests` | Requests in runs of at least 3 consecutive requests whose only tool calls are Bash (Claude only, within the analyzed records): an upper bound on the round trips one script could save, since a step may need the model to read the previous result |
+| `nested_tool_calls` | Calls made by Claude Code Code Mode code (`isVirtual` records). They are not requests and their results are not context: only the `REPL` result reaches the model |
 | Read overlap | Content returned again by different read commands or ranges; novel lines counted separately. Only the latest 2048 distinct line digests per session are kept, never source text. Lines under 32 bytes, images and failed reads are excluded |
 
 These are review indicators, not proof of context rot or stale reads. Image serialization is

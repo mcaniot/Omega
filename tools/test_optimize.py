@@ -508,6 +508,38 @@ class OptimizeTest(unittest.TestCase):
         row = self.force_row()
         self.assertEqual((row['tool_calls'], row['tool_errors']), (1, 1))
 
+    def test_code_mode_nested_calls_are_not_requests_or_context(self):
+        usage = {'input_tokens': 10, 'cache_creation_input_tokens': 20,
+                 'cache_read_input_tokens': 30, 'output_tokens': 5}
+        rows = [{'type': 'assistant', 'message': {'id': 'm1', 'usage': usage, 'content': [
+                    {'type': 'tool_use', 'id': 'toolu_1', 'name': 'REPL', 'input': {'code': 'x'}}]}},
+                {'type': 'user', 'message': {'content': [
+                    {'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': '(dispatched #1)'}]}},
+                {'type': 'assistant', 'isVirtual': True, 'message': {
+                    'id': 'v1', 'model': '<synthetic>', 'usage': dict.fromkeys(usage, 0), 'content': [
+                        {'type': 'tool_use', 'id': 'repl_1', 'name': 'Read', 'input': {'file_path': '/f'}}]}},
+                {'type': 'user', 'isVirtual': True, 'message': {'content': [
+                    {'type': 'tool_result', 'tool_use_id': 'repl_1', 'content': 'denied', 'is_error': True}]}}]
+        self.write_rows(rows)
+        row = self.force_row()
+        self.assertEqual((row['requests'], row['context_last'], row['tokens_per_request'], row['tool_calls'],
+                          row['tool_errors'], row['nested_tool_calls']), (1, 60, 65, 1, 0, 1))
+
+    def test_shell_run_requests_counts_runs_of_three_bash_only_requests(self):
+        def request(id, *names):
+            # One record per content block, as Claude Code writes them.
+            return [{'type': 'assistant', 'message': {'id': id, 'usage': {'input_tokens': 1}, 'content': [
+                {'type': 'tool_use', 'id': f'{id}-{n}', 'name': name, 'input': {}}]}}
+                    for n, name in enumerate(names)] or [
+                {'type': 'assistant', 'message': {'id': id, 'usage': {'input_tokens': 1}, 'content': []}}]
+        sequence = [('Bash',), ('Bash', 'Bash'), ('Bash',),      # run of 3
+                    ('Bash', 'Read'),                              # mixed request ends the run
+                    ('Bash',), ('Bash',),                          # run of 2: not counted
+                    (),                                            # text-only request
+                    ('Bash',), ('Bash',), ('Bash',), ('Bash',)]   # run of 4
+        self.write_rows([row for i, names in enumerate(sequence) for row in request(f'm{i}', *names)])
+        self.assertEqual(self.force_row()['shell_run_requests'], 7)
+
     def test_error_classification(self):
         cases = [
             ('Bash', {'command': 'ls'}, 'PreToolUse:Bash hook error: Unwrapped or noncanonical shell command', 'guard'),
@@ -629,6 +661,12 @@ class ReplayTest(unittest.TestCase):
         # calibration: 3500 result bytes over (2000-1000-10 output) = 990 tokens
         self.assertAlmostEqual(row['bytes_per_token'], 3500 / 990)
         self.assertEqual(row['segments'], 1)
+
+    def test_code_mode_nested_calls_are_not_replayed_as_requests(self):
+        rows = self.read_rows(self.source('y'))
+        nested = [dict(self.request('v', 0, [('repl_1', 'Read', {'file_path': '/src/a.rs'})]), isVirtual=True),
+                  dict(self.result('repl_1', ''), isVirtual=True)]
+        self.assertEqual(self.replay(rows[:2] + nested + rows[2:])['sessions'], self.replay(rows)['sessions'])
 
     def test_avoidable_reread_saves_result_minus_deny(self):
         # t2 is 3500 bytes = 990 tokens (calibrated net of output), replaced by 40: request c loses 950. 6030 - 950 = 5080.
@@ -761,7 +799,8 @@ class PrefixTest(unittest.TestCase):
 
     def test_prefix_instruction_chain_and_skills(self):
         self.session('p1', 'a', [self.message('a', 10, 500, 0), self.message('a', 10, 500, 0),
-                                 self.message('side', 9999, 0, 0, sidechain=True), self.message('b', 5, 0, 600)])
+                                 self.message('side', 9999, 0, 0, sidechain=True), self.message('b', 5, 0, 600),
+                                 dict(self.message('code-mode-nested', 0, 0, 0), isVirtual=True)])
         self.session('p1', 'b', [self.message('c', 20, 300, 400), self.message('d', 800, 0, 0)])
         self.session('p1', 'old', [self.message('o', 1, 0, 0)], age_days=40)
         self.session('bench-run', 'x', [self.message('x', 1, 0, 0)])

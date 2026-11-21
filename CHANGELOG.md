@@ -8,6 +8,10 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 
 ### Added
 
+- Mistral Vibe support: `~/.vibe/AGENTS.md` links to the shared instructions, the three workers
+  become Vibe subagents (`~/.vibe/agents/*.toml`), skills are read from `~/.agents/skills`, and
+  `shell_guard --vibe` guards `bash` and `process_start` through `~/.vibe/hooks.toml` in Vibe's
+  hook protocol (ask policies deny, since a Vibe hook cannot ask the user).
 - `review-loop` skill: review-fix loop on the user's own code. Each round a fresh read-only `Plan`
   agent on Fable reports bugs, line reductions and readability fixes with `file:line`, confidence
   and patch; the main session verifies, applies (bugs first), runs formatter, lint and tests, and
@@ -25,8 +29,17 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
   `items`; `--section 'TITLE::JSON'` adds or replaces one by title. The skill puts the requested
   result (table, verdict, artifact paths) on the page before the final answer.
 - `shell_guard` asks before `git stash` (except `list` and `show`).
+- `omega optimize`: `shell_run_requests` per session (requests in runs of at least 3 consecutive
+  Bash-only requests, the round trips one script could save; Claude only) and `nested_tool_calls`
+  (calls made by Claude Code's experimental Code Mode).
 
 ### Fixed
+
+- Claude Code Code Mode (experimental, measured on 2.1.330). `context_guard` no longer records a
+  Read made by Code Mode code as "in context" nor refuses it as a re-read: the script, not the
+  model, receives those lines (a later Read was refused although the model had never seen them).
+  `omega optimize` (audit, `replay`, `prefix`) ignores the virtual records of nested calls, which
+  were counted as zero-context requests.
 
 - Whole-repository review (4 rounds). `shell_guard`: the command after wrapper options, every
   `--shell`/`--shell=` value, the text after `--` and `--native-only` are all checked; a `git` mask

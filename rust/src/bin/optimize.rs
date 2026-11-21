@@ -58,6 +58,8 @@ fn audit(
     let mut compactions = HashSet::new();
     let mut compaction_at = Vec::new();
     let mut malformed = 0;
+    let mut nested_tool_calls = 0;
+    let mut shell_only: HashMap<String, bool> = HashMap::new();
     let mut project = String::new();
     let mut index = 0;
     loop {
@@ -101,6 +103,14 @@ fn audit(
                     .unwrap_or_else(|| index.to_string()),
             );
         }
+        // Code Mode: calls made by REPL code are virtual records, not requests; only the REPL
+        // result reaches the context.
+        if row["isVirtual"] == true {
+            nested_tool_calls += row["message"]["content"].as_array().into_iter().flatten()
+                .filter(|block| block["type"] == "tool_use").count();
+            continue;
+        }
+        let mut message_id = None;
         if row["type"] == "assistant" && row["message"]["usage"].is_object() {
             let usage = &row["message"]["usage"];
             let tokens = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]
@@ -113,7 +123,8 @@ fn audit(
                 .map(str::to_owned)
                 .unwrap_or_else(|| index.to_string());
             // Transcripts repeat assistant records per message id: the last record wins, counted once.
-            messages.insert(id, (index, context, row["timestamp"].clone(), tokens));
+            messages.insert(id.clone(), (index, context, row["timestamp"].clone(), tokens));
+            message_id = Some(id);
         }
         if !matches!(row["type"].as_str(), Some("assistant" | "user")) {
             continue;
@@ -121,6 +132,10 @@ fn audit(
         if let Some(blocks) = row["message"]["content"].as_array() {
             for block in blocks {
                 if block["type"] == "tool_use" {
+                    // Codex records calls apart from usage, so only Claude requests are classified.
+                    if let Some(message) = &message_id {
+                        *shell_only.entry(message.clone()).or_insert(true) &= block["name"] == "Bash";
+                    }
                     if let Some(id) = block["id"].as_str() {
                         calls.insert(id.to_owned(), block.clone());
                         call_order.entry(id.to_owned()).or_insert(index);
@@ -135,6 +150,20 @@ fn audit(
     }
     let mut ordered: Vec<_> = messages.values().collect();
     ordered.sort_by_key(|v| v.0);
+    // Round trips one script could save: requests in runs of at least 3 consecutive Bash-only requests.
+    let mut shell_flags: Vec<_> = messages.iter().map(|(id, v)| (v.0, shell_only.get(id) == Some(&true))).collect();
+    shell_flags.sort();
+    let (mut shell_run_requests, mut run) = (0, 0);
+    for shell in shell_flags.iter().map(|flag| flag.1).chain([false]) {
+        if shell {
+            run += 1;
+            continue;
+        }
+        if run >= 3 {
+            shell_run_requests += run;
+        }
+        run = 0;
+    }
     let mut signatures = HashSet::new();
     let mut repeated = 0;
     let mut large_unbounded_reads = 0;
@@ -241,6 +270,8 @@ fn audit(
             "tool_calls": new_calls,
             // Batching: every request re-reads the whole context, so ~1.0 means no parallel calls.
             "tool_calls_per_request": new_calls as f64 / ordered.len().max(1) as f64,
+            "shell_run_requests": shell_run_requests,
+            "nested_tool_calls": nested_tool_calls,
             "tool_errors": results.values().filter(|r| r["is_error"] == true).count(),
             "error_classes": error_classes.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
             "workflow_errors": error_classes[..4].iter().map(|(_, v)| v).sum::<u64>(),

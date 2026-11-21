@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import tomllib
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -215,6 +216,15 @@ class ReadLedgerTest(unittest.TestCase):
         self.assertEqual(self.read(agent_id='a1'), {})
         self.assertEqual(self.read(session_id='other'), {})
 
+    def test_code_mode_nested_read_is_bounded_but_neither_recorded_nor_refused(self):
+        nested = {'tool_use_id': 'repl_ec1d9892-9b2e-4264-a7d3-22cfeb208806'}
+        self.assertEqual(self.seen(**nested)['hookSpecificOutput']['updatedInput']['limit'], 200)
+        self.assertFalse(self.ledger.exists())  # the script, not the context, received these lines
+        self.assertEqual(self.read(1, 200, tool_use_id='toolu_01'), {})
+        self.seen(1, 200, tool_use_id='toolu_01')
+        self.assertEqual(self.read(1, 200, **nested), {})  # a script may re-read what the context holds
+        self.assertIn('already in context', self.reason(self.read(1, 200, tool_use_id='toolu_02')))
+
     def test_corrupt_or_unsafe_ledger_fails_open(self):
         self.ledger.parent.mkdir(parents=True)
         for garbage in (b'\xff{not json', b'[1,2]', b'x' * (2 << 20)):
@@ -332,6 +342,38 @@ class ContextSettingsTest(unittest.TestCase):
             'type': 'command', 'command': str(self.installer.BINARIES['shell_guard']), 'timeout': 5}]}
         self.assertEqual(json.loads(dest.read_text())['hooks']['PreToolUse'], [other, ours])
         self.assertEqual(list(self.installer.write_codex_hooks(True)), [])
+
+    def test_vibe_hook_is_appended_once_and_user_entries_stay_verbatim(self):
+        self.installer.VIBE = self.home / '.vibe'
+        self.installer.VIBE.mkdir()
+        dest = self.installer.VIBE / 'hooks.toml'
+        original = '# mine\n[[hooks]]\nname = "lint"\ntype = "post_agent"\ncommand = "true"\n'
+        dest.write_text(original)
+        self.assertEqual(len(list(self.installer.write_vibe_hooks(False))), 1)
+        self.assertEqual(dest.read_text(), original)
+        list(self.installer.write_vibe_hooks(True))
+        self.assertTrue(dest.read_text().startswith(original))
+        hooks = tomllib.loads(dest.read_text())['hooks']
+        self.assertEqual(hooks[1], self.installer.VIBE_HOOK)
+        self.assertIn('--vibe', hooks[1]['command'])
+        self.assertEqual(list(self.installer.write_vibe_hooks(True)), [])
+        changed = dest.read_text().replace('timeout = 5.0', 'timeout = 9.0')
+        dest.write_text(changed)
+        self.assertTrue(list(self.installer.write_vibe_hooks(True))[0][1].startswith('CONFLICT'))
+        self.assertEqual(dest.read_text(), changed)
+
+    def test_vibe_agents_are_subagents_and_custom_files_stay_untouched(self):
+        self.installer.VIBE = self.home / '.vibe'
+        agents = self.installer.VIBE / 'agents'
+        agents.mkdir(parents=True)
+        (agents / 'coder.toml').write_text('description = "mine"\nactive_model = "x"\n')
+        results = dict(self.installer.write_vibe_agents(True))
+        self.assertTrue(results[agents / 'coder.toml'].startswith('CONFLICT'))
+        scout = tomllib.loads((agents / 'scout.toml').read_text())
+        self.assertEqual(scout['agent_type'], 'subagent')
+        self.assertTrue(scout['description'] and scout['instructions'])
+        self.assertEqual({status for _, status in self.installer.write_vibe_agents(True)} - {'ok'},
+                         {'CONFLICT (custom agent, left untouched)'})
 
     def test_invalid_settings_do_not_write(self):
         self.settings.write_text('{invalid')

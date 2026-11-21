@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy this repository into ~/.agents, ~/.claude and ~/.codex.
+"""Deploy this repository into ~/.agents, ~/.claude, ~/.codex and ~/.vibe (Mistral Vibe).
 
 Dry run by default; --apply writes. Text sources are symlinked so edits here are
 live. The Rust binaries (rust/) are built with cargo and installed as real 0700
@@ -7,7 +7,8 @@ files; runtime state (tasks, evidence) also stays real files in ~/.agents. An
 existing file, directory or link is replaced only when it already links into this
 repository or has identical content; anything else is reported as a conflict.
 Codex agent files are rewritten only in the exact shape this installer writes, and
-only retired Omega agents (RETIRED_AGENTS) are ever removed.
+only retired Omega agents (RETIRED_AGENTS) are ever removed. Vibe agent files and the
+Vibe hook entry follow the same rule.
 """
 import argparse
 import json
@@ -25,6 +26,7 @@ HOME = Path.home()
 AGENTS = HOME / '.agents'
 CLAUDE = HOME / '.claude'
 CODEX = HOME / '.codex'
+VIBE = HOME / '.vibe'
 
 # Codex settings per agent: (model, reasoning effort). Codex subagents inherit the
 # parent turn's sandbox and approvals; an agent file cannot narrow them, so no
@@ -73,6 +75,15 @@ GUARD_HOOKS = (
 CODEX_HOOKS = (
     ('PreToolUse', 'Bash', 'shell_guard', {'timeout': 5}),
 )
+# Vibe hook entry (~/.vibe/hooks.toml). Vibe reads replies in its own shape (--vibe) and cannot ask the
+# user from a hook; background commands go through process_start, which `bash` alone does not match.
+# strict: a crash or timeout denies the call, as onFailure does for Claude.
+VIBE_HOOK_NAME = 'omega-shell-guard'
+VIBE_HOOK = {'name': VIBE_HOOK_NAME, 'type': 'pre_tool', 'match': 're:bash|process_start', 'strict': True,
+             'timeout': 5.0, 'command': f'{shlex.quote(str(BINARIES["shell_guard"]))} --allow-clean --vibe'}
+# Keys of Vibe agent files written by this installer: subagents on the session model, read-only roles
+# relying on their instructions as in Codex.
+VIBE_AGENT_KEYS = {'description', 'agent_type', 'instructions'}
 # Claude context hooks: (event, matcher or None, binary).
 CONTEXT_HOOKS = (
     ('PreToolUse', 'Read', 'context_guard'),
@@ -111,7 +122,7 @@ COMMANDS = {
     'Ω-prune': BINARIES['run'],
     'omega-progress': HOOK_SCRIPTS['progress_answered'],  # make_page.py --serve
 }
-# Codex scans ~/.agents/skills natively; Claude sees only skills linked here.
+# Codex and Vibe scan ~/.agents/skills natively; Claude sees only skills linked here.
 CLAUDE_SKIP_SKILLS = {'orchestration'}
 
 
@@ -148,6 +159,7 @@ def deployable(root):
 def links():
     yield AGENTS / 'AGENTS.md', REPO / 'AGENTS.md'
     yield CODEX / 'AGENTS.md', AGENTS / 'AGENTS.md'
+    yield VIBE / 'AGENTS.md', AGENTS / 'AGENTS.md'
     yield from response_links()
     for skill in sorted((REPO / 'skills').iterdir()):
         yield AGENTS / 'skills' / skill.name, skill
@@ -354,6 +366,52 @@ def write_codex_agents(apply):
             yield config, ('removed' if apply else 'would remove') + f' legacy [agents.{",".join(removed)}]'
 
 
+def vibe_agent(path):
+    fields, body = frontmatter(path)
+    return '\n'.join([f'description = {json.dumps(fields["description"], ensure_ascii=False)}',
+                      'agent_type = "subagent"',
+                      f'instructions = {json.dumps(body, ensure_ascii=False)}']) + '\n'
+
+
+def write_vibe_agents(apply):
+    """Write Vibe subagent profiles; a file in another shape is a user agent and stays untouched."""
+    for agent in sorted((REPO / 'agents').glob('*.md')):
+        dest = VIBE / 'agents' / f'{agent.stem}.toml'
+        text = vibe_agent(agent)
+        if dest.is_file() and not dest.is_symlink() and dest.read_text() == text:
+            yield dest, 'ok'
+            continue
+        try:
+            ours = not dest.exists() or (not dest.is_symlink() and set(tomllib.loads(dest.read_text())) <= VIBE_AGENT_KEYS)
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            ours = False
+        if dest.is_symlink() or not ours:
+            yield dest, 'CONFLICT (custom agent, left untouched)'
+            continue
+        if apply:
+            write_atomic(dest, text)
+        yield dest, 'written' if apply else 'would write'
+
+
+def write_vibe_hooks(apply):
+    """Append our hook entry to ~/.vibe/hooks.toml; other entries and comments stay verbatim."""
+    dest = VIBE / 'hooks.toml'
+    text = dest.read_text() if dest.exists() else ''
+    hooks = tomllib.loads(text).get('hooks', [])
+    current = next((hook for hook in hooks if hook.get('name') == VIBE_HOOK_NAME), None)
+    if current == VIBE_HOOK:
+        return
+    if current is not None:
+        yield dest, f'CONFLICT ({VIBE_HOOK_NAME} differs, left untouched)'
+        return
+    entry = '[[hooks]]\n' + ''.join(f'{key} = {json.dumps(value)}\n' for key, value in VIBE_HOOK.items())
+    text = (text.rstrip('\n') + '\n\n' if text.strip() else '') + entry
+    tomllib.loads(text)  # never write an unparsable config
+    if apply:
+        write_atomic(dest, text)
+    yield dest, 'written' if apply else 'would write'
+
+
 def write_response_settings(apply):
     """Select versioned response instructions without resetting user settings."""
     codex = CODEX / 'config.toml'
@@ -497,7 +555,7 @@ def budget():
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Deploy this repository into ~/.agents, ~/.claude and ~/.codex.')
+    parser = argparse.ArgumentParser(description='Deploy this repository into ~/.agents, ~/.claude, ~/.codex and ~/.vibe.')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--apply', action='store_true', help='write changes (default is a dry run)')
     mode.add_argument('--budget', action='store_true', help='print always-loaded context size in bytes')
@@ -533,8 +591,10 @@ def main():
         if not any(status.startswith('CONFLICT') for _, status in binaries):
             results += list(write_context_settings(args.apply))
             results += list(write_codex_hooks(args.apply))
+            results += list(write_vibe_hooks(args.apply))
         results += list(install_commands(args.apply))
         results += list(write_codex_agents(args.apply))
+        results += list(write_vibe_agents(args.apply))
     for dest, status in results:
         if status != 'ok':
             print(f'{status:12s} {dest}')
