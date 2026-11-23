@@ -6,7 +6,8 @@ What omega saves, at two levels:
   reproducible synthetic workloads. Deterministic, no model call; it guards the binaries against
   regressions.
 - [**End to end**](#end-to-end): cost, turns, wall time and correctness of real model sessions,
-  in headless A/B runs and in recorded sessions. This is what the bill reflects.
+  in headless A/B runs (Claude Code and Mistral Vibe) and in recorded sessions. This is what the
+  bill reflects.
 
 The tool-output saving is large, but tool output is a small share of a session's cost, which is
 dominated by cache reads and writes of the whole context and by subagents.
@@ -145,10 +146,51 @@ hash. History of the earlier measurements: [Context reliability](context-reliabi
 
 ## End to end
 
+### Claude Code and Mistral Vibe
+
+Measured on 2026-11-23: Claude Code with Opus 5.5 (`claude -p`) and Mistral Vibe 3.1.3 with Mistral
+Medium 3.5 (`vibe -p --auto-approve`), headless, with and without omega. One session per arm and
+repetition solves the same 9 tasks as below, with hidden checks: the 5 generic ones and 4 robotics
+ones (quaternion order against a contract, a joint-limit trap whose limit table must not change,
+dt/decimation with the simulator constants fixed, observation order against a contract). The
+harness of 2026-11-16 was lost, so the robotics tasks were rewritten: compare with the tables
+below only loosely. Arms run 4 at a time.
+
+- Plain Claude Code: `--safe-mode`. Plain Vibe: `HOME` and `VIBE_HOME` point to empty
+  directories holding only Vibe's `config.toml`, so no AGENTS.md, skills, subagents or hook.
+  Setting `VIBE_HOME` alone is not enough: Vibe still lists the skills in `~/.agents/skills`.
+- omega arms: the installed setup (`~/.claude`, `~/.vibe`).
+
+| Arm | Correct | Cost (USD) | Turns | Input tokens (uncached) | Output | Wall (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain Claude Code | 27/27 | 0.202 | 11.3 | — | 2,839 | 37 |
+| Claude Code + omega | 27/27 | 0.228 | 8.3 | — | 2,585 | 31 |
+| Change | = | +13 % | −26 % | | −9 % | −16 % |
+| Plain Vibe | 45/45 | — | 43.8 | 1,757,539 (85,116) | 5,910 | 213 |
+| Vibe + omega | 45/45 | — | 46.6 | 1,699,252 (65,358) | 7,158 | 238 |
+| Change | = | | +6 % | −3 % (−23 %) | +21 % | +12 % |
+
+- **Claude Code:** omega takes fewer turns and less time, but costs 13 % more (per repetition
+  +7 %, +23 %, +11 %): its configuration prefix adds about 3.9k cache-written tokens per session
+  (17,350 vs 13,429), and the plain arm needed only 9–13 turns. Cache reads are equal (≈ 187k).
+- **Vibe:** Vibe reports `cost_usd` 0 on a subscription, so tokens are compared. Mistral Medium
+  makes one tool call per turn (41–60 calls per session in both arms), and omega does not change
+  that. omega's hook does run (commands go through `Ω-run`), but it doubles the system prompt
+  (11.3k → 23.0k tokens per request). Uncached input is 23 % lower, output 21 % higher, turns and
+  wall time slightly higher (one omega session took 61 turns and 452 s).
+- Vibe means are over 5 paired repetitions (0, 2, 10, 11, 12). Repetitions 0–2 ran with a 60-turn cap,
+  and in repetition 1 Vibe + omega hit it before writing its answers (5/9, the 5 code fixes were
+  correct); the following repetitions used a 100-turn cap. Three later sessions stopped on
+  Vibe's plan quota (`model_billing_denied`) and are excluded, as is repetition 1.
+- Three Claude repetitions and five Vibe ones: differences under about 10–15 % are within
+  run-to-run spread. The tasks are short and rarely produce large outputs, where omega's tools act.
+
+### Claude Code, earlier runs
+
 Measured on 2026-11-16 with Opus 5.5 (`claude -p`, headless). Costs are the API-equivalent
 `total_cost_usd` that Claude Code reports, not a subscription bill.
 
-### Headless A/B
+#### Headless A/B
 
 One session per arm and repetition solves 9 independent tasks with hidden checks (5 generic: build
 log, NaN log, diff review, code navigation, edit loop; 4 robotics: quaternion frame, joint-limit

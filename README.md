@@ -26,7 +26,9 @@ sessions against plain Claude Code (Opus 5.5, same 9 tasks, all solved by both),
 setup (tools and instructions) used half the turns and a third less wall time; cost was 24 % lower
 on average, but with 3 repetitions that cost gap is not yet statistically solid. With the same
 instructions on both sides the cost is equal (+8 %, within noise): the end-to-end saving comes from
-the instructions; the tools bound large outputs ([benchmark](docs/benchmark.md)).
+the instructions; the tools bound large outputs. A re-run on 2026-11-23 with rewritten robotics
+tasks gave omega 26 % fewer turns but 13 % more cost on Claude Code; on Mistral Vibe, omega gave no
+clear gain (+6 % turns, −3 % input tokens, +21 % output), all tasks solved in both arms ([benchmark](docs/benchmark.md)).
 
 ## How it works
 

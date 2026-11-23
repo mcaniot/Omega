@@ -8,6 +8,10 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 
 ### Added
 
+- End-to-end benchmark with Mistral Vibe (2026-11-23, [Benchmark](docs/benchmark.md#claude-code-and-mistral-vibe)):
+  9 tasks per headless session, Claude Code and Vibe with and without omega, all solved. Claude Code:
+  −26 % turns, −16 % wall time, +13 % cost. Vibe (Mistral Medium 3.5): +6 % turns, −23 % uncached
+  input, +21 % output; omega doubles Vibe's system prompt.
 - Mistral Vibe support: `~/.vibe/AGENTS.md` links to the shared instructions, the three workers
   become Vibe subagents (`~/.vibe/agents/*.toml`), skills are read from `~/.agents/skills`, and
   `shell_guard --vibe` guards `bash` and `process_start` through `~/.vibe/hooks.toml` in Vibe's
