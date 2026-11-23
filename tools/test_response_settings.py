@@ -260,6 +260,7 @@ class InstallerSafetyTest(unittest.TestCase):
         self.assertFalse((self.tmp / 'bin/run').exists())
         self.installer.CLAUDE = self.tmp / '.claude'
         self.installer.CODEX = self.tmp / '.codex'
+        self.installer.VIBE = self.tmp / '.vibe'
         self.installer.HOME = self.tmp
         self.installer.AGENTS = self.tmp / '.agents'
         with patch.object(self.installer, 'install_binaries', return_value=iter(rows)), \
@@ -269,10 +270,13 @@ class InstallerSafetyTest(unittest.TestCase):
                 patch.object(self.installer, 'remove_retired_read', return_value=iter(())), \
                 patch.object(self.installer, 'install_commands', return_value=iter(())), \
                 patch.object(self.installer, 'write_codex_agents', return_value=iter(())), \
+                patch.object(self.installer, 'write_vibe_agents', return_value=iter(())), \
                 patch.object(self.installer, 'write_context_settings') as claude_hooks, \
                 patch.object(self.installer, 'write_codex_hooks') as codex_hooks, \
+                patch.object(self.installer, 'write_vibe_hooks') as vibe_hooks, \
                 patch.object(self.installer.sys, 'argv', ['install.py', '--apply']), \
                 patch('builtins.print'):
             self.assertEqual(self.installer.main(), 1)
         claude_hooks.assert_not_called()
         codex_hooks.assert_not_called()
+        vibe_hooks.assert_not_called()

@@ -37,15 +37,16 @@ What each source is for:
 Where the installer puts it:
 
 - `AGENTS.md` → `~/.agents/AGENTS.md`; `~/.claude/CLAUDE.md` imports it and
-  `~/.codex/AGENTS.md` links to it.
+  `~/.codex/AGENTS.md` and `~/.vibe/AGENTS.md` (Mistral Vibe) link to it.
 - `prompts/codex.md` → `~/.codex/instructions.md` (link), selected by `model_instructions_file`.
 - `output-styles/final-only.md` → `~/.claude/output-styles/final-only.md` (link), selected by
   `outputStyle`.
 - `themes/omega-theme/` → `~/.claude/skills/omega-theme` (link), loaded as a plugin; it sets the desktop
   app colours and backdrop at session start, only with `--omega-theme`. `hooks/make-colors.js` is
   the unmodified helper from Claude Code's `plugin-authoring` skill; `hooks/logo.js` is generated.
-- `agents/*.md` → `~/.claude/agents/` (links) and `~/.codex/agents/*.toml` (generated).
-- `skills/` → `~/.agents/skills/` (Codex scans it) and `~/.claude/skills/` (links).
+- `agents/*.md` → `~/.claude/agents/` (links), `~/.codex/agents/*.toml` and `~/.vibe/agents/*.toml`
+  (generated; Vibe subagents `agent_type = "subagent"` on the session model).
+- `skills/` → `~/.agents/skills/` (Codex and Vibe scan it) and `~/.claude/skills/` (links).
 - `rust/` → real 0700 files: `~/.agents/tools/robot-exec/native/run`,
   `~/.agents/tools/{shell_guard,context_guard,context_budget,optimize}` and
   `~/.claude/hooks/session_name`.
@@ -80,3 +81,5 @@ to Codex.
 - **Codex:** subagents inherit the parent turn's sandbox and approvals (including `/permissions`,
   `--yolo`); an agent file cannot narrow them, so no `sandbox_mode` is generated. Read-only is
   instruction-only unless the parent session itself runs `--sandbox read-only`.
+- **Vibe:** custom subagents run with the session's hooks and can only narrow its tool rules; no
+  tool rule is generated, so read-only is instruction-only.

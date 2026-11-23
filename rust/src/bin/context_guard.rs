@@ -59,11 +59,18 @@ fn read_range(payload: &Value, file: &str, metadata: &std::fs::Metadata) -> Opti
     (end >= start).then_some((start, end))
 }
 
+/// Subagents have their own context. A Read made by Code Mode code (`tool_use_id` "repl_…",
+/// measured on Claude Code 2.1.330) returns to the script, which decides what reaches the context.
+fn untracked(payload: &Value) -> bool {
+    payload.get("agent_id").is_some()
+        || payload["tool_use_id"].as_str().is_some_and(|id| id.starts_with("repl_"))
+}
+
 /// Deny a re-read only when every requested line is in context and the file is unchanged.
 /// Nothing is recorded here: `record_read` does it once the Read has succeeded.
 fn ledger_check(payload: &Value, file: &str, metadata: &std::fs::Metadata) -> Option<Value> {
-    if payload.get("agent_id").is_some() {
-        return None; // Subagents have their own context.
+    if untracked(payload) {
+        return None;
     }
     let state = session_ledger(payload)?;
     let (start, end) = read_range(payload, file, metadata)?;
@@ -75,7 +82,7 @@ fn ledger_check(payload: &Value, file: &str, metadata: &std::fs::Metadata) -> Op
 /// PostToolUse of a successful Read: its range is now in context. The payload carries the
 /// input actually run, including a limit set by the PreToolUse bound.
 fn record_read(payload: &Value) {
-    if payload.get("agent_id").is_some() {
+    if untracked(payload) {
         return;
     }
     let (Some(state), Some(file)) = (session_ledger(payload), payload["tool_input"]["file_path"].as_str()) else {

@@ -4,7 +4,7 @@
 </h1>
 
 <p align="center">
-  A small, versioned agent setup for Claude Code and Codex that keeps the context window clean.
+  A small, versioned agent setup for Claude Code, Codex and Mistral Vibe that keeps the context window clean.
 </p>
 
 ## Why

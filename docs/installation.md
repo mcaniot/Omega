@@ -43,7 +43,7 @@ Keep this checkout on a branch that contains these files. To update, pull, run t
   models, permissions or hooks. A different existing Codex `model_instructions_file` is reported
   as a conflict. Model caches may regenerate and do not control these overrides. Tool displays and
   required approval prompts remain visible.
-- An existing Codex role file is rewritten only if it has the exact shape the installer writes.
+- An existing Codex or Vibe role file is rewritten only if it has the exact shape the installer writes.
 - Only retired Omega roles listed in `RETIRED_AGENTS`, their legacy `[agents.*]` registrations and
   dangling links are removed. Other agent files, TOML and configuration are never deleted.
 

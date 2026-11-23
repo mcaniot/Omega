@@ -640,8 +640,11 @@ impl Decision {
         Decision { kind, reason, rewrite: None, updated: None }
     }
 
-    fn render(decision: Option<&Decision>) -> String {
+    fn render(decision: Option<&Decision>, vibe: bool) -> String {
         let Some(decision) = decision else { return "{}".to_string() };
+        if vibe {
+            return Self::render_vibe(decision);
+        }
         let mut out = String::from(r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"#);
         json_string(decision.kind, &mut out);
         out.push_str(r#","permissionDecisionReason":"#);
@@ -655,6 +658,32 @@ impl Decision {
         out.push_str("}}");
         out
     }
+
+    /// Mistral Vibe `pre_tool` response. Vibe ignores unknown fields, so the Claude shape would read
+    /// as an allow; it cannot ask the user from a hook, so an ask policy denies.
+    fn render_vibe(decision: &Decision) -> String {
+        let mut out = String::from("{");
+        match (decision.kind, &decision.updated) {
+            ("allow", Some(updated)) => {
+                out.push_str(r#""hook_specific_output":{"tool_input":"#);
+                out.push_str(updated);
+                out.push_str(r#"},"system_message":"#);
+                json_string(AUTO_WRAP_NOTE, &mut out);
+            }
+            ("allow", None) => {}
+            (kind, _) => {
+                out.push_str(r#""decision":"deny","reason":"#);
+                let reason = if kind == "ask" {
+                    format!("{} Vibe hooks cannot ask for approval: ask the user to run it themselves.", decision.reason)
+                } else {
+                    decision.reason.clone()
+                };
+                json_string(&reason, &mut out);
+            }
+        }
+        out.push('}');
+        out
+    }
 }
 
 struct Guard {
@@ -662,6 +691,8 @@ struct Guard {
     optimize: String,
     guidance: String,
     allow_clean: bool,
+    /// Mistral Vibe: its hook matcher selects the shell tools, and replies use its protocol.
+    vibe: bool,
 }
 
 /// `os.path.expanduser('~' + rest)`.
@@ -699,11 +730,11 @@ impl Guard {
         false
     }
 
-    fn new(allow_clean: bool) -> Self {
+    fn new(allow_clean: bool, vibe: bool) -> Self {
         let native = expanduser("/.agents/tools/robot-exec/native/run");
         let optimize = expanduser("/.agents/tools/optimize");
         let guidance = GUIDANCE_TAIL.replace("{NATIVE}", &native);
-        Guard { native, optimize, guidance, allow_clean }
+        Guard { native, optimize, guidance, allow_clean, vibe }
     }
 
     /// Outcome of a fully checked, policy-clean wrapper call.
@@ -798,13 +829,13 @@ impl Guard {
         }
     }
 
-    /// Claude only: run the wrapped form of an unwrapped command instead of denying it, when that
+    /// Claude and Vibe: run the wrapped form of an unwrapped command instead of denying it, when that
     /// exact form would be allowed had the model written it. Saves one full-context round trip.
     fn auto_wrap(&self, decision: Option<Decision>, raw: &[u8]) -> Option<Decision> {
         let wrapped = decision.as_ref().and_then(|d| d.rewrite.clone()).filter(|_| self.allow_clean);
         let updated = wrapped.and_then(|wrapped| {
             let mut payload = serde_json::from_slice::<serde_json::Value>(raw).ok()?;
-            if payload["tool_name"] != "Bash" || !payload["tool_input"]["command"].is_string() {
+            if (!self.vibe && payload["tool_name"] != "Bash") || !payload["tool_input"]["command"].is_string() {
                 return None;
             }
             if !self.check(&wrapped).is_some_and(|d| d.kind == "allow") {
@@ -1288,7 +1319,7 @@ impl Guard {
         let Some(Json::Str(tool)) = payload.get("tool_name") else {
             return self.denied("Invalid hook input.");
         };
-        if !matches!(tool.as_str(), "Bash" | "exec_command" | "shell_command") {
+        if !self.vibe && !matches!(tool.as_str(), "Bash" | "exec_command" | "shell_command") {
             return None;
         }
         let tool_input = payload.get("tool_input");
@@ -1391,10 +1422,11 @@ impl Guard {
 }
 
 fn run() -> String {
-    let guard = Guard::new(std::env::args().nth(1).as_deref() == Some("--allow-clean"));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let guard = Guard::new(args.iter().any(|a| a == "--allow-clean"), args.iter().any(|a| a == "--vibe"));
     let mut input = Vec::new();
     if std::io::stdin().read_to_end(&mut input).is_err() {
-        return Decision::render(guard.denied("Guard internal error (OSError).").as_ref());
+        return Decision::render(guard.denied("Guard internal error (OSError).").as_ref(), guard.vibe);
     }
     let parsed = std::str::from_utf8(&input).map_err(|_| Fail::Invalid).and_then(parse_json);
     let decision = match parsed {
@@ -1402,7 +1434,7 @@ fn run() -> String {
         Err(Fail::Invalid) => guard.denied("Invalid hook JSON."),
         Err(Fail::Recursion) => guard.denied("Guard internal error (RecursionError)."),
     };
-    Decision::render(decision.as_ref())
+    Decision::render(decision.as_ref(), guard.vibe)
 }
 
 fn main() {

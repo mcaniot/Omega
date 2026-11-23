@@ -274,6 +274,26 @@ class GuardTest(unittest.TestCase):
         result = self.call(shlex.join([NATIVE, 'prune', '--apply']))
         self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'ask')
 
+    def test_vibe_protocol_denies_asks_and_rewrites_in_its_own_shape(self):
+        def vibe(command, tool='file_system.bash'):
+            payload = json.dumps({'hook_event_name': 'pre_tool', 'tool_name': tool,
+                                  'tool_input': {'command': command, 'timeout': 30}}).encode()
+            code, out, err = guard(payload, args=('--allow-clean', '--vibe'))
+            self.assertEqual((code, err), (0, b''))
+            result = json.loads(out)
+            self.assertNotIn('hookSpecificOutput', result)  # Vibe would read it as an allow
+            return result
+        self.assertEqual(vibe(shlex.join([NATIVE, 'run', '--', 'ls'])), {})
+        for command in (shlex.join([NATIVE, 'run', '--', 'rm', '-r', 'build']), shlex.join([NATIVE, 'prune', '--apply'])):
+            result = vibe(command)
+            self.assertEqual(result['decision'], 'deny', command)
+            self.assertTrue(result['reason'])
+        self.assertIn('ask the user', vibe(shlex.join([NATIVE, 'prune', '--apply']))['reason'])
+        # Every tool the hook matcher sends is a shell tool, whatever its qualified name.
+        self.assertEqual(vibe('git push --force', tool='file_system.process_start')['decision'], 'deny')
+        code, out, _ = guard(b'{', args=('--vibe',))
+        self.assertEqual(json.loads(out)['decision'], 'deny')
+
     def test_allow_clean_grants_only_policy_clean_wrapper_calls(self):
         def decision(command, tool='Bash'):
             payload = json.dumps({'tool_name': tool, 'tool_input': {'command': command}}).encode()

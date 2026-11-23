@@ -117,6 +117,7 @@ fn replay_session(path: &std::path::Path, threshold: u64) -> Result<Option<Value
         if row["subtype"].as_str().is_some_and(|s| s.contains("compact")) {
             compaction_at.push(index);
         }
+        if row["isVirtual"] == true { continue; } // Code Mode nested call: never a request, never in context.
         let mut message_id = None;
         if row["type"] == "assistant" && row["message"]["usage"].is_object() {
             let usage = &row["message"]["usage"];

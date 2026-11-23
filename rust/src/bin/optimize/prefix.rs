@@ -118,7 +118,7 @@ fn session(path: &Path) -> Result<Option<(String, u64, u64, u64)>, String> {
         if cwd.is_none() {
             cwd = row["cwd"].as_str().map(str::to_string);
         }
-        if row["type"] != "assistant" || row["isSidechain"] == true {
+        if row["type"] != "assistant" || row["isSidechain"] == true || row["isVirtual"] == true {
             continue;
         }
         let usage = &row["message"]["usage"];
