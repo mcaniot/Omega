@@ -64,6 +64,16 @@ class ContextBudgetTest(unittest.TestCase):
         self.set_tokens(160_000)
         self.assertEqual(self.run_hook('UserPromptSubmit')['hookSpecificOutput']['hookEventName'], 'UserPromptSubmit')
 
+    def test_code_mode_virtual_records_do_not_rearm(self):
+        # Code Mode writes a zero-usage virtual assistant record per nested call after the real one.
+        self.set_tokens(155_000)
+        self.assertIn('hookSpecificOutput', self.run_hook('PostToolUse'))
+        with self.transcript.open('a') as handle:
+            handle.write(json.dumps({'type': 'assistant', 'isVirtual': True, 'message': {'usage': {
+                'input_tokens': 0, 'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 0}}}) + '\n')
+        self.assertEqual(self.run_hook('PostToolUse'), {})
+        self.assertEqual(self.run_hook('UserPromptSubmit'), {})
+
     def test_reset_events_rearm_soft(self):
         self.set_tokens(155_000)
         self.run_hook('PostToolUse')

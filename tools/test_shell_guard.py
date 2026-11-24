@@ -219,6 +219,15 @@ class GuardTest(unittest.TestCase):
                 with self.subTest(inner=inner):
                     self.assertEqual(self.decision(*inner), expected)
 
+    def test_secret_exposure_needs_command_position(self):
+        # Recorded false positives: an rg alternation, a Python call, a subcommand, RST markup.
+        for text in ['rg -n "place\\(env|x" src', 'x = defaultdict(set)', 'uv run datagen env',
+                     'env.step(act(env))', 'see ``env`` here', 'on every set)']:
+            self.assertNotIn('permissionDecision', json.dumps(self.call(shlex.join([NATIVE, 'run', '--shell', text]))), text)
+        for text in ['env', 'ls; env | grep KEY', 'echo $(printenv)', '(set)', 'a && set', 'x=`env`']:
+            self.assertEqual(self.call(shlex.join([NATIVE, 'run', '--shell', text]))['hookSpecificOutput']['permissionDecision'],
+                             'ask', text)
+
     def test_policy_inside_shell_scripts(self):
         self.assertEqual(self.decision(shell='cd repo && git push origin HEAD'), 'ask')
         self.assertEqual(self.decision(shell='ls; sudo reboot'), 'deny')
@@ -416,8 +425,8 @@ class GuardTest(unittest.TestCase):
             Path(home, 'bin/Ω-run').symlink_to(native)
             Path(home, 'bin/Ω-inspect').symlink_to(native)
 
-            def output(command, args=('--allow-clean',), tool='Bash', **extra):
-                payload = json.dumps({'tool_name': tool, 'tool_input': {'command': command, **extra}}).encode()
+            def output(command, args=('--allow-clean',), tool='Bash', top=(), **extra):
+                payload = json.dumps({'tool_name': tool, 'tool_input': {'command': command, **extra}, **dict(top)}).encode()
                 done = subprocess.run([BINARY, *args], input=payload, capture_output=True, timeout=30,
                                       env={'PATH': f'{home}/bin:/usr/bin:/bin', 'HOME': home})
                 self.assertEqual((done.returncode, done.stderr), (0, b''))
@@ -455,8 +464,10 @@ class GuardTest(unittest.TestCase):
                             'cat <<-EOF\n\tdon\'t\n\tEOF'):
                 self.assertEqual(output(heredoc)['updatedInput'], {'command': shlex.join(['Ω-run', '--shell', heredoc])},
                                  heredoc)
-            for command in ("python3 - <<'EOF'\nimport os\nos.system('git push --force')\nit's\nEOF",  # policy reads the body
-                            "python3 - <<'EOF'\nit's\n",  # unterminated body
+            # The policy reads the body: a push is asked for, wrapped.
+            pushed = "python3 - <<'EOF'\nimport os\nos.system('git push --force')\nit's\nEOF"
+            self.assertEqual(output(pushed)['permissionDecision'], 'ask')
+            for command in ("python3 - <<'EOF'\nit's\n",  # unterminated body
                             "echo it's <<'EOF'\nx\nEOF",  # unbalanced quote outside the body
                             "'Ω-run' --shell 'git push --force origin 'main''",  # literal script, policy still applies
                             "'Ω-run' --shell 'echo a' && 'Ω-run' --shell-keep-going 'x'"):
@@ -527,19 +538,35 @@ class GuardTest(unittest.TestCase):
                                  {'command': shlex.join(['Ω-run', *options, '--shell', script])}, command)
             for command in ("'Ω-run' -- python3 - <<'EOF'\nx\nEOF\nrm -r y",  # runs after the body
                             "'Ω-run' -- python3 - <<'EOF'\nx\nEOF\nls\nEOF",  # second command after the body
-                            "'Ω-run' -- python3 - <<'EOF' | head\nx\nEOF",
-                            "'Ω-run' -- python3 - <<'EOF'\nimport os; os.system('git push --force')\nEOF"):
+                            "'Ω-run' -- python3 - <<'EOF' | head\nx\nEOF"):
                 self.assertNotIn('updatedInput', output(command), command)
+            pushed = "'Ω-run' -- python3 - <<'EOF'\nimport os; os.system('git push --force')\nEOF"
+            self.assertEqual(output(pushed)['permissionDecision'], 'ask')  # fixed form, asked for
             for command in ("'Ω-run' -- ls; cd /tmp; 'Ω-run' -- ls",  # cd would not reach the next call
                             "'Ω-run' --shell 'ls' & 'Ω-run' -- ls",  # background job
                             "'Ω-run' --shell 'ls' | rm -r x",  # policy reads the moved filter
                             "'Ω-run' -- ls; git push --force"):
                 self.assertNotIn('updatedInput', output(command), command)
-            for command in ('git push', 'rm -r build', 'ros2 topic pub /cmd x', 'echo "unterminated',
+            for command in ('rm -r build', 'echo "unterminated',
                             'Ω-run --shell "echo $HOME"', 'omega-run -- "ls"', 'echo ' + 'a' * 17000):
                 denied = output(command)
                 self.assertEqual(denied['permissionDecision'], 'deny', command)
                 self.assertNotIn('updatedInput', denied, command)
+            # Recorded: 76 plain commands that only needed approval (git commit, ssh) denied as unwrapped
+            # in 5 days, each resent wrapped by hand: now wrapped and asked for, naming the policy.
+            for command in ('git commit -q -m x', "cd /tmp && git stash", 'ssh host hostname'):
+                asked = output(command)
+                self.assertEqual(asked['permissionDecision'], 'ask', command)
+                self.assertIn('Agent policy requires explicit user approval', asked['permissionDecisionReason'])
+                self.assertEqual(asked['updatedInput'], {'command': shlex.join(['Ω-run', '--shell', command])})
+            # Code Mode code receives the output itself: run as written, policies still apply.
+            nested = {'tool_use_id': 'repl_1'}
+            self.assertEqual(output('ls -la | head', top=nested)['permissionDecision'], 'allow')
+            self.assertNotIn('updatedInput', output('ls -la | head', top=nested))
+            self.assertEqual(output('git push', top=nested)['permissionDecision'], 'ask')
+            self.assertEqual(output('rm -rf x', top=nested)['permissionDecision'], 'deny')
+            self.assertEqual(output("'Ω-run' -- ls | head", top=nested)['updatedInput'],
+                             {'command': "'Ω-run' --shell 'ls | head'"})  # a wrapper call is checked as usual
             self.assertEqual(output('ls', args=())['permissionDecision'], 'deny')  # Codex: no rewrite
             self.assertEqual(output('ls', tool='exec_command')['permissionDecision'], 'deny')
 

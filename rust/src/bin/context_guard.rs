@@ -149,7 +149,9 @@ fn evaluate(payload: &Value) -> Value {
         invalidate(payload);
         return cpp_hint(payload).unwrap_or_else(|| json!({}));
     }
-    if payload["tool_name"].as_str() != Some("Read") {
+    // Code Mode code (`tool_use_id` "repl_…") receives the lines, not the context: bounding them only
+    // truncated the script's data (`file().text()`, `edit()` past line 200) and refused evidence logs.
+    if payload["tool_name"].as_str() != Some("Read") || payload["tool_use_id"].as_str().is_some_and(|id| id.starts_with("repl_")) {
         return json!({});
     }
     let input = &payload["tool_input"];

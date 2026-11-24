@@ -39,6 +39,18 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
 
 ### Fixed
 
+- `shell_guard`: a plain command that only needs approval (`git commit`, `git stash`, `ssh`) is
+  wrapped and asked for, naming its policy, instead of denied as unwrapped with no reason. Audit of
+  115 sessions (2026-11-19 to 24): 76 of 104 unwrapped denials were such commands, each resent by
+  hand. Vibe still denies, now with the policy's reason.
+- `shell_guard`: "possible secret exposure" asks only for `env`, `printenv` or `set` in command
+  position; an rg alternation `(env|…`, `defaultdict(set)`, `datagen env` or RST ``env`` no
+  longer asks.
+- Claude Code Code Mode (2.1.331): nested calls are no longer bounded. A Read runs as written
+  (`file().text()` and `edit()` failed past line 200, an evidence log was refused to a script),
+  and `shell_guard` applies its policies to a nested shell command without wrapping it (`.text()`
+  returned `Ω-run`'s JSON summary). `context_budget` ignores the zero-usage virtual records of
+  nested calls, which re-armed the 150k reminder on every turn.
 - Claude Code Code Mode (experimental, measured on 2.1.330). `context_guard` no longer records a
   Read made by Code Mode code as "in context" nor refuses it as a re-read: the script, not the
   model, receives those lines (a later Read was refused although the model had never seen them).

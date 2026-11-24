@@ -38,10 +38,13 @@ What each omega hook does, when it runs and what happens if it fails.
 - **C/C++**: the first C/C++ edit of a session gets a one-time pointer to the `cpp-quality` skill.
 - **Code Mode** (experimental, measured on Claude Code 2.1.330): hooks run on each call made by
   the code, under the tool's usual name with a `tool_use_id` starting with `repl_`; rewrites and
-  hook messages apply. Such a Read is still bounded, but is neither recorded nor refused as a
-  re-read: its lines go to the script, not to the context. `shell_guard` wraps nested shell
-  commands as usual, so a script receives `Ω-run`'s bounded result (with the `evidence` path) for
-  a large output. The `REPL` result itself is capped by Claude Code at about 30000 characters.
+  hook messages apply. Their output goes to the script, not to the context, so such a Read runs as
+  written (no bound, no evidence refusal, neither recorded nor refused as a re-read) and
+  `shell_guard` applies its deny and ask policies to a nested shell command but does not wrap it: the
+  script receives the real output, not `Ω-run`'s bounded summary. A wrapper call written by the
+  code is checked as usual. The `REPL` result itself is capped by Claude Code at about 30000
+  characters. `context_budget` skips the zero-usage virtual records these calls leave in the
+  transcript.
 
 ## `context_budget`
 

@@ -216,10 +216,16 @@ class ReadLedgerTest(unittest.TestCase):
         self.assertEqual(self.read(agent_id='a1'), {})
         self.assertEqual(self.read(session_id='other'), {})
 
-    def test_code_mode_nested_read_is_bounded_but_neither_recorded_nor_refused(self):
+    def test_code_mode_nested_read_runs_as_written_and_is_neither_recorded_nor_refused(self):
         nested = {'tool_use_id': 'repl_ec1d9892-9b2e-4264-a7d3-22cfeb208806'}
-        self.assertEqual(self.seen(**nested)['hookSpecificOutput']['updatedInput']['limit'], 200)
+        # Recorded: bounding truncated the script's data (`file().text()`, `edit()` past line 200).
+        self.assertEqual(self.seen(**nested), {})
         self.assertFalse(self.ledger.exists())  # the script, not the context, received these lines
+        evidence = self.home / '.agents/tasks/evidence/run/stdout.log'
+        evidence.parent.mkdir(parents=True)
+        evidence.write_text('x\n' * 9000)
+        result = self.run_hook(tool_name='Read', tool_input={'file_path': str(evidence)}, **nested)
+        self.assertEqual(result, {})  # a script may parse the full log
         self.assertEqual(self.read(1, 200, tool_use_id='toolu_01'), {})
         self.seen(1, 200, tool_use_id='toolu_01')
         self.assertEqual(self.read(1, 200, **nested), {})  # a script may re-read what the context holds

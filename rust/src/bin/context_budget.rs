@@ -66,7 +66,9 @@ fn newest_usage(transcript: &Path) -> Option<u64> {
             continue;
         }
         let Ok(entry) = serde_json::from_slice::<Value>(line) else { continue };
-        if entry["type"] != "assistant" || entry["isSidechain"] == true {
+        // Code Mode writes a virtual record, with zero usage, per call its code makes: it would read as
+        // a shrunk context and re-arm the reminder on every turn (recorded: 7 reminders in one session).
+        if entry["type"] != "assistant" || entry["isSidechain"] == true || entry["isVirtual"] == true {
             continue;
         }
         let usage = &entry["message"]["usage"];

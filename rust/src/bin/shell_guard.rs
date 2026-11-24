@@ -69,7 +69,9 @@ fn ask_patterns() -> Vec<String> {
             r"\bcurl\s+{ARGS}(?:-T|--upload-file|-d|--data[\w-]*|-F|--form|-X\s*(?:POST|PUT|PATCH|DELETE))\b|\bwget\s+{ARGS}--post"
         ),
         r"\bros2\s+(?:topic\s+pub|service\s+call|action\s+send_goal|param\s+set|lifecycle\s+set|launch|run|bag\s+play)\b|\bz_(?:put|pub|delete|queryable)\b".to_string(),
-        r#"(?:^|[\s;&|(`])(?:env|printenv|set)\s*(?:$|[;&|)`])|\bprintenv\b|\bexport\s+-p\b|(?:^|[\s/'"=])(?:\.env(?:\.\w+)?|auth\.json|[\w.-]*\.key|id_(?:rsa|ed25519))\b"#.to_string(),
+        // `env`, `printenv` or `set` alone in command position (line start, after `;`, `&`, `|`, `--`, a
+        // subshell `(` or a command substitution); not an argument (`datagen env`), a call (`f(env)`) or RST ``env``.
+        r#"(?:^|[;&|]|\s--\s|(?:^|[^`])`|\$\(|(?:^|[\s;&|(])\()\s*(?:env|printenv|set)\s*(?:$|[;&|)`])|\bprintenv\b|\bexport\s+-p\b|(?:^|[\s/'"=])(?:\.env(?:\.\w+)?|auth\.json|[\w.-]*\.key|id_(?:rsa|ed25519))\b"#.to_string(),
         // Nested `Ω-prune --apply` / `NATIVE prune --apply` (any `--a…` prefix); also matches a
         // hypothetical `git prune --apply`, which does not exist.
         format!(r#"\bprune['"]?\s+{ARGS}--a(?:p(?:p(?:ly?)?)?)?(?:[\s='"]|$)"#),
@@ -786,7 +788,13 @@ impl Guard {
         // Unparsed quoting (empty argv) is never run on the model's behalf, except a wrapper script
         // whose outer quotes are unambiguous.
         if !argv.is_empty() || literal.is_some() {
-            decision.rewrite = rewrite.filter(|h| h.len() <= MAX_AUTO_WRAP_BYTES);
+            // A plain command that only needs approval is wrapped too: `auto_wrap` asks for it as
+            // wrapped instead of denying it (recorded: 76 such denials in 5 days, each resent by hand).
+            let ask = || {
+                (!wrapper && retired.is_none() && policy(command).is_some_and(|d| d.kind == "ask"))
+                    .then(|| shlex_join(&["\u{3a9}-run".to_string(), "--shell".to_string(), command.to_string()]))
+            };
+            decision.rewrite = rewrite.or_else(ask).filter(|h| h.len() <= MAX_AUTO_WRAP_BYTES);
         }
         Some(decision)
     }
@@ -830,28 +838,32 @@ impl Guard {
     }
 
     /// Claude and Vibe: run the wrapped form of an unwrapped command instead of denying it, when that
-    /// exact form would be allowed had the model written it. Saves one full-context round trip.
+    /// exact form would be allowed had the model written it, or ask for it when that form would be
+    /// asked for (Vibe turns the ask into a deny naming the policy). Saves one full-context round trip.
     fn auto_wrap(&self, decision: Option<Decision>, raw: &[u8]) -> Option<Decision> {
         let wrapped = decision.as_ref().and_then(|d| d.rewrite.clone()).filter(|_| self.allow_clean);
+        let mut verdict = None;
         let updated = wrapped.and_then(|wrapped| {
             let mut payload = serde_json::from_slice::<serde_json::Value>(raw).ok()?;
             if (!self.vibe && payload["tool_name"] != "Bash") || !payload["tool_input"]["command"].is_string() {
                 return None;
             }
-            if !self.check(&wrapped).is_some_and(|d| d.kind == "allow") {
-                return None;
-            }
+            verdict = self.check(&wrapped).filter(|d| matches!(d.kind, "allow" | "ask"));
+            verdict.as_ref()?;
             payload["tool_input"]["command"] = serde_json::Value::String(wrapped);
             Some(payload["tool_input"].to_string())
         });
-        match updated {
-            Some(updated) => {
-                let mut allow =
-                    Decision::new("allow", "Omega guard: unwrapped command auto-wrapped; it matched no deny or ask policy.".to_string());
-                allow.updated = Some(updated);
-                Some(allow)
+        match (updated, verdict) {
+            (Some(updated), Some(verdict)) => {
+                let reason = match verdict.kind {
+                    "ask" => format!("{} Omega guard wrapped it in \u{3a9}-run --shell.", verdict.reason),
+                    _ => "Omega guard: unwrapped command auto-wrapped; it matched no deny or ask policy.".to_string(),
+                };
+                let mut wrapped = Decision::new(verdict.kind, reason);
+                wrapped.updated = Some(updated);
+                Some(wrapped)
             }
-            None => decision,
+            _ => decision,
         }
     }
 
@@ -1327,10 +1339,25 @@ impl Guard {
             Some(input @ Json::Object(_)) => input.get("command").or_else(|| input.get("cmd")),
             _ => None,
         };
+        let code_mode = matches!(payload.get("tool_use_id"), Some(Json::Str(id)) if id.starts_with("repl_"));
         match command {
-            Some(Json::Str(command)) if !command.trim_matches(py_isspace).is_empty() => self.check(command),
+            Some(Json::Str(command)) if !command.trim_matches(py_isspace).is_empty() => {
+                if code_mode && !self.vibe { self.code_mode(command) } else { self.check(command) }
+            }
             _ => self.denied("Missing shell command."),
         }
+    }
+
+    /// A shell command made by Claude Code Code Mode code (`tool_use_id` "repl_…"): its output goes
+    /// to the script, which decides what reaches the context, so wrapping it would only hand the
+    /// script a bounded summary instead of the data (recorded: scripts parsing that JSON, then
+    /// refused when reading the evidence log). Policies still apply; a wrapper call is checked as usual.
+    fn code_mode(&self, command: &str) -> Option<Decision> {
+        let head = command.trim_matches(py_isspace).split(py_isspace).next().unwrap_or_default().trim_matches(['\'', '"']);
+        if OMEGA_CLI.contains(&head) || head.contains('\u{3a9}') || head.starts_with("omega") || head.contains("/.agents/tools/") {
+            return self.check(command);
+        }
+        policy(command).or_else(|| self.clean())
     }
 
     /// The decision for one shell command string.
