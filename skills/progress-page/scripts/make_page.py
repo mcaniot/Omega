@@ -8,7 +8,7 @@ Usage:
   make_page.py --find TASK                print the registered state of a task (after /clear or handoff)
   make_page.py STATE.json --forget        remove the page from the hub
   make_page.py --all                      re-render every registered page and the hub
-  make_page.py --serve [HOST:]PORT        (or omega-progress [HOST:]PORT) read-only HTTP view of the hub and pages (default 127.0.0.1:8765;
+  make_page.py --serve [HOST:]PORT        (or omega-progress [HOST:]PORT) read-only HTTP view of the hub and pages (default 127.0.0.1:27615;
                                           URL printed with a random token, or $PROGRESS_TOKEN)
   make_page.py --answered < HOOK.json     UserPromptSubmit hook: clear the questions of that session
   make_page.py --activity < HOOK.json     session hook: log the event for the hub (kept 7 days)
@@ -1305,7 +1305,7 @@ def main():
     served = os.path.basename(sys.argv[0]) == 'omega-progress'
     if served or sys.argv[1:2] == ['--serve']:
         cli = argparse.ArgumentParser(prog='omega-progress', description='read-only HTTP view of the progress pages')
-        cli.add_argument('address', nargs='?', default='127.0.0.1:8765', metavar='[HOST:]PORT')
+        cli.add_argument('address', nargs='?', default='127.0.0.1:27615', metavar='[HOST:]PORT')
         cli.add_argument('--name', help='name published on the local network (mDNS, avahi): http://NAME.local:PORT; '
                                         'default omega when HOST is not loopback')
         cli.add_argument('--open', action='store_true', help='no token in the URL (anyone reaching the port reads the pages)')

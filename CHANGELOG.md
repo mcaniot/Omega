@@ -106,6 +106,11 @@ release is the annotated Git tag `vX.Y.Z` (see [Release](docs/development.md#rel
   stopped agents driven by another session and cost a round trip for a 13–15 % saving that
   `/clear` and Claude Code's `idleCompaction` already give on demand.
 
+### Changed
+
+- `omega-progress` serves on port 27615 instead of 8765 (default and `omega-progress.service`):
+  8765 is Foxglove's port, published by the mirokai-sim telemetry container.
+
 ## [1.1.0] - 2026-11-18
 
 ### Added
